@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace DeepCore.FreeMovement
@@ -63,21 +64,25 @@ namespace DeepCore.FreeMovement
         }
 
         public bool IsUndamageableBorder =>
-            Material == TerrainMaterial.Bedrock && MaxDurability >= 24;
+            Material == TerrainMaterial.Bedrock && MaxDurability >= 254;
     }
 
     public sealed class FineTerrainWorld
     {
         public const int SocketCount = 4;
-        /// <summary>Rock / gold socket hit points. Bedrock sockets are much harder.</summary>
-        public const int RockSocketHardness = 1;
-        public const int BedrockSocketHardness = 5;
+        /// <summary>Rock / gold socket hit points. Bedrock is much harder.</summary>
+        public const int RockSocketHardness = 3;
+        public const int BedrockSocketHardness = 50;
 
         public int Width { get; }
         public int Height { get; }
         public float CellSize { get; }
 
         readonly TerrainCell[] _cells;
+        bool[] _gas;
+        bool[] _gasRevealed;
+        /// <summary>Gas cells that may show floor / FX (grows from breach mouth as you enter).</summary>
+        bool[] _gasSeen;
         public event Action Changed;
         /// <summary>Inclusive dirty cell rect after a change batch.</summary>
         public event Action<int, int, int, int> RegionChanged;
@@ -93,6 +98,9 @@ namespace DeepCore.FreeMovement
             Height = height;
             CellSize = cellSize;
             _cells = new TerrainCell[width * height];
+            _gas = new bool[width * height];
+            _gasRevealed = new bool[width * height];
+            _gasSeen = new bool[width * height];
             for (int i = 0; i < _cells.Length; i++)
                 _cells[i] = MakeRock();
         }
@@ -102,7 +110,7 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Build a cell from exactly 4 sockets (any mix of rock / bedrock / gold).
-                /// Hardness = rock&amp;gold×1 + bedrock×5. Mass follows the same mix.
+        /// Hardness = rock&amp;gold×1 + bedrock×50. Full bedrock ≈ 200 digs.
         /// </summary>
         public static TerrainCell FromSockets(SocketKind s0, SocketKind s1, SocketKind s2, SocketKind s3)
         {
@@ -133,8 +141,8 @@ namespace DeepCore.FreeMovement
                 }
             }
 
-            // Full bedrock cell ≈ 20 hits; rock ≈ 4. Cap leaves border undamageable (>28).
-            hardness = Mathf.Clamp(hardness, 1, 28);
+            // Border cells use 255; diggable bedrock tops out ~200
+            hardness = Mathf.Clamp(hardness, 1, 250);
             mass = Mathf.Clamp(mass, 1, 16);
 
             return new TerrainCell
@@ -195,8 +203,8 @@ namespace DeepCore.FreeMovement
         {
             var c = FromSockets(SocketKind.Bedrock, SocketKind.Bedrock, SocketKind.Bedrock, SocketKind.Bedrock);
             c.Material = TerrainMaterial.Bedrock;
-            c.Durability = 32;
-            c.MaxDurability = 32;
+            c.Durability = 255;
+            c.MaxDurability = 255;
             c.Mass = 12;
             return c;
         }
@@ -256,6 +264,7 @@ namespace DeepCore.FreeMovement
         void Notify(int x, int y)
         {
             MarkDirtyCell(x, y);
+            TryRevealGasNear(x, y);
             if (_batch > 0) { _dirty = true; return; }
             FlushRegion();
             Changed?.Invoke();
@@ -273,10 +282,43 @@ namespace DeepCore.FreeMovement
             Notify(x, y);
         }
 
+        /// <summary>
+        /// Walkable tunnel after dig / breach. Sealed gas stays closed until revealed.
+        /// Lit floor / gas FX use <see cref="IsFloorOpen"/> so unseen void stays dark.
+        /// </summary>
+        public bool IsTunnelOpen(int x, int y)
+        {
+            if (!InBounds(x, y)) return false;
+            if (_cells[y * Width + x].Phase != TerrainPhase.Excavated) return false;
+            int i = y * Width + x;
+            if (_gas != null && _gas[i] && (_gasRevealed == null || !_gasRevealed[i]))
+                return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Floor + lantern-lit cavity. Unseen gas (past the breach mouth) stays dark
+        /// until a worker steps near it — stops lights/FX previewing the pocket through rock.
+        /// </summary>
+        public bool IsFloorOpen(int x, int y)
+        {
+            if (!IsTunnelOpen(x, y)) return false;
+            if (IsGas(x, y) && (_gasSeen == null || !_gasSeen[y * Width + x]))
+                return false;
+            return true;
+        }
+
+        /// <summary>Blocks Light2D when shadows are on — includes walkable-but-unseen gas.</summary>
+        public bool IsLightOccluder(int x, int y)
+        {
+            if (!InBounds(x, y)) return true;
+            return !IsFloorOpen(x, y);
+        }
+
         public bool IsSolid(int x, int y)
         {
             if (!InBounds(x, y)) return true;
-            return _cells[y * Width + x].Phase != TerrainPhase.Excavated;
+            return !IsTunnelOpen(x, y);
         }
 
         public bool IsExcavated(int x, int y) =>
@@ -332,12 +374,249 @@ namespace DeepCore.FreeMovement
             if (c.Phase == TerrainPhase.Excavated) return false;
             if (c.IsUndamageableBorder) return false;
 
-            if (c.Durability > 0) c.Durability--;
+            int hits = 1;
+            // Prospected rock: excavator digs harder while study bonus lasts
+            if (_studySoft != null)
+            {
+                int i = y * Width + x;
+                if (_studySoft.TryGetValue(i, out byte bonus) && bonus > 0)
+                {
+                    hits = 2;
+                    bonus--;
+                    if (bonus == 0) _studySoft.Remove(i);
+                    else _studySoft[i] = bonus;
+                }
+            }
+
+            for (int h = 0; h < hits && c.Durability > 0; h++)
+                c.Durability--;
             c.DamageState = (byte)(c.MaxDurability - c.Durability);
             c.Phase = c.Durability == 0 ? TerrainPhase.Excavated : TerrainPhase.Damaged;
             Notify(x, y);
             return c.Phase == TerrainPhase.Excavated;
         }
+
+        Dictionary<int, byte> _studySoft;
+
+        /// <summary>Mark rock as studied — next digs deal extra damage (uncertain geology).</summary>
+        public void MarkRockStudy(int x, int y, byte digBonus = 3)
+        {
+            if (!InBounds(x, y)) return;
+            var c = Get(x, y);
+            if (c.Phase == TerrainPhase.Excavated || c.IsUndamageableBorder) return;
+            if (_studySoft == null) _studySoft = new Dictionary<int, byte>(64);
+            int i = y * Width + x;
+            int next = digBonus;
+            if (_studySoft.TryGetValue(i, out byte cur)) next = Mathf.Min(8, cur + digBonus);
+            _studySoft[i] = (byte)next;
+        }
+
+        public bool IsRockStudied(int x, int y) =>
+            _studySoft != null && InBounds(x, y) && _studySoft.ContainsKey(y * Width + x);
+
+        public bool IsGas(int x, int y) =>
+            InBounds(x, y) && _gas != null && _gas[y * Width + x];
+
+        public bool IsGasRevealed(int x, int y) =>
+            IsGas(x, y) && _gasRevealed != null && _gasRevealed[y * Width + x];
+
+        public bool IsGasSeen(int x, int y) =>
+            IsGas(x, y) && _gasSeen != null && _gasSeen[y * Width + x];
+
+        public void MarkGas(int x, int y, bool on = true)
+        {
+            if (!InBounds(x, y) || _gas == null) return;
+            _gas[y * Width + x] = on;
+            if (!on)
+            {
+                if (_gasRevealed != null) _gasRevealed[y * Width + x] = false;
+                if (_gasSeen != null) _gasSeen[y * Width + x] = false;
+            }
+        }
+
+        public void ClearGas()
+        {
+            if (_gas != null) Array.Clear(_gas, 0, _gas.Length);
+            if (_gasRevealed != null) Array.Clear(_gasRevealed, 0, _gasRevealed.Length);
+            if (_gasSeen != null) Array.Clear(_gasSeen, 0, _gasSeen.Length);
+        }
+
+        /// <summary>True when a gas cell touches non-gas open tunnel (pocket opened).</summary>
+        public bool IsGasBreached(int x, int y)
+        {
+            if (!IsGas(x, y) || !IsExcavated(x, y)) return false;
+            int[] ox = { 1, -1, 0, 0 };
+            int[] oy = { 0, 0, 1, -1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = x + ox[i], ny = y + oy[i];
+                if (!InBounds(nx, ny)) continue;
+                if (IsGas(nx, ny)) continue;
+                // Real dig tunnel — not another sealed void
+                if (IsExcavated(nx, ny)) return true;
+            }
+            return false;
+        }
+
+        void TryRevealGasNear(int x, int y)
+        {
+            if (_gas == null || _gasRevealed == null) return;
+            for (int oy = -1; oy <= 1; oy++)
+            for (int ox = -1; ox <= 1; ox++)
+            {
+                int nx = x + ox, ny = y + oy;
+                if (!IsGas(nx, ny) || IsGasRevealed(nx, ny)) continue;
+                if (IsGasBreached(nx, ny))
+                    RevealGasPocket(nx, ny);
+            }
+            // Fresh dig next to an already-breached pocket — expose the mouth
+            SeedGasSeenNear(x, y);
+        }
+
+        public void RevealGasPocket(int sx, int sy)
+        {
+            if (!IsGas(sx, sy) || _gasRevealed == null) return;
+            var q = new Queue<int>();
+            int start = sy * Width + sx;
+            if (_gasRevealed[start]) return;
+            q.Enqueue(start);
+            _gasRevealed[start] = true;
+            while (q.Count > 0)
+            {
+                int cur = q.Dequeue();
+                int cx = cur % Width, cy = cur / Width;
+                MarkDirtyCell(cx, cy);
+                for (int i = 0; i < 4; i++)
+                {
+                    int nx = cx + (i == 0 ? 1 : i == 1 ? -1 : 0);
+                    int ny = cy + (i == 2 ? 1 : i == 3 ? -1 : 0);
+                    if (!IsGas(nx, ny)) continue;
+                    int ni = ny * Width + nx;
+                    if (_gasRevealed[ni]) continue;
+                    _gasRevealed[ni] = true;
+                    q.Enqueue(ni);
+                }
+            }
+
+            // Only the breach mouth is lit/FX'd — rest of the void stays black until entered
+            SeedGasSeenMouth();
+            _dirty = true;
+        }
+
+        void SeedGasSeenMouth()
+        {
+            if (_gas == null || _gasRevealed == null || _gasSeen == null) return;
+            for (int y = 1; y < Height - 1; y++)
+            for (int x = 1; x < Width - 1; x++)
+            {
+                int i = y * Width + x;
+                if (!_gas[i] || !_gasRevealed[i] || _gasSeen[i]) continue;
+                if (TouchesNonGasTunnel(x, y))
+                    MarkGasSeen(x, y);
+            }
+        }
+
+        void SeedGasSeenNear(int x, int y)
+        {
+            for (int oy = -1; oy <= 1; oy++)
+            for (int ox = -1; ox <= 1; ox++)
+            {
+                int nx = x + ox, ny = y + oy;
+                if (!IsGasRevealed(nx, ny) || IsGasSeen(nx, ny)) continue;
+                if (TouchesNonGasTunnel(nx, ny))
+                    MarkGasSeen(nx, ny);
+            }
+        }
+
+        bool TouchesNonGasTunnel(int x, int y)
+        {
+            int[] ox = { 1, -1, 0, 0 };
+            int[] oy = { 0, 0, 1, -1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = x + ox[i], ny = y + oy[i];
+                if (!InBounds(nx, ny)) continue;
+                if (IsGas(nx, ny)) continue;
+                if (IsExcavated(nx, ny)) return true;
+            }
+            return false;
+        }
+
+        void MarkGasSeen(int x, int y)
+        {
+            if (!IsGasRevealed(x, y) || _gasSeen == null) return;
+            int i = y * Width + x;
+            if (_gasSeen[i]) return;
+            _gasSeen[i] = true;
+            MarkDirtyCell(x, y);
+            _dirty = true;
+        }
+
+        /// <summary>
+        /// Expand visible gas around a worker/lamp — call while moving through a breached pocket.
+        /// Unseen void stays black until you actually enter it.
+        /// </summary>
+        public void DiscoverGasAround(Vector2 worldPos, float radiusCells = 1.85f)
+        {
+            if (_gasSeen == null || _gasRevealed == null) return;
+            var c = WorldToCell(worldPos);
+            if (IsGasRevealed(c.x, c.y))
+                MarkGasSeen(c.x, c.y);
+
+            float r2 = radiusCells * radiusCells;
+            int r = Mathf.CeilToInt(radiusCells);
+            bool any = false;
+            // Multi-pass so a step inward unlocks neighbors within the radius
+            for (int pass = 0; pass < 3; pass++)
+            {
+                bool passAny = false;
+                for (int oy = -r; oy <= r; oy++)
+                for (int ox = -r; ox <= r; ox++)
+                {
+                    if (ox * ox + oy * oy > r2) continue;
+                    int x = c.x + ox, y = c.y + oy;
+                    if (!IsGasRevealed(x, y) || IsGasSeen(x, y)) continue;
+                    if (!TouchesNonGasTunnel(x, y) && !TouchesSeenGas(x, y) && !TouchesFloorOpen(x, y))
+                        continue;
+                    MarkGasSeen(x, y);
+                    passAny = true;
+                    any = true;
+                }
+                if (!passAny) break;
+            }
+
+            if (any && _batch == 0)
+            {
+                FlushRegion();
+                Changed?.Invoke();
+            }
+        }
+
+        bool TouchesSeenGas(int x, int y)
+        {
+            int[] ox = { 1, -1, 0, 0 };
+            int[] oy = { 0, 0, 1, -1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = x + ox[i], ny = y + oy[i];
+                if (IsGasSeen(nx, ny)) return true;
+            }
+            return false;
+        }
+
+        bool TouchesFloorOpen(int x, int y)
+        {
+            int[] ox = { 1, -1, 0, 0 };
+            int[] oy = { 0, 0, 1, -1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = x + ox[i], ny = y + oy[i];
+                if (IsFloorOpen(nx, ny)) return true;
+            }
+            return false;
+        }
+
+        public void ClearRockStudy() => _studySoft?.Clear();
 
         public bool CircleHitsSolid(Vector2 center, float radius)
         {
@@ -366,8 +645,10 @@ namespace DeepCore.FreeMovement
             BeginBatch();
             for (int i = 0; i < _cells.Length; i++)
                 _cells[i] = MakeRock();
+            ClearGas();
             MarkAllDirty();
             _dirty = true;
+            ClearRockStudy();
             EndBatch();
         }
     }

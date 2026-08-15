@@ -170,9 +170,9 @@ namespace DeepCore.FreeMovement
             if (_world != null)
             {
                 var cell = _world.WorldToCell(next);
-                if (!_world.InBounds(cell.x, cell.y) || !_world.IsExcavated(cell.x, cell.y))
+                if (!_world.InBounds(cell.x, cell.y) || !_world.IsTunnelOpen(cell.x, cell.y))
                 {
-                    // Soft kill at the dig face / wall
+                    // Soft kill at the dig face / wall / sealed pocket
                     u = Mathf.Max(u, 0.75f);
                     _age = _life * u;
                     _drift *= 0.15f;

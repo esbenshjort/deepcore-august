@@ -6,6 +6,7 @@ namespace DeepCore.FreeMovement
 {
     public enum ScanDistance : byte { Short = 0, Medium = 1, Long = 2 }
     public enum ScanWidth : byte { Narrow = 0, Wide = 1 }
+    public enum ProspectorWorkMode : byte { Manual = 0, SurveyNearby = 1, AssistExcavator = 2 }
 
     /// <summary>
     /// Prospector with a soft quarter-circle radar (3 rows × 3 cols).
@@ -21,14 +22,17 @@ namespace DeepCore.FreeMovement
         {
             public float Dist01; // 0 near → 1 far (within selected range)
             public int X, Y;
-            public bool Gold;
+            public ScanHintKind Kind;
             public float Strength;
         }
 
         FineTerrainWorld _world;
         ScanViewOverlay _scanView;
+        FreeWorkerController _excavator;
+        ExcavatedPathfinder _nav;
         float _radius = 0.1f;
         float _moveSpeed = 1.55f;
+        float _autoMoveSpeed = 1.15f;
         Transform _facingRoot;
         Transform _coneRoot;
         readonly List<LineRenderer> _arcCore = new(3);
@@ -54,9 +58,21 @@ namespace DeepCore.FreeMovement
         float _scanRangeWorld;
         float _reliability;
 
+        // Auto work modes
+        float _workRetargetT;
+        float _workStudyT;
+        float _workBanterT;
+        float _stuckT;
+        Vector2 _workGoal;
+        Vector2 _lastPos;
+        bool _hasWorkGoal;
+        int _focusX = -1, _focusY = -1;
+        int _surveyRing;
+
         public ScanDistance Distance { get; private set; } = ScanDistance.Medium;
         public ScanWidth Width { get; private set; } = ScanWidth.Narrow;
-        public bool RadarOn { get; private set; } = true;
+        public ProspectorWorkMode WorkMode { get; private set; } = ProspectorWorkMode.Manual;
+        public bool RadarOn { get; private set; }
         public bool IsScanning => _scanning;
 
         public Vector2 Position => transform.localPosition;
@@ -69,8 +85,8 @@ namespace DeepCore.FreeMovement
             _ => 3,
         };
 
-        // Keep full Long grid on-screen (~3 world units)
-        public float MaxRangeCells => 30f;
+        // Long range — slow, deliberate geology read (keep in sync with map features)
+        public float MaxRangeCells => 52.5f;
         public float ScanRangeCells => MaxRangeCells * (ActiveRows / (float)RowCount);
 
         public static ProspectorPerson Spawn(Transform parent, FineTerrainWorld world,
@@ -106,12 +122,25 @@ namespace DeepCore.FreeMovement
             var p = go.AddComponent<ProspectorPerson>();
             p._world = world;
             p._scanView = scanView;
+            p._nav = new ExcavatedPathfinder(world);
             p._facingRoot = facing.transform;
             p._coneRoot = cone.transform;
             p._lamp = light;
             p.BuildConeLines();
             p.RebuildConeMesh();
             return p;
+        }
+
+        public void BindExcavator(FreeWorkerController excavator) => _excavator = excavator;
+
+        public void SetWorkMode(ProspectorWorkMode mode)
+        {
+            WorkMode = mode;
+            _hasWorkGoal = false;
+            _focusX = _focusY = -1;
+            _workRetargetT = 0f;
+            _workStudyT = 0f;
+            _nav?.Invalidate();
         }
 
         public void ResetTo(Vector2 pos)
@@ -121,6 +150,9 @@ namespace DeepCore.FreeMovement
             _scanCooldown = 0f;
             _scanning = false;
             _pending.Clear();
+            _hasWorkGoal = false;
+            _focusX = _focusY = -1;
+            _nav?.Invalidate();
             if (_sweepCore != null) _sweepCore.gameObject.SetActive(false);
             if (_sweepGlow != null) _sweepGlow.gameObject.SetActive(false);
             if (_sweepFillMr != null) _sweepFillMr.enabled = false;
@@ -161,17 +193,26 @@ namespace DeepCore.FreeMovement
                 _coneRoot.gameObject.SetActive(_hudVisible && RadarOn);
         }
 
+        public event System.Action ScanStarted;
+        public event System.Action GoldHintFound;
+        public event System.Action BedrockHintFound;
+        public event System.Action GasHintFound;
+        public event System.Action SurveyWhisper;
+        public event System.Action AssistNote;
+
         public void Tick(Vector2 wasd, bool scanPulse)
         {
             if (_world == null) return;
             if (_scanCooldown > 0f) _scanCooldown -= Time.deltaTime;
             _pulse += Time.deltaTime;
 
-            if (!_scanning && wasd.sqrMagnitude > 0.01f)
+            bool playerDriving = !_scanning && wasd.sqrMagnitude > 0.01f;
+            if (playerDriving)
             {
                 Vector2 dir = wasd.normalized;
                 Face(dir);
-                Step(dir);
+                Step(dir, _moveSpeed);
+                _nav?.Invalidate();
             }
 
             if (_hudVisible && RadarOn)
@@ -179,12 +220,421 @@ namespace DeepCore.FreeMovement
 
             if (_scanning)
                 TickScanSweep();
-            else if (scanPulse && _scanCooldown <= 0f)
-            {
-                if (!RadarOn) SetRadar(true);
+            else if (scanPulse && RadarOn && _scanCooldown <= 0f)
                 BeginScan();
+            else if (!playerDriving && WorkMode != ProspectorWorkMode.Manual)
+                TickWorkMode();
+        }
+
+        void TickWorkMode()
+        {
+            _workRetargetT -= Time.deltaTime;
+            _workStudyT -= Time.deltaTime;
+            _workBanterT -= Time.deltaTime;
+
+            switch (WorkMode)
+            {
+                case ProspectorWorkMode.SurveyNearby:
+                    TickSurveyNearby();
+                    break;
+                case ProspectorWorkMode.AssistExcavator:
+                    TickAssistExcavator();
+                    break;
             }
         }
+
+        void TickSurveyNearby()
+        {
+            if (_nav == null && _world != null)
+                _nav = new ExcavatedPathfinder(_world);
+
+            // Hunt gold in rock near the excavator (not random wandering alone)
+            if (!_hasWorkGoal || _workRetargetT <= 0f)
+                PickSurveyGoalNearExcavator();
+
+            if (!_hasWorkGoal)
+            {
+                // Path to excavator while hunting a wall sample
+                if (_excavator != null)
+                    NavFollow(_excavator.Position, _autoMoveSpeed);
+                return;
+            }
+
+            bool arrived = NavFollow(_workGoal, _autoMoveSpeed * 1.15f);
+            if (!arrived)
+            {
+                float moved = Vector2.Distance(Position, _lastPos);
+                _lastPos = Position;
+                if (moved < 0.0015f) _stuckT += Time.deltaTime;
+                else _stuckT = 0f;
+                if (_stuckT > 2.5f)
+                {
+                    _hasWorkGoal = false;
+                    _workRetargetT = 0f;
+                    _stuckT = 0f;
+                    _nav?.Invalidate();
+                }
+                return;
+            }
+            _lastPos = Position;
+            if (_focusX < 0)
+            {
+                _hasWorkGoal = false;
+                return;
+            }
+
+            Face((_world.CellCenter(_focusX, _focusY) - Position).normalized);
+
+            if (_workStudyT > 0f) return;
+            _workStudyT = Random.Range(0.7f, 1.25f);
+            PerformSurveyStudy(_focusX, _focusY);
+            _hasWorkGoal = false;
+            _workRetargetT = Random.Range(0.15f, 0.45f);
+            _nav?.Invalidate();
+        }
+
+        void PickSurveyGoalNearExcavator()
+        {
+            _hasWorkGoal = false;
+            _focusX = _focusY = -1;
+            _workRetargetT = 0.8f;
+
+            Vector2 hub = _excavator != null ? _excavator.Position : Position;
+            var hubCell = _world.WorldToCell(hub);
+            float cs = _world.CellSize;
+
+            int bestX = -1, bestY = -1;
+            float bestScore = float.MaxValue;
+            Vector2 bestStand = hub;
+
+            // Sweep a ring of solid cells around the excavator — prioritize gold-adjacent walls
+            int radius = 3 + (_surveyRing % 6); // 3..8 cells out, rotating
+            _surveyRing++;
+
+            for (int dy = -radius; dy <= radius; dy++)
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                int x = hubCell.x + dx;
+                int y = hubCell.y + dy;
+                if (!_world.InBounds(x, y)) continue;
+                bool sealedGas = _world.IsGas(x, y) && !_world.IsTunnelOpen(x, y);
+                if (_world.IsTunnelOpen(x, y)) continue;
+                if (_world.IsExcavated(x, y) && !sealedGas) continue;
+
+                var t = _world.Get(x, y);
+                if (t.IsUndamageableBorder) continue;
+                if (!TryFindStandBeside(x, y, out Vector2 standPos)) continue;
+
+                // Must be reachable-ish from open tunnel near hub
+                float toHub = Vector2.Distance(standPos, hub);
+                if (toHub > 11f * cs) continue;
+
+                float score = toHub;
+                score += Vector2.Distance(standPos, Position) * 0.35f;
+
+                // Strong bias: gold, then sealed gas hazards, then gold-adjacent walls
+                if (t.GoldCount > 0)
+                    score *= 0.25f - t.GoldCount * 0.04f;
+                else if (sealedGas)
+                    score *= 0.4f;
+                else
+                {
+                    int nearGold = CountNeighborGold(x, y);
+                    if (nearGold > 0) score *= 0.55f;
+                    else score += 2.5f + Random.Range(0f, 3f);
+                }
+
+                // Skip cells we just studied if we can
+                if (x == _focusX && y == _focusY) score += 4f;
+
+                score += Random.Range(0f, 1.2f);
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestX = x;
+                    bestY = y;
+                    bestStand = standPos;
+                }
+            }
+
+            // Fallback: any wall / sealed gas next to excavator within 5 cells
+            if (bestX < 0)
+            {
+                for (int dy = -5; dy <= 5 && bestX < 0; dy++)
+                for (int dx = -5; dx <= 5; dx++)
+                {
+                    int x = hubCell.x + dx, y = hubCell.y + dy;
+                    if (!_world.InBounds(x, y)) continue;
+                    bool sealedGas = _world.IsGas(x, y) && !_world.IsTunnelOpen(x, y);
+                    if (_world.IsTunnelOpen(x, y)) continue;
+                    if (_world.IsExcavated(x, y) && !sealedGas) continue;
+                    if (_world.Get(x, y).IsUndamageableBorder) continue;
+                    if (!TryFindStandBeside(x, y, out Vector2 standPos)) continue;
+                    bestX = x;
+                    bestY = y;
+                    bestStand = standPos;
+                    break;
+                }
+            }
+
+            if (bestX < 0) return;
+
+            _focusX = bestX;
+            _focusY = bestY;
+            _workGoal = bestStand;
+            _hasWorkGoal = true;
+            _workRetargetT = 6f;
+            _stuckT = 0f;
+            _lastPos = Position;
+            _nav?.Invalidate();
+        }
+
+        int CountNeighborGold(int cx, int cy)
+        {
+            int n = 0;
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                int x = cx + dx, y = cy + dy;
+                if (!_world.InBounds(x, y)) continue;
+                if (_world.Get(x, y).GoldCount > 0) n++;
+            }
+            return n;
+        }
+
+        bool TryFindStandBeside(int sx, int sy, out Vector2 stand)
+        {
+            stand = default;
+            int[] ox = { 1, -1, 0, 0, 1, 1, -1, -1 };
+            int[] oy = { 0, 0, 1, -1, 1, -1, 1, -1 };
+            float best = float.MaxValue;
+            bool found = false;
+            Vector2 bestPos = default;
+            Vector2 prefer = _excavator != null ? _excavator.Position : Position;
+            for (int i = 0; i < 8; i++)
+            {
+                int x = sx + ox[i], y = sy + oy[i];
+                if (!_world.InBounds(x, y) || !_world.IsTunnelOpen(x, y)) continue;
+                Vector2 c = _world.CellCenter(x, y);
+                if (_world.CircleHitsSolid(c, _radius * 0.9f)) continue;
+                float d = Vector2.Distance(prefer, c) + Vector2.Distance(Position, c) * 0.25f;
+                if (d < best)
+                {
+                    best = d;
+                    bestPos = c;
+                    found = true;
+                }
+            }
+            stand = bestPos;
+            return found;
+        }
+
+        void PerformSurveyStudy(int x, int y)
+        {
+            if (_world == null || !_world.InBounds(x, y)) return;
+            bool sealedGas = _world.IsGas(x, y) && !_world.IsTunnelOpen(x, y);
+            var terrain = _world.Get(x, y);
+            if (terrain.Phase == TerrainPhase.Excavated && !sealedGas) return;
+
+            // Close-range geology — better than radar, still never certain
+            const float reliability = 0.62f;
+            bool trueGold = !sealedGas && terrain.GoldCount > 0;
+            bool nearGold = !trueGold && !sealedGas && CountNeighborGold(x, y) > 0;
+            bool trueBed = !sealedGas && terrain.BedrockCount >= 2;
+            bool trueGas = sealedGas;
+
+            bool reportGold = false;
+            bool reportBed = false;
+            bool reportGas = false;
+
+            if (trueGas)
+            {
+                reportGas = Random.value < 0.72f;
+            }
+            else if (Random.value < reliability)
+            {
+                if (trueGold)
+                    reportGold = Random.value < (0.55f + terrain.GoldCount * 0.12f);
+                else if (nearGold)
+                    reportGold = Random.value < 0.28f;
+            }
+
+            if (!reportGold && !trueGold && !trueGas && Random.value < 0.1f)
+                reportGold = true;
+
+            if (trueGold && Random.value < 0.28f)
+                reportGold = false;
+
+            // Bedrock reads are more precise up close
+            if (!reportGold && !reportGas && trueBed && Random.value < 0.78f)
+                reportBed = true;
+            if (!reportGold && !reportGas && !reportBed && !trueBed && Random.value < 0.04f)
+                reportBed = true;
+
+            if (!reportGold && !reportBed && !reportGas)
+            {
+                if (_workBanterT <= 0f)
+                {
+                    SurveyWhisper?.Invoke();
+                    _workBanterT = Random.Range(7f, 12f);
+                }
+                return;
+            }
+
+            if (_scanView != null)
+            {
+                if (!_scanView.Visible) _scanView.SetVisible(true);
+                float strength = reportGas
+                    ? Mathf.Clamp01(0.55f + Random.Range(-0.08f, 0.15f))
+                    : reportGold
+                        ? Mathf.Clamp01(0.4f + terrain.GoldCount * 0.15f + Random.Range(-0.12f, 0.18f))
+                        : Mathf.Clamp01(0.45f + Random.Range(-0.06f, 0.12f));
+                int jx = x + Random.Range(-1, 2);
+                int jy = y + Random.Range(-1, 2);
+                if (!_world.InBounds(jx, jy)) { jx = x; jy = y; }
+                _scanView.AddHint(jx, jy,
+                    gold: reportGold ? strength : 0f,
+                    bedrock: reportBed ? strength : 0f,
+                    gas: reportGas ? strength : 0f, bleed: 2);
+            }
+
+            if (reportGas) GasHintFound?.Invoke();
+            else if (reportGold) GoldHintFound?.Invoke();
+            else BedrockHintFound?.Invoke();
+            SurveyWhisper?.Invoke();
+            _workBanterT = Random.Range(6f, 11f);
+        }
+
+        void TickAssistExcavator()
+        {
+            if (_excavator == null) return;
+            if (_nav == null && _world != null)
+                _nav = new ExcavatedPathfinder(_world);
+
+            Vector2 digger = _excavator.Position;
+            Vector2 fwd = _excavator.Facing.normalized;
+            if (fwd.sqrMagnitude < 0.01f) fwd = Vector2.up;
+
+            // Prefer standing in open tunnel behind the bit (pathfind there)
+            Vector2 behind = FindAssistStand(digger, fwd);
+            bool arrived = NavFollow(behind, _autoMoveSpeed * 1.2f);
+
+            if (arrived)
+                Face(fwd);
+            else
+                return; // still navigating tunnels — don't study from a pocket
+
+            if (_workStudyT > 0f) return;
+            _workStudyT = Random.Range(0.55f, 1.05f);
+            StudyDigFace(digger, fwd);
+        }
+
+        Vector2 FindAssistStand(Vector2 digger, Vector2 fwd)
+        {
+            float cs = _world.CellSize;
+            // Try several offsets behind excavator; pick first excavated free spot
+            float[] back = { 2.4f, 1.8f, 1.2f, 0.8f, 3.2f };
+            float[] side = { 0f, 0.6f, -0.6f, 1.1f, -1.1f };
+            Vector2 perp = new(-fwd.y, fwd.x);
+            Vector2 best = digger - fwd * (_excavator.Radius * 2f);
+            float bestScore = float.MaxValue;
+
+            for (int bi = 0; bi < back.Length; bi++)
+            for (int si = 0; si < side.Length; si++)
+            {
+                Vector2 cand = digger - fwd * (_excavator.Radius * back[bi] + 0.1f) + perp * (side[si] * cs * 4f);
+                var cell = _world.WorldToCell(cand);
+                if (!_world.InBounds(cell.x, cell.y) || !_world.IsTunnelOpen(cell.x, cell.y)) continue;
+                Vector2 center = _world.CellCenter(cell.x, cell.y);
+                if (_world.CircleHitsSolid(center, _radius)) continue;
+                float score = Vector2.Distance(center, digger) + Vector2.Distance(center, Position) * 0.15f;
+                // Prefer true behind
+                float along = Vector2.Dot(center - digger, -fwd);
+                if (along < 0f) score += 2f;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = center;
+                }
+            }
+            return best;
+        }
+
+        bool NavFollow(Vector2 goal, float speed)
+        {
+            if (_nav == null) return (goal - Position).sqrMagnitude < 0.04f;
+            return _nav.Follow(Position, goal, speed, _radius, Face, TryNavStep);
+        }
+
+        bool TryNavStep(Vector2 dir, float step)
+        {
+            if (dir.sqrMagnitude < 0.0001f) return false;
+            dir.Normalize();
+            Vector2 pos = Position;
+            Vector2 next = pos + dir * step;
+            if (!_world.CircleHitsSolid(next, _radius))
+            {
+                transform.localPosition = next;
+                return true;
+            }
+            return false;
+        }
+
+        void StudyDigFace(Vector2 digger, Vector2 fwd)
+        {
+            float cs = _world.CellSize;
+            Vector2 tip = digger + fwd * (_excavator.Radius + tipReachAssist);
+            int marked = 0;
+
+            for (int i = 0; i < 10; i++)
+            {
+                float along = cs * (0.4f + i * 0.55f);
+                float side = (i % 2 == 0 ? 1f : -1f) * cs * (0.15f + (i / 2) * 0.2f);
+                Vector2 perp = new(-fwd.y, fwd.x);
+                Vector2 p = tip + fwd * along + perp * side;
+                var cell = _world.WorldToCell(p);
+                if (!_world.InBounds(cell.x, cell.y)) continue;
+                var t = _world.Get(cell.x, cell.y);
+                if (t.Phase == TerrainPhase.Excavated || t.IsUndamageableBorder) continue;
+
+                // Reading rock is imperfect — sometimes mark nothing useful
+                if (Random.value > 0.62f) continue;
+
+                _world.MarkRockStudy(cell.x, cell.y, digBonus: (byte)Random.Range(2, 5));
+
+                // Occasional soft chip when a seam is correctly felt
+                if (t.BedrockCount < 3 && Random.value < 0.18f)
+                    _world.Damage(cell.x, cell.y);
+
+                // Soft scan whisper on hard / gold-ish face (uncertain)
+                if (_scanView != null && Random.value < 0.22f)
+                {
+                    bool maybeGold = t.GoldCount > 0 && Random.value < 0.4f;
+                    bool maybeBed = t.BedrockCount >= 2 && Random.value < 0.55f;
+                    if (maybeGold || maybeBed)
+                    {
+                        if (!_scanView.Visible) _scanView.SetVisible(true);
+                        _scanView.AddHint(cell.x, cell.y,
+                            gold: maybeGold ? 0.35f : 0f,
+                            bedrock: maybeBed ? 0.4f : 0f, bleed: 1);
+                    }
+                }
+
+                marked++;
+                if (marked >= 3) break;
+            }
+
+            if (marked > 0 && _workBanterT <= 0f)
+            {
+                AssistNote?.Invoke();
+                _workBanterT = Random.Range(9f, 16f);
+            }
+        }
+
+        const float tipReachAssist = 0.35f;
 
         public void FaceToward(Vector2 terrainPoint)
         {
@@ -198,7 +648,7 @@ namespace DeepCore.FreeMovement
 
         void Face(Vector2 dir)
         {
-            if (_facingRoot == null) return;
+            if (_facingRoot == null || dir.sqrMagnitude < 0.0001f) return;
             float ang = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg - 90f;
             _facingRoot.localRotation = Quaternion.RotateTowards(
                 _facingRoot.localRotation,
@@ -206,9 +656,11 @@ namespace DeepCore.FreeMovement
                 360f * Time.deltaTime);
         }
 
-        void Step(Vector2 dir)
+        void Step(Vector2 dir) => Step(dir, _moveSpeed);
+
+        void Step(Vector2 dir, float speed)
         {
-            float step = _moveSpeed * Time.deltaTime;
+            float step = speed * Time.deltaTime;
             Vector2 pos = Position;
             Vector2 next = pos + dir * step;
             if (!_world.CircleHitsSolid(next, _radius))
@@ -227,11 +679,19 @@ namespace DeepCore.FreeMovement
                 transform.localPosition = ny;
         }
 
+        bool _saidGoldThisScan;
+        bool _saidBedThisScan;
+        bool _saidGasThisScan;
+
         void BeginScan()
         {
             if (_scanView == null || _world == null) return;
             if (!_scanView.Visible)
                 _scanView.SetVisible(true);
+            _scanView.ClearHints();
+            _saidGoldThisScan = false;
+            _saidBedThisScan = false;
+            _saidGasThisScan = false;
 
             _scanOrigin = Position;
             _scanFwd = Facing.normalized;
@@ -239,15 +699,16 @@ namespace DeepCore.FreeMovement
             _scanRangeWorld = ScanRangeCells * _world.CellSize;
             _reliability = Distance switch
             {
-                ScanDistance.Short => 0.82f,
-                ScanDistance.Medium => 0.68f,
-                _ => 0.52f,
+                ScanDistance.Short => 0.88f,
+                ScanDistance.Medium => 0.74f,
+                _ => 0.58f,
             };
+            // Slow deliberate sweep — info arrives late on purpose
             _scanDuration = Distance switch
             {
-                ScanDistance.Short => 1.35f,
-                ScanDistance.Medium => 2.25f,
-                _ => 3.4f,
+                ScanDistance.Short => 2.8f,
+                ScanDistance.Medium => 4.8f,
+                _ => 7.6f,
             };
 
             CollectPendingHits();
@@ -255,7 +716,8 @@ namespace DeepCore.FreeMovement
 
             _scanT = 0f;
             _scanning = true;
-            _scanCooldown = _scanDuration + 0.4f;
+            _scanCooldown = _scanDuration + 0.55f;
+            ScanStarted?.Invoke();
             if (_sweepCore != null) _sweepCore.gameObject.SetActive(true);
             if (_sweepGlow != null) _sweepGlow.gameObject.SetActive(true);
             if (_sweepFillMr != null) _sweepFillMr.enabled = true;
@@ -265,14 +727,13 @@ namespace DeepCore.FreeMovement
         void CollectPendingHits()
         {
             _pending.Clear();
-            float cs = _world.CellSize;
             float range = _scanRangeWorld;
             float colWidth = (FullHalfAngle * 2f) / ColCount;
             int colStart = Width == ScanWidth.Narrow ? 1 : 0;
             int colEnd = Width == ScanWidth.Narrow ? 1 : ColCount - 1;
 
             int samplesPerCol = 4;
-            int distSteps = Mathf.Max(ActiveRows * 10, Mathf.CeilToInt(ScanRangeCells));
+            int distSteps = Mathf.Max(ActiveRows * 12, Mathf.CeilToInt(ScanRangeCells));
 
             for (int col = colStart; col <= colEnd; col++)
             {
@@ -290,11 +751,15 @@ namespace DeepCore.FreeMovement
                         Vector2 hit = _scanOrigin + dir * (u * range);
                         var cell = _world.WorldToCell(hit);
                         if (!_world.InBounds(cell.x, cell.y)) break;
-                        if (_world.IsExcavated(cell.x, cell.y)) continue;
+                        // Skip open tunnel; sealed gas is excavated but still scannable
+                        if (_world.IsTunnelOpen(cell.x, cell.y)) continue;
+
+                        bool trueGas = _world.IsGas(cell.x, cell.y);
+                        if (_world.IsExcavated(cell.x, cell.y) && !trueGas) continue;
 
                         var terrain = _world.Get(cell.x, cell.y);
-                        bool trueGold = terrain.GoldCount > 0;
-                        bool trueBed = terrain.BedrockCount >= 2;
+                        bool trueGold = !trueGas && terrain.GoldCount > 0;
+                        bool trueBed = !trueGas && terrain.BedrockCount >= 2;
 
                         float rowPos = u * ActiveRows;
                         float frac = rowPos - Mathf.Floor(rowPos);
@@ -302,59 +767,101 @@ namespace DeepCore.FreeMovement
 
                         bool reportGold = false;
                         bool reportBed = false;
+                        bool reportGas = false;
                         if (Random.value < _reliability)
                         {
-                            reportGold = trueGold && Random.value < (0.5f + terrain.GoldCount * 0.1f);
-                            reportBed = trueBed && Random.value < 0.7f;
+                            reportGold = trueGold && Random.value < (0.18f + terrain.GoldCount * 0.06f);
+                            // Precise bedrock: high true-positive, low noise
+                            reportBed = trueBed && Random.value < (0.86f + (terrain.BedrockCount >= 3 ? 0.08f : 0f));
+                            reportGas = trueGas && Random.value < 0.78f;
                         }
-                        float falseRate = (1f - _reliability) * 0.16f;
-                        if (!reportGold && Random.value < falseRate * 0.22f) reportGold = true;
-                        if (!reportBed && Random.value < falseRate * 0.2f) reportBed = true;
+                        float falseRate = 1f - _reliability;
+                        if (!reportGold && !trueGas && Random.value < falseRate * 0.03f) reportGold = true;
+                        if (!reportBed && !trueGas && Random.value < falseRate * 0.05f) reportBed = true;
+                        if (!reportGas && Random.value < falseRate * 0.04f) reportGas = true;
 
-                        float strength = Mathf.Lerp(0.7f, 1f, _reliability);
+                        float strength = Mathf.Lerp(0.72f, 1f, _reliability);
+                        if (reportGas)
+                            _pending.Add(new PendingHit { Dist01 = u, X = cell.x, Y = cell.y, Kind = ScanHintKind.Gas, Strength = strength });
                         if (reportGold)
-                            _pending.Add(new PendingHit { Dist01 = u, X = cell.x, Y = cell.y, Gold = true, Strength = strength });
+                            _pending.Add(new PendingHit { Dist01 = u, X = cell.x, Y = cell.y, Kind = ScanHintKind.Gold, Strength = strength });
                         if (reportBed)
-                            _pending.Add(new PendingHit { Dist01 = u, X = cell.x, Y = cell.y, Gold = false, Strength = strength });
+                            _pending.Add(new PendingHit { Dist01 = u, X = cell.x, Y = cell.y, Kind = ScanHintKind.Bedrock, Strength = strength });
                     }
                 }
             }
 
-            // Thin to sparse clusters ahead of time
             ThinPending();
         }
 
         void ThinPending()
         {
             if (_pending.Count == 0) return;
-            // Keep seed points close enough to merge into soft outline zones
-            const int minSep = 4;
-            var kept = new List<PendingHit>(16);
-            for (int pass = 0; pass < 2; pass++)
+            const int minSepGold = 22;
+            const int minSepBed = 10;
+            const int minSepGas = 14;
+            var kept = new List<PendingHit>(10);
+
+            void Take(ScanHintKind kind, int max, int minSep)
             {
-                for (int i = 0; i < _pending.Count; i++)
+                for (int i = 0; i < _pending.Count && kept.Count < 10; i++)
                 {
                     var h = _pending[i];
-                    if (pass == 0 && !h.Gold) continue;
-                    if (pass == 1 && h.Gold) continue;
+                    if (h.Kind != kind) continue;
+                    int same = 0;
                     bool near = false;
                     for (int k = 0; k < kept.Count; k++)
                     {
-                        if (kept[k].Gold != h.Gold) continue;
+                        if (kept[k].Kind != h.Kind) continue;
+                        same++;
                         if (Mathf.Abs(kept[k].X - h.X) + Mathf.Abs(kept[k].Y - h.Y) < minSep)
                         {
                             near = true;
                             break;
                         }
                     }
-                    if (!near) kept.Add(h);
-                    if (kept.Count >= 12) break;
+                    if (near || same >= max) continue;
+                    kept.Add(h);
                 }
-                if (kept.Count >= 12) break;
             }
+
+            Take(ScanHintKind.Gold, max: 1, minSep: minSepGold);
+            Take(ScanHintKind.Gas, max: 2, minSep: minSepGas);
+            Take(ScanHintKind.Bedrock, max: 4, minSep: minSepBed);
             _pending.Clear();
             _pending.AddRange(kept);
             _pending.Sort((a, b) => a.Dist01.CompareTo(b.Dist01));
+        }
+
+        void EmitPendingHit(PendingHit h)
+        {
+            switch (h.Kind)
+            {
+                case ScanHintKind.Gold:
+                    _scanView.AddHint(h.X, h.Y, gold: h.Strength, bedrock: 0f, gas: 0f, bleed: 3);
+                    if (!_saidGoldThisScan)
+                    {
+                        _saidGoldThisScan = true;
+                        GoldHintFound?.Invoke();
+                    }
+                    break;
+                case ScanHintKind.Gas:
+                    _scanView.AddHint(h.X, h.Y, gold: 0f, bedrock: 0f, gas: h.Strength, bleed: 3);
+                    if (!_saidGasThisScan)
+                    {
+                        _saidGasThisScan = true;
+                        GasHintFound?.Invoke();
+                    }
+                    break;
+                default:
+                    _scanView.AddHint(h.X, h.Y, gold: 0f, bedrock: h.Strength, gas: 0f, bleed: 3);
+                    if (!_saidBedThisScan)
+                    {
+                        _saidBedThisScan = true;
+                        BedrockHintFound?.Invoke();
+                    }
+                    break;
+            }
         }
 
         void TickScanSweep()
@@ -362,39 +869,26 @@ namespace DeepCore.FreeMovement
             // Ease-out so it lingers a bit as it reaches far bands
             _scanT += Time.deltaTime / _scanDuration;
             float u = Mathf.Clamp01(_scanT);
-            float sweep = 1f - Mathf.Pow(1f - u, 1.55f); // smooth pull outward
+            float sweep = 1f - Mathf.Pow(1f - u, 1.55f);
 
             UpdateSweepArc(Mathf.Max(0.04f, sweep));
 
-            // Reveal hits the wave has passed
             while (_pending.Count > 0 && _pending[0].Dist01 <= sweep + 0.02f)
             {
                 var h = _pending[0];
                 _pending.RemoveAt(0);
-                if (h.Gold)
-                    _scanView.AddHint(h.X, h.Y, gold: h.Strength, bedrock: 0f, bleed: 3);
-                else
-                    _scanView.AddHint(h.X, h.Y, gold: 0f, bedrock: h.Strength, bleed: 3);
-                _scanView.SoftPing();
+                EmitPendingHit(h);
             }
 
             if (u >= 1f)
             {
-                // Flush leftovers
                 for (int i = 0; i < _pending.Count; i++)
-                {
-                    var h = _pending[i];
-                    if (h.Gold)
-                        _scanView.AddHint(h.X, h.Y, gold: h.Strength, bedrock: 0f, bleed: 3);
-                    else
-                        _scanView.AddHint(h.X, h.Y, gold: 0f, bedrock: h.Strength, bleed: 3);
-                }
+                    EmitPendingHit(_pending[i]);
                 _pending.Clear();
                 _scanning = false;
                 if (_sweepCore != null) _sweepCore.gameObject.SetActive(false);
                 if (_sweepGlow != null) _sweepGlow.gameObject.SetActive(false);
                 if (_sweepFillMr != null) _sweepFillMr.enabled = false;
-                _scanView.Flash();
             }
         }
 
@@ -519,29 +1013,34 @@ namespace DeepCore.FreeMovement
             if (_arcCore.Count < RowCount || _radialCore.Count < ColCount + 1) return;
 
             float fullRange = MaxRangeCells * _world.CellSize;
+            float activeRange = fullRange * (ActiveRows / (float)RowCount);
             float half = FullHalfAngle;
             const int arcRes = 36;
-            float breath = 0.88f + 0.12f * Mathf.Sin(_pulse * 2.4f);
+            float breath = 0.9f + 0.1f * Mathf.Sin(_pulse * 2.4f);
 
-            // Cyberpunk HUD: hairline neon + faint bloom (not chunky CAD lines)
-            Color activeCore = new(0.55f, 1f, 1f, 0.38f * breath);
-            Color idleCore = new(0.35f, 0.75f, 0.9f, 0.12f);
-            Color activeGlow = new(0.15f, 0.9f, 1f, 0.055f * breath);
-            Color idleGlow = new(0.2f, 0.55f, 0.75f, 0.02f);
+            // Chosen size = clear outline; other range rings barely perceptible
+            Color activeCore = new(0.55f, 1f, 1f, 0.48f * breath);
+            Color activeGlow = new(0.15f, 0.9f, 1f, 0.08f * breath);
+            Color ghostCore = new(0.35f, 0.75f, 0.9f, 0.008f);
+            Color ghostGlow = new(0.2f, 0.55f, 0.75f, 0.003f);
 
-            const float coreW = 0.011f;
-            const float glowW = 0.048f;
+            const float coreW = 0.012f;
+            const float glowW = 0.05f;
 
             for (int row = 0; row < RowCount; row++)
             {
                 float r = fullRange * ((row + 1) / (float)RowCount);
-                bool on = (row + 1) <= ActiveRows;
+                // Only the outer arc of the selected distance is "on"
+                bool on = (row + 1) == ActiveRows;
                 SetArcPoints(_arcGlow[row], r, -half, half, arcRes);
                 SetArcPoints(_arcCore[row], r, -half, half, arcRes);
-                _arcGlow[row].startColor = _arcGlow[row].endColor = on ? activeGlow : idleGlow;
-                _arcCore[row].startColor = _arcCore[row].endColor = on ? activeCore : idleCore;
-                _arcGlow[row].widthMultiplier = on ? glowW : glowW * 0.7f;
-                _arcCore[row].widthMultiplier = on ? coreW : coreW * 0.75f;
+                _arcGlow[row].startColor = _arcGlow[row].endColor = on ? activeGlow : ghostGlow;
+                _arcCore[row].startColor = _arcCore[row].endColor = on ? activeCore : ghostCore;
+                _arcGlow[row].widthMultiplier = on ? glowW : 0.02f;
+                _arcCore[row].widthMultiplier = on ? coreW : 0.006f;
+                // Ghost rings stay enabled but nearly invisible so size context remains
+                _arcGlow[row].enabled = on || ghostCore.a > 0.001f;
+                _arcCore[row].enabled = true;
             }
 
             for (int i = 0; i < ColCount + 1; i++)
@@ -550,21 +1049,19 @@ namespace DeepCore.FreeMovement
                 bool centerish = i == 1 || i == 2;
                 bool outer = i == 0 || i == ColCount;
                 bool lit = Width == ScanWidth.Wide || centerish;
-                Color core = lit ? activeCore : idleCore;
-                Color glow = lit ? activeGlow : idleGlow;
-                if (outer && Width == ScanWidth.Narrow)
-                {
-                    core = new Color(idleCore.r, idleCore.g, idleCore.b, 0.06f);
-                    glow = new Color(idleGlow.r, idleGlow.g, idleGlow.b, 0.015f);
-                }
+                if (outer && Width == ScanWidth.Narrow) lit = false;
 
+                Color core = lit ? activeCore : ghostCore;
+                Color glow = lit ? activeGlow : ghostGlow;
+                // Radials stop at chosen range — ghost stubs for unused long range
+                float len = lit ? activeRange : activeRange;
                 Vector2 d = Rotate(Vector2.up, a);
-                SetLine(_radialGlow[i], Vector3.zero, d * fullRange);
-                SetLine(_radialCore[i], Vector3.zero, d * fullRange);
+                SetLine(_radialGlow[i], Vector3.zero, d * len);
+                SetLine(_radialCore[i], Vector3.zero, d * len);
                 _radialGlow[i].startColor = _radialGlow[i].endColor = glow;
                 _radialCore[i].startColor = _radialCore[i].endColor = core;
-                _radialGlow[i].widthMultiplier = glowW;
-                _radialCore[i].widthMultiplier = coreW;
+                _radialGlow[i].widthMultiplier = lit ? glowW * 0.85f : 0.025f;
+                _radialCore[i].widthMultiplier = lit ? coreW : 0.007f;
             }
         }
 

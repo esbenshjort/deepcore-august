@@ -203,6 +203,10 @@ namespace DeepCore.FreeMovement
             return h;
         }
 
+        public event System.Action PickedGold;
+        public event System.Action PickedRock;
+        public event System.Action Deposited;
+
         public void Tick()
         {
             if (_world == null || _calc == null) return;
@@ -387,12 +391,15 @@ namespace DeepCore.FreeMovement
             if (_pickupTimer > 0f) return;
 
             PlaceIntoCart(_target);
+            bool gold = _target.IsGold;
             _calc.AddCarry(_target);
             Destroy(_target.gameObject);
             _target = null;
             _stuckFrames = 0;
             _seekStuckTimer = 0f;
             InvalidatePath();
+            if (gold) PickedGold?.Invoke();
+            else PickedRock?.Invoke();
 
             if (ShouldReturn())
                 BeginReturn();
@@ -426,6 +433,7 @@ namespace DeepCore.FreeMovement
             ClearCargoSlots();
             LoosePile.ClearAllClaims();
             _softIgnore.Clear();
+            Deposited?.Invoke();
             _state = State.Seek;
         }
 
@@ -529,9 +537,9 @@ namespace DeepCore.FreeMovement
             var goal = _world.WorldToCell(to);
             if (!_world.InBounds(start.x, start.y)) return;
 
-            if (!_world.IsExcavated(start.x, start.y))
+            if (!_world.IsTunnelOpen(start.x, start.y))
                 start = NearestExcavated(start.x, start.y);
-            if (!_world.InBounds(goal.x, goal.y) || !_world.IsExcavated(goal.x, goal.y))
+            if (!_world.InBounds(goal.x, goal.y) || !_world.IsTunnelOpen(goal.x, goal.y))
                 goal = NearestExcavated(goal.x, goal.y);
             if (!_world.InBounds(start.x, start.y) || !_world.InBounds(goal.x, goal.y)) return;
 
@@ -600,7 +608,7 @@ namespace DeepCore.FreeMovement
 
         void TryEnqueue(int x, int y, int from, int w)
         {
-            if (!_world.InBounds(x, y) || !_world.IsExcavated(x, y)) return;
+            if (!_world.InBounds(x, y) || !_world.IsTunnelOpen(x, y)) return;
             int i = y * w + x;
             if (_bfsStamp[i] == _bfsGen) return;
             _bfsStamp[i] = _bfsGen;
@@ -619,7 +627,7 @@ namespace DeepCore.FreeMovement
                 {
                     if (Mathf.Abs(ox) != r && Mathf.Abs(oy) != r) continue;
                     int nx = x + ox, ny = y + oy;
-                    if (!_world.InBounds(nx, ny) || !_world.IsExcavated(nx, ny)) continue;
+                    if (!_world.InBounds(nx, ny) || !_world.IsTunnelOpen(nx, ny)) continue;
                     int d = Mathf.Abs(ox) + Mathf.Abs(oy);
                     if (d < bestD)
                     {

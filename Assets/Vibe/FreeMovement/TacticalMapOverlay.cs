@@ -3,8 +3,9 @@ using UnityEngine;
 namespace DeepCore.FreeMovement
 {
     /// <summary>
-    /// Full-map unlit overlay: gold (warm) and bedrock (cool) for prospector planning.
+    /// Full-map unlit overlay: gold (warm), bedrock (cool), gas (purple) for planning.
     /// Subtle / translucent so the dig face still reads underneath.
+    /// Keep in sync when adding map features (minerals / pockets / hazards).
     /// </summary>
     public sealed class TacticalMapOverlay : MonoBehaviour
     {
@@ -25,6 +26,8 @@ namespace DeepCore.FreeMovement
         static readonly Color32 Gold2 = new(200, 160, 55, 75);
         static readonly Color32 Gold3 = new(220, 180, 65, 95);
         static readonly Color32 Gold4 = new(235, 200, 90, 115);
+        static readonly Color32 GasPocket = new(140, 70, 200, 95);
+        static readonly Color32 GasCore = new(170, 90, 230, 120);
 
         public bool Visible
         {
@@ -110,7 +113,9 @@ namespace DeepCore.FreeMovement
             {
                 var cell = _world.Get(cx, cy);
                 Color32 col;
-                if (cell.Phase == TerrainPhase.Excavated)
+                if (_world.IsGas(cx, cy))
+                    col = _world.IsGasRevealed(cx, cy) ? GasCore : GasPocket;
+                else if (_world.IsTunnelOpen(cx, cy))
                     col = Excavated;
                 else if (cell.IsUndamageableBorder)
                     col = new Color32(24, 28, 36, 90);

@@ -11,7 +11,7 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class RockWallShadows : MonoBehaviour
     {
-        const int Depth = 4; // solid cells near open that cast (covers soft wall band)
+        const int Depth = 5; // solid cells near open that cast (covers soft wall band)
 
         FineTerrainWorld _world;
         Transform _root;
@@ -81,7 +81,7 @@ namespace DeepCore.FreeMovement
             for (int y = y0; y <= y1; y++)
             for (int x = x0; x <= x1; x++)
             {
-                if (!_world.IsSolid(x, y))
+                if (!_world.IsLightOccluder(x, y))
                 {
                     Remove(Key(x, y));
                     continue;
@@ -117,7 +117,7 @@ namespace DeepCore.FreeMovement
                 if (ox == 0 && oy == 0) continue;
                 int nx = x + ox, ny = y + oy;
                 if (!_world.InBounds(nx, ny)) continue;
-                if (_world.IsExcavated(nx, ny)) return true;
+                if (_world.IsFloorOpen(nx, ny)) return true;
             }
             return false;
         }
@@ -134,8 +134,8 @@ namespace DeepCore.FreeMovement
             sc.selfShadows = false;
             sc.castingOption = ShadowCaster2D.ShadowCastingOptions.CastShadow;
 
-            // Slight overlap so light can't leak between neighboring cells
-            float h = cs * 0.55f;
+            // Overlap so light can't leak between neighboring rock cells
+            float h = cs * 0.58f;
             var path = new Vector3[]
             {
                 new(-h, -h, 0f),

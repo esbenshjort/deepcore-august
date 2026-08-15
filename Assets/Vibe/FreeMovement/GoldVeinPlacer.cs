@@ -111,66 +111,187 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>
-        /// Sparse organic gold veins — findable ribbons, not map-wide dust.
-        /// Richer / denser farther from start; near start almost none.
+        /// Rare gold: only thin veins + far pockets. Near start is empty —
+        /// finding a signal should feel like a real win.
         /// </summary>
         public static void PlaceOrganicGold(FineTerrainWorld w, int startX, int startY, int seed)
         {
             var rng = new System.Random(seed);
-            float maxDist = Mathf.Sqrt(w.Width * w.Width + w.Height * w.Height) * 0.78f;
-            float ox = seed * 0.13f;
-            float oy = seed * 0.27f;
+            float maxDist = Mathf.Sqrt(w.Width * w.Width + w.Height * w.Height) * 0.85f;
+
+            PlaceVein(w, 0.28f, 0.55f, 0.42f, 0.88f, 0.007f, seed + 11, minGrade: 2, maxGrade: 3);
+            PlaceVein(w, 0.62f, 0.58f, 0.78f, 0.90f, 0.0065f, seed + 22, minGrade: 2, maxGrade: 4);
+            PlaceVein(w, 0.45f, 0.70f, 0.58f, 0.95f, 0.006f, seed + 33, minGrade: 3, maxGrade: 4);
+
+            PlaceCluster(w, 0.38f, 0.86f, 0.016f, 5, seed + 44);
+            PlaceCluster(w, 0.72f, 0.84f, 0.014f, 4, seed + 55);
+            PlaceCluster(w, 0.55f, 0.93f, 0.012f, 4, seed + 66);
+
+            float clearR = Mathf.Min(w.Width, w.Height) * 0.22f;
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                float dx = x - startX;
+                float dy = y - startY;
+                if (dx * dx + dy * dy > clearR * clearR) continue;
+                var c = w.Get(x, y);
+                if (c.GoldCount <= 0 || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
+                int bed = c.BedrockCount;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed, bed, 0));
+            }
+            w.EndBatch();
 
             w.BeginBatch();
             for (int y = 1; y < w.Height - 1; y++)
             for (int x = 1; x < w.Width - 1; x++)
             {
-                if (w.IsExcavated(x, y)) continue;
                 var c = w.Get(x, y);
-                if (c.IsUndamageableBorder) continue;
-                if (c.BedrockCount >= 4) continue;
-
+                if (c.GoldCount <= 0 || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
                 float dx = x - startX;
                 float dy = y - startY;
                 float depth = Mathf.Clamp01(Mathf.Sqrt(dx * dx + dy * dy) / maxDist);
-                if (depth < 0.18f) continue; // clear near-start band
-
-                // Narrow ridge = vein core (strict — avoids speckled map)
-                float g1 = Mathf.PerlinNoise(x * 0.032f + ox, y * 0.032f + oy);
-                float g2 = Mathf.PerlinNoise(x * 0.07f + ox + 5f, y * 0.07f + oy + 9f);
-                float ridge = 1f - Mathf.Abs(g1 - 0.5f) * 2f;
-                bool onVein = ridge > 0.88f && g2 > 0.42f && g2 < 0.78f;
-
-                // Rare pocket only far out
-                float g3 = Mathf.PerlinNoise(x * 0.09f + 18f, y * 0.09f + 7f);
-                bool pocket = depth > 0.55f && g3 > 0.88f && ridge > 0.55f;
-
-                if (!onVein && !pocket) continue;
-
-                // Even on a ridge, thin the vein so it's a path to follow — not a sheet
-                float keep = onVein
-                    ? Mathf.Lerp(0.22f, 0.55f, depth * depth)
-                    : Mathf.Lerp(0.12f, 0.35f, depth);
-                if (rng.NextDouble() > keep) continue;
-
-                int maxG = depth < 0.4f ? 1 : (depth < 0.65f ? 2 : (depth < 0.82f ? 3 : 4));
-                int minG = depth < 0.6f ? 1 : 2;
-                if (pocket && depth > 0.7f) minG = 3;
-                int gold = rng.Next(minG, maxG + 1);
-
-                int bedrock = c.BedrockCount;
-                if (bedrock >= 3) bedrock = Mathf.Min(2, 4 - gold);
-                if (bedrock + gold > 4) bedrock = 4 - gold;
-
-                w.Set(x, y, FineTerrainWorld.FromCounts(4 - gold - bedrock, bedrock, gold));
+                float keep = Mathf.Lerp(0.15f, 0.5f, depth * depth);
+                if (rng.NextDouble() > keep)
+                {
+                    int bed = c.BedrockCount;
+                    w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed, bed, 0));
+                }
             }
             w.EndBatch();
+        }
 
-            // A few deliberate long veins to chase (still organic wobble)
-            PlaceVein(w, 0.22f, 0.45f, 0.48f, 0.82f, 0.012f, seed + 11, minGrade: 2, maxGrade: 4);
-            PlaceVein(w, 0.58f, 0.50f, 0.82f, 0.88f, 0.011f, seed + 22, minGrade: 2, maxGrade: 4);
-            PlaceVein(w, 0.35f, 0.62f, 0.70f, 0.92f, 0.01f, seed + 33, minGrade: 3, maxGrade: 4);
-            PlaceCluster(w, 0.50f, 0.90f, 0.028f, 10, seed + 44);
+        /// <summary>
+        /// Sealed empty caverns inside solid rock. Marked as gas — when the tunnel
+        /// breaks in, purple smoke vents (no rock inside the pocket).
+        /// NOTE: when adding map features (minerals / pockets / hazards), update
+        /// ProspectorPerson scan detection + ScanViewOverlay + tactical legend.
+        /// </summary>
+        public static void PlaceGasPockets(FineTerrainWorld w, int startX, int startY, int seed)
+        {
+            var rng = new System.Random(seed);
+
+            w.BeginBatch();
+
+            // Test pocket: a few meters into solid rock north-east of camp — fully sealed
+            // so lighting / floor never show it until the excavator punches in.
+            if (!TryCarveGasPocket(w, startX + 30, startY + 28, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3)
+                && !TryCarveGasPocket(w, startX + 36, startY + 22, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3)
+                && !TryCarveGasPocket(w, startX - 32, startY + 26, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3))
+            {
+                // Last resort: farther out on a clear ray
+                TryCarveGasPocket(w, startX + 40, startY + 34, rx: 3, ry: 3, stretch: 0.9f, rockBuffer: 2);
+            }
+
+            int count = 6 + rng.Next(0, 4);
+            float minDist = Mathf.Min(w.Width, w.Height) * 0.22f;
+
+            for (int p = 0; p < count; p++)
+            {
+                int cx = 0, cy = 0;
+                bool ok = false;
+                int rx = 0, ry = 0;
+                float stretch = 1f;
+                for (int attempt = 0; attempt < 50; attempt++)
+                {
+                    cx = rng.Next(18, w.Width - 18);
+                    cy = rng.Next(18, w.Height - 18);
+                    float dx = cx - startX, dy = cy - startY;
+                    if (dx * dx + dy * dy < minDist * minDist) continue;
+                    if (w.IsExcavated(cx, cy) || w.Get(cx, cy).IsUndamageableBorder) continue;
+                    rx = rng.Next(3, 7);
+                    ry = rng.Next(3, 6);
+                    stretch = 0.7f + (float)rng.NextDouble() * 0.5f;
+                    if (!CanCarveGasPocket(w, cx, cy, rx, ry, stretch, rockBuffer: 2)) continue;
+                    ok = true;
+                    break;
+                }
+                if (!ok) continue;
+                CarveGasPocket(w, cx, cy, rx, ry, stretch);
+            }
+            w.EndBatch();
+        }
+
+        static bool TryCarveGasPocket(FineTerrainWorld w, int cx, int cy, int rx, int ry,
+            float stretch, int rockBuffer)
+        {
+            if (!CanCarveGasPocket(w, cx, cy, rx, ry, stretch, rockBuffer))
+                return false;
+            CarveGasPocket(w, cx, cy, rx, ry, stretch);
+            return true;
+        }
+
+        /// <summary>
+        /// Pocket must sit fully in solid rock with a solid buffer from any open tunnel
+        /// so it never starts breached or lit.
+        /// </summary>
+        static bool CanCarveGasPocket(FineTerrainWorld w, int cx, int cy, int rx, int ry,
+            float stretch, int rockBuffer)
+        {
+            int pad = Mathf.Max(rx, ry) + 1 + rockBuffer;
+            for (int oy = -pad; oy <= pad; oy++)
+            for (int ox = -pad; ox <= pad; ox++)
+            {
+                int x = cx + ox, y = cy + oy;
+                if (!w.InBounds(x, y)) return false;
+
+                float nx = ox / (float)Mathf.Max(1, rx);
+                float ny = oy / (float)Mathf.Max(1, ry);
+                float d = nx * nx + ny * ny * stretch;
+                // Inside pocket or soft shell — must be solid rock (not open / not already gas)
+                if (d <= 1.55f)
+                {
+                    if (w.IsTunnelOpen(x, y) || w.IsGas(x, y)) return false;
+                    if (w.IsExcavated(x, y)) return false;
+                    if (w.Get(x, y).IsUndamageableBorder) return false;
+                }
+
+                // Rock buffer ring: no open tunnel within rockBuffer of the pocket body
+                if (d <= 1f)
+                {
+                    for (int by = -rockBuffer; by <= rockBuffer; by++)
+                    for (int bx = -rockBuffer; bx <= rockBuffer; bx++)
+                    {
+                        if (bx == 0 && by == 0) continue;
+                        int px = x + bx, py = y + by;
+                        if (!w.InBounds(px, py)) return false;
+                        if (w.IsTunnelOpen(px, py)) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        static void CarveGasPocket(FineTerrainWorld w, int cx, int cy, int rx, int ry, float stretch)
+        {
+            for (int oy = -ry - 1; oy <= ry + 1; oy++)
+            for (int ox = -rx - 1; ox <= rx + 1; ox++)
+            {
+                float nx = ox / (float)Mathf.Max(1, rx);
+                float ny = oy / (float)Mathf.Max(1, ry);
+                float d = nx * nx + ny * ny * stretch;
+                int x = cx + ox, y = cy + oy;
+                if (!w.InBounds(x, y)) continue;
+                var cell = w.Get(x, y);
+                if (cell.IsUndamageableBorder) continue;
+                if (w.IsTunnelOpen(x, y) || w.IsExcavated(x, y)) continue;
+
+                if (d <= 1f)
+                {
+                    w.InstantExcavate(x, y, notify: false);
+                    w.MarkGas(x, y, true);
+                }
+                else if (d <= 1.55f)
+                {
+                    // Soft crust — diggable, but still solid until you punch through
+                    w.Set(x, y, FineTerrainWorld.FromCounts(4, 0, 0));
+                    var soft = w.Get(x, y);
+                    soft.Durability = (byte)Mathf.Max(2, soft.Durability / 3);
+                    soft.MaxDurability = soft.Durability;
+                    soft.DamageState = 0;
+                    w.Set(x, y, soft);
+                }
+            }
         }
 
         /// <summary>

@@ -201,7 +201,7 @@ namespace DeepCore.FreeMovement
             ApplyLit(sr);
             go.transform.localScale = Vector3.one * 0.55f;
 
-            // Single hard cozy pool — no fill wash that lights the whole mine
+            // Cozy pool — no 2D shadows (per-cell casters × lanterns is too costly)
             var light = go.AddComponent<Light2D>();
             ConfigurePointLight(light,
                 new Color(1f, 0.58f, 0.22f),

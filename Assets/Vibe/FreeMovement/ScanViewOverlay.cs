@@ -3,36 +3,35 @@ using UnityEngine;
 
 namespace DeepCore.FreeMovement
 {
+    public enum ScanHintKind : byte { Gold = 0, Bedrock = 1, Gas = 2 }
+
     /// <summary>
-    /// Soft vector outline zones — estimated gold / bedrock regions (not icon stamps).
-    /// Nearby hints merge into quiet neon contours with faint interior wash.
+    /// Sparse technical zone outlines for scan estimates. Cheap to draw, hard-capped count.
+    /// Keep in sync with map features (gold / bedrock / gas / …).
     /// </summary>
     public sealed class ScanViewOverlay : MonoBehaviour
     {
-        const int Ppu = 5;
+        const int Ppu = 3;
+        const int MaxGoldZones = 5;
+        const int MaxBedZones = 4;
+        const int MaxGasZones = 3;
 
         struct Zone
         {
-            public float X;
-            public float Y;
-            public float Gold;
-            public float Bed;
-            public float Radius; // cells
-            public float TargetRadius;
-            public float Age;
-            public float StretchX;
-            public float StretchY;
-            public float Angle; // radians — soft ellipse tilt
+            public float X, Y;
+            public ScanHintKind Kind;
+            public float Radius;
+            public float StretchX, StretchY, Angle;
+            public float Strength;
         }
 
         FineTerrainWorld _world;
         Texture2D _tex;
         Color32[] _px;
-        readonly List<Zone> _zones = new(32);
+        readonly List<Zone> _zones = new(16);
         SpriteRenderer _sr;
         bool _visible;
         bool _dirty;
-        float _flash;
 
         static readonly Color32 Clear = new(0, 0, 0, 0);
 
@@ -89,87 +88,116 @@ namespace DeepCore.FreeMovement
             _dirty = true;
         }
 
-        /// <summary>Add / grow a soft estimate region around a cell.</summary>
-        public void AddHint(int cx, int cy, float gold, float bedrock, int bleed = 2)
+        public void Flash() { }
+        public void SoftPing() { }
+
+        public void AddHint(int cx, int cy, float gold, float bedrock, int bleed = 2) =>
+            AddHint(cx, cy, gold, bedrock, gas: 0f, bleed);
+
+        public void AddHint(int cx, int cy, float gold, float bedrock, float gas, int bleed = 2)
         {
             if (_world == null || !_world.InBounds(cx, cy)) return;
 
-            bool isGold = gold >= bedrock && gold > 0.01f;
-            float radius = Mathf.Lerp(2.4f, 4.2f, Mathf.Clamp01(bleed / 3f));
-            radius *= 0.9f + Random.value * 0.25f;
+            ScanHintKind kind;
+            float strength;
+            if (gas > gold && gas > bedrock && gas > 0.01f)
+            {
+                kind = ScanHintKind.Gas;
+                strength = gas;
+            }
+            else if (gold >= bedrock && gold > 0.01f)
+            {
+                kind = ScanHintKind.Gold;
+                strength = gold;
+            }
+            else if (bedrock > 0.01f)
+            {
+                kind = ScanHintKind.Bedrock;
+                strength = bedrock;
+            }
+            else return;
 
-            float jx = cx + 0.5f + Random.Range(-0.45f, 0.45f);
-            float jy = cy + 0.5f + Random.Range(-0.45f, 0.45f);
+            float radius = Mathf.Lerp(3.2f, 5.5f, Mathf.Clamp01(bleed / 3f));
+            float jx = cx + 0.5f;
+            float jy = cy + 0.5f;
 
-            // Merge same-type zones into soft area outlines
-            const float mergeDist = 5.5f;
+            float mergeR = kind switch
+            {
+                ScanHintKind.Gold => 9f,
+                ScanHintKind.Gas => 8f,
+                _ => 7f,
+            };
             for (int i = 0; i < _zones.Count; i++)
             {
                 var z = _zones[i];
-                bool zGold = z.Gold >= z.Bed && z.Gold > 0.01f;
-                if (zGold != isGold) continue;
+                if (z.Kind != kind) continue;
                 float dx = z.X - jx;
                 float dy = z.Y - jy;
-                float mergeR = (z.TargetRadius + radius) * 0.65f;
-                if (dx * dx + dy * dy > mergeR * mergeR && dx * dx + dy * dy > mergeDist * mergeDist)
-                    continue;
-
-                // Weighted center toward richer / newer ping
-                float wNew = 0.35f + Mathf.Max(gold, bedrock) * 0.25f;
-                z.X = Mathf.Lerp(z.X, jx, wNew);
-                z.Y = Mathf.Lerp(z.Y, jy, wNew);
-                z.Gold = Mathf.Max(z.Gold, gold);
-                z.Bed = Mathf.Max(z.Bed, bedrock);
-                z.TargetRadius = Mathf.Min(7.5f, z.TargetRadius + radius * 0.28f);
-                z.Age = Mathf.Min(z.Age, 0.12f);
-                z.StretchX = Mathf.Clamp(z.StretchX + Random.Range(-0.04f, 0.08f), 0.7f, 1.45f);
-                z.StretchY = Mathf.Clamp(z.StretchY + Random.Range(-0.04f, 0.08f), 0.7f, 1.45f);
+                if (dx * dx + dy * dy > mergeR * mergeR) continue;
+                z.X = (z.X + jx) * 0.5f;
+                z.Y = (z.Y + jy) * 0.5f;
+                z.Radius = Mathf.Min(8f, z.Radius + radius * 0.2f);
+                z.Strength = Mathf.Max(z.Strength, strength);
                 _zones[i] = z;
                 _dirty = true;
                 return;
+            }
+
+            int goldN = 0, bedN = 0, gasN = 0;
+            for (int i = 0; i < _zones.Count; i++)
+            {
+                switch (_zones[i].Kind)
+                {
+                    case ScanHintKind.Gold: goldN++; break;
+                    case ScanHintKind.Gas: gasN++; break;
+                    default: bedN++; break;
+                }
+            }
+
+            if (kind == ScanHintKind.Gold && goldN >= MaxGoldZones)
+            {
+                if (!RemoveWeakest(ScanHintKind.Gold)) return;
+            }
+            else if (kind == ScanHintKind.Bedrock && bedN >= MaxBedZones) return;
+            else if (kind == ScanHintKind.Gas && gasN >= MaxGasZones)
+            {
+                if (!RemoveWeakest(ScanHintKind.Gas)) return;
             }
 
             _zones.Add(new Zone
             {
                 X = jx,
                 Y = jy,
-                Gold = Mathf.Clamp01(gold),
-                Bed = Mathf.Clamp01(bedrock),
-                Radius = radius * 0.2f,
-                TargetRadius = radius,
-                Age = 0f,
-                StretchX = 0.85f + Random.value * 0.45f,
-                StretchY = 0.85f + Random.value * 0.45f,
-                Angle = Random.Range(-0.5f, 0.5f),
+                Kind = kind,
+                Radius = radius,
+                StretchX = 0.9f + Random.value * 0.25f,
+                StretchY = 0.9f + Random.value * 0.25f,
+                Angle = Random.Range(-0.35f, 0.35f),
+                Strength = Mathf.Clamp01(strength),
             });
             _dirty = true;
         }
 
-        public void Flash() => _flash = Mathf.Max(_flash, 0.14f);
-        public void SoftPing() => _flash = Mathf.Max(_flash, 0.08f);
+        bool RemoveWeakest(ScanHintKind kind)
+        {
+            int weakest = -1;
+            float wStr = float.MaxValue;
+            for (int i = 0; i < _zones.Count; i++)
+            {
+                if (_zones[i].Kind != kind) continue;
+                if (_zones[i].Strength < wStr)
+                {
+                    wStr = _zones[i].Strength;
+                    weakest = i;
+                }
+            }
+            if (weakest < 0) return false;
+            _zones.RemoveAt(weakest);
+            return true;
+        }
 
         void LateUpdate()
         {
-            if (_flash > 0f)
-            {
-                _flash -= Time.deltaTime * 1.2f;
-                _dirty = true;
-            }
-
-            bool aging = false;
-            for (int i = 0; i < _zones.Count; i++)
-            {
-                var z = _zones[i];
-                if (z.Age >= 0.7f && Mathf.Abs(z.Radius - z.TargetRadius) < 0.05f) continue;
-                z.Age += Time.deltaTime;
-                float t = Mathf.Clamp01(z.Age / 0.55f);
-                t = t * t * (3f - 2f * t);
-                z.Radius = Mathf.Lerp(z.TargetRadius * 0.15f, z.TargetRadius, t);
-                _zones[i] = z;
-                aging = true;
-            }
-            if (aging) _dirty = true;
-
             if (!_visible || !_dirty || _world == null) return;
             Rebuild();
             _dirty = false;
@@ -177,153 +205,81 @@ namespace DeepCore.FreeMovement
 
         void Rebuild()
         {
-            int w = _world.Width * Ppu;
-            int h = _world.Height * Ppu;
-            float flash = Mathf.Clamp01(_flash / 0.3f);
-
+            int tw = _world.Width * Ppu;
+            int th = _world.Height * Ppu;
             for (int i = 0; i < _px.Length; i++)
                 _px[i] = Clear;
 
-            // Soft metaball field → outline + whisper fill (vector HUD zones)
-            DrawZoneField(w, h, goldLayer: true, flash);
-            DrawZoneField(w, h, goldLayer: false, flash);
+            for (int i = 0; i < _zones.Count; i++)
+                DrawEllipseOutline(tw, th, _zones[i]);
 
             _tex.SetPixels32(_px);
             _tex.Apply(false);
         }
 
-        void DrawZoneField(int texW, int texH, bool goldLayer, float flash)
+        void DrawEllipseOutline(int texW, int texH, Zone z)
         {
-            // Bounds of relevant zones
-            float minX = float.MaxValue, minY = float.MaxValue;
-            float maxX = float.MinValue, maxY = float.MinValue;
-            int count = 0;
-            for (int i = 0; i < _zones.Count; i++)
+            Color neon = z.Kind switch
             {
-                var z = _zones[i];
-                bool isGold = z.Gold >= z.Bed && z.Gold > 0.01f;
-                if (isGold != goldLayer) continue;
-                float pad = z.Radius * 1.35f;
-                minX = Mathf.Min(minX, z.X - pad);
-                maxX = Mathf.Max(maxX, z.X + pad);
-                minY = Mathf.Min(minY, z.Y - pad);
-                maxY = Mathf.Max(maxY, z.Y + pad);
-                count++;
+                ScanHintKind.Gold => new Color(1f, 0.72f, 0.22f, 1f),
+                ScanHintKind.Gas => new Color(0.72f, 0.35f, 1f, 1f),
+                _ => new Color(0.25f, 0.92f, 1f, 1f),
+            };
+            float a = 0.55f * z.Strength;
+
+            float rx = z.Radius * z.StretchX * Ppu;
+            float ry = z.Radius * z.StretchY * Ppu;
+            float cx = z.X * Ppu;
+            float cy = z.Y * Ppu;
+            float ca = Mathf.Cos(z.Angle);
+            float sa = Mathf.Sin(z.Angle);
+
+            const int steps = 40;
+            Vector2 prev = default;
+            for (int i = 0; i <= steps; i++)
+            {
+                float t = (i / (float)steps) * Mathf.PI * 2f;
+                float lx = Mathf.Cos(t) * rx;
+                float ly = Mathf.Sin(t) * ry;
+                Vector2 p = new(
+                    cx + lx * ca - ly * sa,
+                    cy + lx * sa + ly * ca);
+                if (i > 0)
+                    DrawSeg(texW, texH, prev, p, neon, a);
+                prev = p;
             }
-            if (count == 0) return;
 
-            int x0 = Mathf.Max(0, Mathf.FloorToInt(minX * Ppu) - 2);
-            int x1 = Mathf.Min(texW - 1, Mathf.CeilToInt(maxX * Ppu) + 2);
-            int y0 = Mathf.Max(0, Mathf.FloorToInt(minY * Ppu) - 2);
-            int y1 = Mathf.Min(texH - 1, Mathf.CeilToInt(maxY * Ppu) + 2);
+            float arm = Mathf.Clamp(Mathf.Min(rx, ry) * 0.18f, 2.5f, 7f);
+            Vector2 c0 = new(
+                cx + (-rx * 0.7f) * ca - (-ry * 0.7f) * sa,
+                cy + (-rx * 0.7f) * sa + (-ry * 0.7f) * ca);
+            DrawSeg(texW, texH, c0, c0 + new Vector2(ca, sa) * arm, neon, a * 0.7f);
+            DrawSeg(texW, texH, c0, c0 + new Vector2(-sa, ca) * arm, neon, a * 0.7f);
+        }
 
-            Color neon = goldLayer
-                ? new Color(1f, 0.84f, 0.28f, 1f)
-                : new Color(0.35f, 0.92f, 1f, 1f);
-
-            // Contour band around field threshold — soft vector outline
-            const float threshold = 1f;
-            const float outlineHalf = 0.14f;
-
-            for (int y = y0; y <= y1; y++)
-            for (int x = x0; x <= x1; x++)
+        void DrawSeg(int texW, int texH, Vector2 a, Vector2 b, Color col, float alpha)
+        {
+            float len = Vector2.Distance(a, b);
+            int steps = Mathf.Max(1, Mathf.CeilToInt(len));
+            for (int i = 0; i <= steps; i++)
             {
-                float cellX = (x + 0.5f) / Ppu;
-                float cellY = (y + 0.5f) / Ppu;
-                float field = SampleField(cellX, cellY, goldLayer);
-                if (field < 0.01f) continue;
-
-                float appear = 1f; // zones already age their radius
-                float boost = 1f + flash * 0.15f;
-
-                // Soft interior wash
-                if (field >= threshold)
-                {
-                    float depth = Mathf.Clamp01((field - threshold) / 1.2f);
-                    float fillA = (0.035f + 0.04f * depth) * boost;
-                    Blend(x, y, texW, neon.r, neon.g, neon.b, fillA);
-                }
-
-                // Soft outline (distance-to-threshold band)
-                float edgeDist = Mathf.Abs(field - threshold);
-                if (edgeDist < outlineHalf * 2.2f)
-                {
-                    float e = 1f - edgeDist / (outlineHalf * 2.2f);
-                    e = e * e * (3f - 2f * e);
-                    // Sharper core of the stroke, soft bloom outside
-                    float stroke = e * e;
-                    float a = (0.22f + 0.28f * stroke) * boost * appear;
-                    // Outer glow slightly wider / quieter
-                    float glow = e * 0.1f * boost;
-                    Blend(x, y, texW, neon.r, neon.g, neon.b, Mathf.Max(a, glow));
-                }
+                float t = i / (float)steps;
+                Vector2 p = Vector2.Lerp(a, b, t);
+                Plot(Mathf.RoundToInt(p.x), Mathf.RoundToInt(p.y), texW, col, alpha);
             }
         }
 
-        float SampleField(float cellX, float cellY, bool goldLayer)
-        {
-            float sum = 0f;
-            for (int i = 0; i < _zones.Count; i++)
-            {
-                var z = _zones[i];
-                bool isGold = z.Gold >= z.Bed && z.Gold > 0.01f;
-                if (isGold != goldLayer) continue;
-
-                float appear = Mathf.Clamp01(z.Age / 0.4f);
-                appear = appear * appear * (3f - 2f * appear);
-                float strength = Mathf.Max(z.Gold, z.Bed) * Mathf.Lerp(0.55f, 1f, appear);
-                if (strength < 0.05f) continue;
-
-                float dx = cellX - z.X;
-                float dy = cellY - z.Y;
-                // Soft ellipse with slight rotation — organic vector shape
-                float ca = Mathf.Cos(z.Angle);
-                float sa = Mathf.Sin(z.Angle);
-                float rx = (dx * ca + dy * sa) / (z.Radius * z.StretchX + 0.001f);
-                float ry = (-dx * sa + dy * ca) / (z.Radius * z.StretchY + 0.001f);
-                float d2 = rx * rx + ry * ry;
-                if (d2 > 2.8f) continue;
-
-                // Metaball falloff + tiny noise for soft non-perfect edge
-                float n = Hash(cellX * 0.7f + z.X, cellY * 0.7f + z.Y);
-                float warp = 1f + (n - 0.5f) * 0.12f;
-                float d = Mathf.Sqrt(d2) * warp;
-                if (d >= 1.55f) continue;
-
-                // Smooth contribution — peaks near center
-                float contrib = 1f - d / 1.55f;
-                contrib = contrib * contrib;
-                sum += contrib * strength * 1.65f;
-            }
-            return sum;
-        }
-
-        void Blend(int x, int y, int texW, float r, float g, float b, float srcA)
+        void Plot(int x, int y, int texW, Color col, float alpha)
         {
             if (x < 0 || y < 0) return;
             int i = y * texW + x;
             if (i < 0 || i >= _px.Length) return;
-            srcA = Mathf.Clamp01(srcA);
-            if (srcA < 0.002f) return;
-
-            var prev = _px[i];
-            float dstA = prev.a / 255f;
-            float outA = srcA + dstA * (1f - srcA);
-            if (outA < 0.001f) return;
-
-            float wSrc = srcA / outA;
-            float wDst = 1f - wSrc;
+            byte aa = (byte)Mathf.Clamp(alpha * 255f, 0, 180);
             _px[i] = new Color32(
-                (byte)Mathf.Clamp(r * 255f * wSrc + prev.r * wDst, 0, 255),
-                (byte)Mathf.Clamp(g * 255f * wSrc + prev.g * wDst, 0, 255),
-                (byte)Mathf.Clamp(b * 255f * wSrc + prev.b * wDst, 0, 255),
-                (byte)Mathf.Clamp(outA * 255f, 0, 110));
-        }
-
-        static float Hash(float x, float y)
-        {
-            float n = Mathf.Sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
-            return n - Mathf.Floor(n);
+                (byte)(col.r * 255f),
+                (byte)(col.g * 255f),
+                (byte)(col.b * 255f),
+                aa);
         }
     }
 }

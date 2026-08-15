@@ -1,84 +1,220 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace DeepCore.FreeMovement
 {
     /// <summary>
-    /// Excavator digs a passable tunnel: full body-width clearance + sharp tip past the nose.
-    /// Keeps chewing while blocked so it never stalls vibrating in a V-notch.
+    /// Excavator digs a passable tunnel. Supports a queued dig route of pinpoints.
     /// </summary>
     public sealed class FreeWorkerController : MonoBehaviour
     {
         [SerializeField] float moveSpeed = 1.35f;
-        [SerializeField] float digMoveSpeed = 0.28f;
-        [SerializeField] float rotateSpeed = 130f;
-        [SerializeField] float digInterval = 0.28f;
+        [SerializeField] float digMoveSpeed = 0.1f;
+        [SerializeField] float rotateSpeed = 100f;
+        [SerializeField] float digInterval = 0.95f;
         [SerializeField] int digsPerTick = 1;
         [SerializeField] int digsWhenStalled = 1;
-        [SerializeField] float tipReach = 0.2f; // past the nose
+        [SerializeField] float tipReach = 0.2f;
 
         FineTerrainWorld _world;
-        float _radius;       // visual / setup footprint
-        float _moveRadius;   // collision — slightly tighter than dig so it fits
-        float _digHalf;      // tunnel half-width (narrower than full footprint)
+        float _radius;
+        float _moveRadius;
+        float _digHalf;
         Vector2 _goal;
         bool _hasGoal;
         float _digTimer;
         int _stallFrames;
-        Transform _goalMarker;
+        Transform _pinsRoot;
+        LineRenderer _routeLine;
+        Sprite _pinSprite;
+        readonly List<Vector2> _route = new(16);
+        readonly List<Transform> _pinVisuals = new(16);
+        int _routeI;
         System.Action<int, int> _onBrokeCell;
+        System.Action<TerrainCell, bool> _onDigImpact;
 
         public float Radius => _radius;
         public bool IsActivelyDigging { get; private set; }
-        /// <summary>Terrain-space forward (dig facing).</summary>
         public Vector2 Facing => transform.up;
-        /// <summary>Approx visual drill tip in terrain space (for FX / eject).</summary>
-        public Vector2 DrillTip(float ahead = 0.42f) =>
-            Position + Facing * ahead;
-        /// <summary>Terrain-space position (local to parent). Matches FineTerrainWorld coords.</summary>
+        public Vector2 DrillTip(float ahead = 0.42f) => Position + Facing * ahead;
         public Vector2 Position => transform.localPosition;
-        public bool HasGoal => _hasGoal;
+        public bool HasGoal => _hasGoal || _route.Count > 0;
+        public int RouteCount => _route.Count;
+        public FineTerrainWorld World => _world;
+        public Vector2 Goal => _goal;
+
+        /// <summary>Dig pins / route line — intended for scan view only.</summary>
+        public void SetRouteVisible(bool visible)
+        {
+            if (_pinsRoot != null)
+                _pinsRoot.gameObject.SetActive(visible);
+        }
 
         public void Setup(FineTerrainWorld world, Vector2 start, float footprintRadius,
-            Transform goalMarker = null, System.Action<int, int> onBrokeCell = null)
+            Transform pinsRoot = null, System.Action<int, int> onBrokeCell = null,
+            System.Action<TerrainCell, bool> onDigImpact = null, Sprite pinSprite = null)
         {
             _world = world;
             _radius = footprintRadius;
-            // Tunnel is deliberately tighter than the sprite footprint
             _digHalf = footprintRadius * 0.72f;
             _moveRadius = footprintRadius * 0.68f;
             transform.localPosition = start;
             _hasGoal = false;
             _stallFrames = 0;
-            _goalMarker = goalMarker;
             _onBrokeCell = onBrokeCell;
-            if (_goalMarker != null) _goalMarker.gameObject.SetActive(false);
+            _onDigImpact = onDigImpact;
+            _pinSprite = pinSprite;
+            _pinsRoot = pinsRoot;
+            EnsureRouteLine();
+            ClearRoute();
         }
 
-        public void SetGoal(Vector2 terrainPos)
+        void EnsureRouteLine()
+        {
+            if (_pinsRoot == null) return;
+            if (_routeLine != null) return;
+            var go = new GameObject("RouteLine");
+            go.transform.SetParent(_pinsRoot, false);
+            _routeLine = go.AddComponent<LineRenderer>();
+            _routeLine.useWorldSpace = false;
+            _routeLine.loop = false;
+            _routeLine.widthMultiplier = 0.035f;
+            _routeLine.numCapVertices = 2;
+            _routeLine.sortingOrder = 34;
+            var sh = Shader.Find("Sprites/Default");
+            if (sh != null) _routeLine.material = new Material(sh);
+            _routeLine.startColor = _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.45f);
+            _routeLine.positionCount = 0;
+        }
+
+        /// <summary>LMB append pin. Shift+LMB replace route with one pin.</summary>
+        public void AddPin(Vector2 terrainPos, bool replaceRoute)
         {
             if (_world == null) return;
             var size = _world.WorldSize;
-            _goal = new Vector2(
+            var p = new Vector2(
                 Mathf.Clamp(terrainPos.x, _moveRadius, size.x - _moveRadius),
                 Mathf.Clamp(terrainPos.y, _moveRadius, size.y - _moveRadius));
-            _hasGoal = true;
-            _stallFrames = 0;
-            if (_goalMarker != null)
+
+            // Snap to cell center — feels like placing a dig marker on the grid
+            var cell = _world.WorldToCell(p);
+            if (_world.InBounds(cell.x, cell.y))
+                p = _world.CellCenter(cell.x, cell.y);
+
+            if (replaceRoute)
             {
-                _goalMarker.gameObject.SetActive(true);
-                _goalMarker.localPosition = _goal;
+                _route.Clear();
+                _routeI = 0;
             }
+            _route.Add(p);
+            RefreshVisuals();
+            ActivateCurrentPin();
         }
 
-        public void ClearGoal()
+        /// <summary>Legacy single-goal API — replaces route with one pin.</summary>
+        public void SetGoal(Vector2 terrainPos) => AddPin(terrainPos, replaceRoute: true);
+
+        public void UndoLastPin()
         {
+            if (_route.Count == 0) return;
+            // If we're mid-route, prefer popping unvisited pins first
+            if (_route.Count > _routeI + 1)
+                _route.RemoveAt(_route.Count - 1);
+            else
+            {
+                _route.RemoveAt(_route.Count - 1);
+                _routeI = Mathf.Max(0, _route.Count - 1);
+            }
+            RefreshVisuals();
+            if (_route.Count == 0) ClearRoute();
+            else ActivateCurrentPin();
+        }
+
+        public void ClearGoal() => ClearRoute();
+
+        public void ClearRoute()
+        {
+            _route.Clear();
+            _routeI = 0;
             _hasGoal = false;
             _stallFrames = 0;
-            if (_goalMarker != null) _goalMarker.gameObject.SetActive(false);
+            RefreshVisuals();
         }
 
-        public FineTerrainWorld World => _world;
-        public Vector2 Goal => _goal;
+        void ActivateCurrentPin()
+        {
+            if (_route.Count == 0)
+            {
+                _hasGoal = false;
+                return;
+            }
+            _routeI = Mathf.Clamp(_routeI, 0, _route.Count - 1);
+            _goal = _route[_routeI];
+            _hasGoal = true;
+            _stallFrames = 0;
+            RefreshVisuals();
+        }
+
+        void AdvanceRoute()
+        {
+            _routeI++;
+            if (_routeI >= _route.Count)
+            {
+                ClearRoute();
+                return;
+            }
+            ActivateCurrentPin();
+        }
+
+        void RefreshVisuals()
+        {
+            EnsureRouteLine();
+            while (_pinVisuals.Count < _route.Count)
+            {
+                var pin = new GameObject($"Pin{_pinVisuals.Count}").transform;
+                pin.SetParent(_pinsRoot != null ? _pinsRoot : transform.parent, false);
+                var sr = pin.gameObject.AddComponent<SpriteRenderer>();
+                sr.sprite = _pinSprite;
+                sr.sortingOrder = 36;
+                DigVisualKit.ApplyLit(sr);
+                pin.localScale = Vector3.one * 0.42f;
+                _pinVisuals.Add(pin);
+            }
+
+            for (int i = 0; i < _pinVisuals.Count; i++)
+            {
+                bool on = i < _route.Count;
+                _pinVisuals[i].gameObject.SetActive(on);
+                if (!on) continue;
+                _pinVisuals[i].localPosition = _route[i];
+                var sr = _pinVisuals[i].GetComponent<SpriteRenderer>();
+                if (sr == null) continue;
+                // Current = bright green; upcoming = dimmer; past = muted
+                if (i < _routeI)
+                    sr.color = new Color(0.35f, 0.55f, 0.4f, 0.35f);
+                else if (i == _routeI)
+                    sr.color = new Color(0.4f, 1f, 0.55f, 1f);
+                else
+                    sr.color = new Color(0.45f, 0.9f, 0.6f, 0.7f);
+                _pinVisuals[i].localScale = Vector3.one * (i == _routeI ? 0.5f : 0.38f);
+            }
+
+            if (_routeLine == null) return;
+            if (_route.Count == 0)
+            {
+                _routeLine.positionCount = 0;
+                return;
+            }
+
+            // Path from excavator through remaining pins
+            int remaining = _route.Count - _routeI;
+            _routeLine.positionCount = remaining + 1;
+            _routeLine.SetPosition(0, Position);
+            for (int i = 0; i < remaining; i++)
+                _routeLine.SetPosition(i + 1, _route[_routeI + i]);
+            _routeLine.startColor = new Color(0.35f, 1f, 0.55f, 0.55f);
+            _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.2f);
+        }
 
         public void Tick(Vector2 wasd) => Tick(wasd, clearGoalOnWasd: true);
 
@@ -88,24 +224,44 @@ namespace DeepCore.FreeMovement
 
             if (wasd.sqrMagnitude > 0.01f)
             {
-                if (clearGoalOnWasd) ClearGoal();
+                if (clearGoalOnWasd) ClearRoute();
                 Step(wasd.normalized, moveSpeed, dig: true);
                 return;
             }
 
             if (!_hasGoal) return;
 
+            // Keep route line attached to excavator while moving
+            if (_route.Count > 0 && _routeLine != null && _routeLine.positionCount > 0)
+                _routeLine.SetPosition(0, Position);
+
             Vector2 pos = transform.localPosition;
             Vector2 to = _goal - pos;
             float dist = to.magnitude;
-            if (dist < 0.08f)
+            if (dist < 0.1f)
             {
-                ClearGoal();
+                AdvanceRoute();
                 return;
             }
 
-            // Keep chewing toward pinpoint even when almost there but clipped by rock
-            Step(to.normalized, digMoveSpeed, dig: true);
+            Vector2 dir = to.normalized;
+            // Cruise at full speed on open floor; only crawl when rock is in the way
+            bool rockInPath = PathBlockedByRock(pos, dir);
+            float speed = rockInPath || _stallFrames > 0 ? digMoveSpeed : moveSpeed;
+            Step(dir, speed, dig: rockInPath || _stallFrames > 0);
+        }
+
+        bool PathBlockedByRock(Vector2 pos, Vector2 dir)
+        {
+            if (dir.sqrMagnitude < 0.0001f) return false;
+            // Immediate next step
+            if (_world.CircleHitsSolid(pos + dir * Mathf.Max(moveSpeed * Time.deltaTime, _moveRadius * 0.35f), _moveRadius))
+                return true;
+            // Tip / clearance zone — rock close enough that we should dig, not sprint
+            float probe = _moveRadius + tipReach + _world.CellSize * 0.6f;
+            if (_world.CircleHitsSolid(pos + dir * probe, _moveRadius * 0.55f))
+                return true;
+            return false;
         }
 
         void Step(Vector2 dir, float speed, bool dig)
@@ -125,66 +281,46 @@ namespace DeepCore.FreeMovement
                 {
                     _digTimer = urgent ? digInterval * 0.65f : digInterval;
                     int budget = _stallFrames > 12 ? digsWhenStalled : digsPerTick;
-                    _world.BeginBatch();
-                    int dug = 0;
-                    while (budget-- > 0)
+                    for (int i = 0; i < budget; i++)
                     {
                         if (!DigOneClearanceCell(pos, dir)) break;
-                        dug++;
                         IsActivelyDigging = true;
                     }
-                    // Single unstick chew — slow and deliberate
-                    if (_stallFrames > 10 && dug == 0)
+                    if (!canMove)
                     {
-                        if (DigAnyBlocking(pos, dir))
-                            IsActivelyDigging = true;
+                        for (int i = 0; i < budget; i++)
+                        {
+                            if (DigAnyBlocking(pos, dir))
+                                IsActivelyDigging = true;
+                            else break;
+                        }
                     }
-                    _world.EndBatch();
-
-                    tryPos = pos + dir * (speed * Time.deltaTime);
-                    canMove = !_world.CircleHitsSolid(tryPos, _moveRadius);
-                }
-                else if (!canMove)
-                {
-                    // Pressed against rock waiting for next dig tick
-                    IsActivelyDigging = _stallFrames > 0;
                 }
             }
 
+            canMove = !_world.CircleHitsSolid(tryPos, _moveRadius);
             if (canMove)
             {
+                transform.localPosition = tryPos;
                 _stallFrames = 0;
-                Vector2 next = pos;
-                Vector2 delta = tryPos - pos;
-                TryMove(ref next, new Vector2(delta.x, 0f));
-                TryMove(ref next, new Vector2(0f, delta.y));
-                if (!_world.CircleHitsSolid(tryPos, _moveRadius))
-                    next = tryPos;
-                transform.localPosition = Vector2.Lerp(pos, next, 0.92f);
             }
             else
             {
                 _stallFrames++;
+                IsActivelyDigging = _stallFrames > 0;
             }
         }
 
         void Face(Vector2 dir)
         {
+            if (dir.sqrMagnitude < 0.0001f) return;
             float ang = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg - 90f;
-            transform.rotation = Quaternion.RotateTowards(
-                transform.rotation, Quaternion.Euler(0, 0, ang), rotateSpeed * Time.deltaTime);
+            transform.localRotation = Quaternion.RotateTowards(
+                transform.localRotation,
+                Quaternion.Euler(0f, 0f, ang),
+                rotateSpeed * Time.deltaTime);
         }
 
-        void TryMove(ref Vector2 pos, Vector2 delta)
-        {
-            Vector2 next = pos + delta;
-            if (!_world.CircleHitsSolid(next, _moveRadius))
-                pos = next;
-        }
-
-        /// <summary>
-        /// Narrow clearance: dig half-width ≈ 72% of footprint, sharp tip.
-        /// </summary>
         bool DigOneClearanceCell(Vector2 pos, Vector2 dir)
         {
             float cs = _world.CellSize;
@@ -194,8 +330,8 @@ namespace DeepCore.FreeMovement
 
             int x0 = Mathf.FloorToInt((pos.x - maxSide) / cs) - 1;
             int x1 = Mathf.FloorToInt((pos.x + maxSide) / cs) + 1;
-            int y0 = Mathf.FloorToInt((pos.y - maxSide) / cs) - 1;
-            int y1 = Mathf.FloorToInt((pos.y + maxSide) / cs) + 1;
+            int y0 = Mathf.FloorToInt((pos.y - maxAlong) / cs) - 1;
+            int y1 = Mathf.FloorToInt((pos.y + maxAlong) / cs) + 1;
 
             int bestX = -1, bestY = -1;
             float bestScore = float.MaxValue;
@@ -236,7 +372,9 @@ namespace DeepCore.FreeMovement
             }
 
             if (bestX < 0) return false;
+            var before = _world.Get(bestX, bestY);
             bool broke = _world.Damage(bestX, bestY);
+            _onDigImpact?.Invoke(before, broke);
             if (broke) _onBrokeCell?.Invoke(bestX, bestY);
             return true;
         }
@@ -275,17 +413,17 @@ namespace DeepCore.FreeMovement
             }
 
             if (bestX < 0) return false;
+            var before = _world.Get(bestX, bestY);
             bool broke = _world.Damage(bestX, bestY);
+            _onDigImpact?.Invoke(before, broke);
             if (broke) _onBrokeCell?.Invoke(bestX, bestY);
             return true;
         }
 
         float AllowedHalfWidth(float along)
         {
-            // Narrow body corridor; sharp tip past the nose
             if (along <= _digHalf)
                 return _digHalf;
-
             float t = Mathf.Clamp01((along - _digHalf) / Mathf.Max(0.001f, tipReach));
             t = t * t;
             return Mathf.Lerp(_digHalf, _world.CellSize * 0.28f, t);
@@ -300,7 +438,7 @@ namespace DeepCore.FreeMovement
             float closestY = Mathf.Clamp(center.y, cy0, cy0 + cs);
             float dx = center.x - closestX;
             float dy = center.y - closestY;
-            return dx * dx + dy * dy < radius * radius;
+            return dx * dx + dy * dy <= radius * radius;
         }
     }
 }

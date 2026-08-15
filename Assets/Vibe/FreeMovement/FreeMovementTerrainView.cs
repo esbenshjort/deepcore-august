@@ -146,6 +146,13 @@ namespace DeepCore.FreeMovement
                     field += 0.14f * Mathf.PerlinNoise(tx * 0.55f + 2.1f, ty * 0.55f) - 0.07f;
                     field += 0.06f * Mathf.PerlinNoise(tx * 1.4f, ty * 1.4f) - 0.03f;
 
+                    // Gas void: no floor until seen (breach mouth / entered). Stops lanterns
+                    // lighting the pocket through rock before you punch in.
+                    int scx = Mathf.Clamp(Mathf.FloorToInt(tx), 0, tw - 1);
+                    int scy = Mathf.Clamp(Mathf.FloorToInt(ty), 0, th - 1);
+                    if (_world.IsGas(scx, scy) && !_world.IsFloorOpen(scx, scy) && field > 0f)
+                        field = -0.4f;
+
                     _wallPx[i] = Clear;
 
                     if (field > 0f)
@@ -195,6 +202,8 @@ namespace DeepCore.FreeMovement
                         int cx = Mathf.Clamp(Mathf.FloorToInt(tx), 0, tw - 1);
                         int cy = Mathf.Clamp(Mathf.FloorToInt(ty), 0, th - 1);
                         var cell = _world.Get(cx, cy);
+                        // Unseen gas void reads as ordinary rock until you break in
+                        bool hideGas = _world.IsGas(cx, cy) && !_world.IsFloorOpen(cx, cy);
                         float n = Mathf.PerlinNoise(tx * 0.35f + 8f, ty * 0.35f);
                         float strata = Mathf.PerlinNoise(tx * 0.2f, ty * 0.5f);
 
@@ -203,14 +212,14 @@ namespace DeepCore.FreeMovement
                         if (Hash(px * 3, py * 7) > 0.75f)
                             rock = Lerp(rock, WallGrain, 0.3f);
 
-                        if (cell.Phase == TerrainPhase.Damaged)
+                        if (!hideGas && cell.Phase == TerrainPhase.Damaged)
                         {
                             float d = cell.MaxDurability <= 0 ? 1f : cell.DamageState / (float)cell.MaxDurability;
                             rock = Lerp(rock, new Color32(80, 52, 30, 255), d * 0.4f * reveal);
                         }
 
                         // Gold: 1 socket = faint, 4 sockets = fully yellow & shiny
-                        int goldN = cell.GoldCount;
+                        int goldN = hideGas ? 0 : cell.GoldCount;
                         if (goldN > 0)
                         {
                             float t = goldN / 4f; // 0.25 … 1
@@ -308,7 +317,7 @@ namespace DeepCore.FreeMovement
                 float dy = ty - (y + 0.5f + jy);
                 float d = Mathf.Sqrt(dx * dx + dy * dy);
 
-                if (s.Phase == TerrainPhase.Excavated)
+                if (s.Phase == TerrainPhase.Excavated && _world.IsFloorOpen(x, y))
                     best = Mathf.Max(best, 0.72f + Hash01(x, y, 9) * 0.12f - d);
                 else if (s.Phase == TerrainPhase.Damaged)
                 {
