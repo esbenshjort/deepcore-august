@@ -243,7 +243,7 @@ namespace DeepCore.FreeMovement
             var c = _world.Get(x, y);
             // Land under the excavator body (slight scatter) — not at the dug cell
             Vector2 under = _worker.Position + Random.insideUnitCircle * (_worker.Radius * 0.4f);
-            LoosePile.Spawn(_looseRoot, _pixel, under, c.Mass, c.GoldGrade, _world.CellSize, _worker.Radius);
+            LoosePile.SpawnCellFromDrill(_looseRoot, under, _worker.Facing, c, _world.CellSize, _worker.Radius);
         }
 
         Transform BuildFootprintRing(Transform parent)

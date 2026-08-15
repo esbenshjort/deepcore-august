@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.Rendering.Universal;
@@ -13,12 +14,13 @@ namespace DeepCore.FreeMovement
         public const int CellsAcrossWorker = 12;
 
         [SerializeField] float cellSize = 0.1f;
-        [SerializeField] float cameraSize = 7.5f;
+        [SerializeField] float cameraSize = 8.5f;
         [SerializeField] float cameraFollow = 5f;
 
         FineTerrainWorld _world;
         FreeWorkerController _worker;
         HaulerPerson _hauler;
+        ProspectorPerson _prospector;
         DeliveryCalculator _calc;
         BasecampYard _yard;
         Stockpile _hoverPile;
@@ -28,6 +30,12 @@ namespace DeepCore.FreeMovement
         Transform _goalMarker;
         Sprite _pixel;
         Sprite _goalSprite;
+        TacticalMapOverlay _tactical;
+        ScanViewOverlay _scanView;
+        enum ControlWorker : byte { Prospector = 0, Excavator = 1, Hauler = 2 }
+        ControlWorker _control = ControlWorker.Prospector;
+        // HUD hit-rects (GUI space, y-down) — block world dig/aim clicks
+        readonly List<Rect> _hudBlockers = new(12);
         int _goldCells;
         int _goldSocketsTotal;
         int _goldFoundCells;
@@ -37,8 +45,8 @@ namespace DeepCore.FreeMovement
 
         float WorkerRadius => CellsAcrossWorker * 0.5f * cellSize;
         int StartX => _world.Width / 2;
-        int StartY => 22;
-        Vector2 BasecampPos => _world.CellCenter(StartX, StartY - 6);
+        int StartY => 28;
+        Vector2 BasecampPos => _world.CellCenter(StartX, StartY - 4);
 
         void Start() => Build();
 
@@ -49,9 +57,9 @@ namespace DeepCore.FreeMovement
             _pixel = DigVisualKit.Pixel;
             _goalSprite = MakeGoalSprite();
 
-            // Large test field (~20×16 world units)
-            int tw = 200;
-            int th = 160;
+            // Larger prospector field
+            int tw = 240;
+            int th = 200;
             _world = new FineTerrainWorld(tw, th, cellSize);
             BuildMap();
             CountStats();
@@ -66,8 +74,11 @@ namespace DeepCore.FreeMovement
             viewGo.transform.SetParent(_worldRoot, false);
             viewGo.AddComponent<FreeMovementTerrainView>()
                 .Setup(_world, fogOfWarGold: false, strongCliffEdges: true);
+            GoldVeinShine.Attach(_worldRoot, _world);
+            _tactical = TacticalMapOverlay.Attach(_worldRoot, _world);
+            _scanView = ScanViewOverlay.Attach(_worldRoot, _world);
 
-            DigVisualKit.PlaceLantern(_lanternRoot, _world.CellCenter(StartX, StartY - 4), local: true, intensity: 2.6f);
+            DigVisualKit.PlaceLantern(_lanternRoot, _world.CellCenter(StartX, StartY - 2), local: true, intensity: 2.6f);
             _lanternCount = 1;
 
             _calc = new DeliveryCalculator();
@@ -75,9 +86,12 @@ namespace DeepCore.FreeMovement
             _calc.BindStockpiles(_yard.Rock, _yard.Gold);
             SpawnWorker(_worldRoot);
             _hauler = HaulerPerson.Spawn(_worldRoot, _world, _yard.DropPoint, _calc);
+            _prospector = ProspectorPerson.Spawn(_worldRoot, _world,
+                _world.CellCenter(StartX - 6, StartY - 2), _scanView);
+            _control = ControlWorker.Prospector;
             FrameCamera();
 
-            Debug.Log($"[SocketMap] {tw}×{th} · rock/gold stockpiles · L lantern · R reset");
+            Debug.Log($"[SocketMap] worker cards · Tab cycle · F radar · Space scan");
         }
 
         void BuildMap()
@@ -96,77 +110,17 @@ namespace DeepCore.FreeMovement
                 _world.Set(tw - 1, y, FineTerrainWorld.MakeBedrock());
             }
 
-            // Soft noise variation across the whole map (mostly rock, some mixed)
-            var rng = new System.Random(9081);
-            _world.BeginBatch();
-            for (int y = 1; y < th - 1; y++)
-            for (int x = 1; x < tw - 1; x++)
-            {
-                float n = Mathf.PerlinNoise(x * 0.07f + 3f, y * 0.07f + 1f);
-                float n2 = Mathf.PerlinNoise(x * 0.03f + 9f, y * 0.03f);
-                if (n > 0.72f)
-                {
-                    int bedrock = n > 0.88f ? 4 : (n > 0.8f ? 3 : 2);
-                    _world.Set(x, y, FineTerrainWorld.FromCounts(4 - bedrock, bedrock, 0));
-                }
-                else if (n2 > 0.78f && rng.NextDouble() < 0.35)
-                {
-                    // Sparse single-gold dust
-                    _world.Set(x, y, FineTerrainWorld.FromCounts(3, 0, 1));
-                }
-            }
-            _world.EndBatch();
+            // Half-oval start chamber (flat floor, curved roof)
+            int rx = 28, ry = 18;
+            int floorY = StartY - 8;
+            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, floorY, rx, ry);
+            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, floorY + ry - 2, 7, 16);
 
-            // Start chamber
-            int sw = 40, sh = 22;
-            int sx = StartX - sw / 2;
-            int sy = StartY - sh / 2;
-            _world.ExcavateRect(sx, sy, sw, sh);
+            // Organic bedrock veins + clumps (soft corridors remain diggable)
+            GoldVeinPlacer.PlaceOrganicBedrock(_world, seed: 7701);
 
-            // Short starter shafts
-            _world.ExcavateRect(StartX - 4, sy + sh, 8, 14);
-            _world.ExcavateRect(sx - 10, StartY - 3, 10, 6);
-            _world.ExcavateRect(sx + sw, StartY - 3, 10, 6);
-
-            // Legend wall just above chamber: 1→4 gold sockets side by side
-            PlaceGoldLegend(StartX - 10, sy + sh + 2);
-
-            // Diggable bedrock bands / patches
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.25f, 0.45f, 0.08f, seed: 11);
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.70f, 0.40f, 0.09f, seed: 12);
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.45f, 0.70f, 0.11f, seed: 13);
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.18f, 0.78f, 0.07f, seed: 14);
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.82f, 0.75f, 0.08f, seed: 15);
-            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.55f, 0.28f, 0.06f, seed: 16);
-
-            // Gold veins — grades 1–4 (socket counts)
-            GoldVeinPlacer.PlaceVein(_world, 0.20f, 0.35f, 0.40f, 0.55f, 0.018f, seed: 21, minGrade: 1, maxGrade: 2);
-            GoldVeinPlacer.PlaceVein(_world, 0.55f, 0.32f, 0.78f, 0.50f, 0.02f, seed: 22, minGrade: 2, maxGrade: 3);
-            GoldVeinPlacer.PlaceVein(_world, 0.30f, 0.60f, 0.55f, 0.82f, 0.022f, seed: 23, minGrade: 2, maxGrade: 4);
-            GoldVeinPlacer.PlaceVein(_world, 0.60f, 0.58f, 0.85f, 0.80f, 0.016f, seed: 24, minGrade: 3, maxGrade: 4);
-            GoldVeinPlacer.PlaceVein(_world, 0.12f, 0.55f, 0.28f, 0.88f, 0.015f, seed: 25, minGrade: 1, maxGrade: 4);
-
-            GoldVeinPlacer.PlaceCluster(_world, 0.35f, 0.42f, 0.04f, 18, seed: 31);
-            GoldVeinPlacer.PlaceCluster(_world, 0.68f, 0.65f, 0.045f, 22, seed: 32);
-            GoldVeinPlacer.PlaceCluster(_world, 0.48f, 0.88f, 0.035f, 16, seed: 33);
-            GoldVeinPlacer.PlaceCluster(_world, 0.88f, 0.35f, 0.04f, 14, seed: 34);
-        }
-
-        void PlaceGoldLegend(int x0, int y0)
-        {
-            _world.BeginBatch();
-            for (int g = 1; g <= 4; g++)
-            {
-                int bx = x0 + (g - 1) * 5;
-                for (int oy = 0; oy < 4; oy++)
-                for (int ox = 0; ox < 4; ox++)
-                {
-                    int x = bx + ox, y = y0 + oy;
-                    if (!_world.InBounds(x, y)) continue;
-                    _world.Set(x, y, FineTerrainWorld.FromCounts(4 - g, 0, g));
-                }
-            }
-            _world.EndBatch();
+            // Organic gold — sparse near start, rich farther out
+            GoldVeinPlacer.PlaceOrganicGold(_world, StartX, StartY, seed: 9102);
         }
 
         void CountStats()
@@ -231,7 +185,8 @@ namespace DeepCore.FreeMovement
             Vector2 tip = _worker.DrillTip(0.4f);
             Vector2 face = Vector2.Lerp(_world.CellCenter(x, y), tip, 0.75f);
             tip = Vector2.Lerp(tip, face, 0.5f);
-            LoosePile.SpawnFromDrill(_looseRoot, tip, _worker.Facing, c.Mass, c.GoldGrade, _world.CellSize, WorkerRadius);
+            // One loose piece per cell — same sockets/mass/gold as the wall cell
+            LoosePile.SpawnCellFromDrill(_looseRoot, tip, _worker.Facing, c, _world.CellSize, WorkerRadius);
         }
 
         void TryPlaceLantern()
@@ -261,6 +216,7 @@ namespace DeepCore.FreeMovement
             if (_worker == null) return;
             var kb = Keyboard.current;
             Vector2 wasd = Vector2.zero;
+            bool scanPulse = false;
             if (kb != null)
             {
                 if (kb.wKey.isPressed) wasd.y += 1f;
@@ -270,13 +226,59 @@ namespace DeepCore.FreeMovement
                 if (kb.escapeKey.wasPressedThisFrame) _worker.ClearGoal();
                 if (kb.rKey.wasPressedThisFrame) ResetMap();
                 if (kb.lKey.wasPressedThisFrame) TryPlaceLantern();
+                if (kb.tKey.wasPressedThisFrame) _tactical?.Toggle();
+                if (kb.tabKey.wasPressedThisFrame) CycleControl(+1);
+                if (kb.vKey.wasPressedThisFrame) _scanView?.Toggle();
+                if (kb.fKey.wasPressedThisFrame) _prospector?.ToggleRadar();
+                if (kb.digit1Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Short);
+                if (kb.digit2Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Medium);
+                if (kb.digit3Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Long);
+                if (kb.qKey.wasPressedThisFrame) _prospector?.SetWidth(ScanWidth.Narrow);
+                if (kb.eKey.wasPressedThisFrame) _prospector?.SetWidth(ScanWidth.Wide);
+                if (kb.spaceKey.wasPressedThisFrame && _control == ControlWorker.Prospector) scanPulse = true;
+                if (kb.gKey.wasPressedThisFrame && _control == ControlWorker.Hauler)
+                    _hauler?.TogglePreferGold();
             }
 
-            _worker.Tick(wasd);
+            switch (_control)
+            {
+                case ControlWorker.Prospector:
+                    _worker.Tick(Vector2.zero);
+                    _prospector?.SetHudVisible(true);
+                    _prospector?.Tick(wasd, scanPulse);
+                    break;
+                case ControlWorker.Excavator:
+                    _prospector?.SetHudVisible(false);
+                    _worker.Tick(wasd);
+                    break;
+                case ControlWorker.Hauler:
+                    _worker.Tick(Vector2.zero);
+                    _prospector?.SetHudVisible(false);
+                    break;
+            }
+
             _hauler?.Tick();
             UpdateStockpileHover();
-            HandleMouse();
             FollowCamera();
+        }
+
+        void LateUpdate()
+        {
+            // After OnGUI so HUD clicks never become dig goals
+            HandleMouse();
+        }
+
+        void CycleControl(int delta)
+        {
+            int n = ((int)_control + delta) % 3;
+            if (n < 0) n += 3;
+            SelectWorker((ControlWorker)n);
+        }
+
+        void SelectWorker(ControlWorker w)
+        {
+            // Keep excavator dig goal / pinpoint when switching workers
+            _control = w;
         }
 
         void UpdateStockpileHover()
@@ -302,15 +304,37 @@ namespace DeepCore.FreeMovement
             if (!mouse.leftButton.wasPressedThisFrame) return;
 
             Vector2 screen = mouse.position.ReadValue();
+            // Unity GUI uses y-down; Input System uses y-up
+            Vector2 guiPt = new(screen.x, Screen.height - screen.y);
+            if (IsOverHud(guiPt)) return;
+
             Vector3 world = cam.ScreenToWorldPoint(new Vector3(screen.x, screen.y, -cam.transform.position.z));
-            _worker.SetGoal(world);
+            if (_control == ControlWorker.Prospector && _prospector != null)
+                _prospector.FaceToward(world);
+            else if (_control == ControlWorker.Excavator)
+                _worker.SetGoal(world);
+            // Hauler: no dig goal / aim from LMB
+        }
+
+        bool IsOverHud(Vector2 guiPoint)
+        {
+            for (int i = 0; i < _hudBlockers.Count; i++)
+                if (_hudBlockers[i].Contains(guiPoint)) return true;
+            return false;
         }
 
         void FollowCamera()
         {
             var cam = Camera.main;
-            if (cam == null || _worker == null) return;
-            Vector3 t = _worker.transform.position;
+            if (cam == null) return;
+            Transform follow = _control switch
+            {
+                ControlWorker.Prospector => _prospector != null ? _prospector.transform : null,
+                ControlWorker.Hauler => _hauler != null ? _hauler.transform : null,
+                _ => _worker != null ? _worker.transform : null,
+            };
+            if (follow == null) return;
+            Vector3 t = follow.position;
             t.z = -10f;
             cam.transform.position = Vector3.Lerp(cam.transform.position, t, 1f - Mathf.Exp(-cameraFollow * Time.deltaTime));
         }
@@ -326,7 +350,13 @@ namespace DeepCore.FreeMovement
             _worker.Setup(_world, _world.CellCenter(StartX, StartY), WorkerRadius, _goalMarker, OnBroke);
             _calc?.Reset();
             _hauler?.ResetToBase();
+            _prospector?.ResetTo(_world.CellCenter(StartX - 6, StartY - 2));
+            _scanView?.ClearHints();
             _hoverPile = null;
+            var shine = _worldRoot != null ? _worldRoot.GetComponentInChildren<GoldVeinShine>() : null;
+            shine?.Rescan();
+            if (_tactical != null)
+                _tactical.MarkDirty();
         }
 
         void EnsureCamera()
@@ -375,47 +405,98 @@ namespace DeepCore.FreeMovement
             light.color = new Color(0.35f, 0.4f, 0.55f);
         }
 
+        // Cyberpunk HUD palette (thin neon on dark glass)
+        static readonly Color CpCyan = new(0.35f, 0.95f, 1f, 1f);
+        static readonly Color CpGold = new(1f, 0.86f, 0.28f, 1f);
+        static readonly Color CpDim = new(0.55f, 0.72f, 0.78f, 1f);
+        static readonly Color CpPanel = new(0.04f, 0.08f, 0.12f, 0.72f);
+        static readonly Color CpBtnIdle = new(0.08f, 0.16f, 0.22f, 0.9f);
+        static readonly Color CpBtnOn = new(0.1f, 0.45f, 0.55f, 0.95f);
+
         void OnGUI()
         {
-            // Top calculator
+            _hudBlockers.Clear();
+
             var goldStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 22,
+                fontSize = 20,
                 fontStyle = FontStyle.Bold,
-                normal = { textColor = new Color(1f, 0.82f, 0.25f) }
+                normal = { textColor = CpGold }
             };
             var rockStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 18,
-                normal = { textColor = new Color(0.85f, 0.75f, 0.6f) }
+                fontSize = 16,
+                normal = { textColor = CpCyan }
             };
             var small = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 12,
-                normal = { textColor = new Color(0.75f, 0.78f, 0.85f) }
+                fontSize = 11,
+                normal = { textColor = CpDim }
+            };
+            var hdr = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 11,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = CpCyan }
+            };
+            var cardTitle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 13,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = CpCyan }
+            };
+            var cardSub = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 10,
+                normal = { textColor = CpDim }
             };
 
             float w = 420f;
-            GUI.Box(new Rect(10, 8, w, 78), GUIContent.none);
+            var statsR = new Rect(10, 8, w, 78);
+            DrawCpPanel(statsR);
+            Block(statsR);
             if (_calc != null)
             {
                 GUI.Label(new Rect(22, 12, 200, 28), $"GOLD  {_calc.GoldValue}", goldStyle);
-                GUI.Label(new Rect(200, 14, 220, 24), $"sockets {_calc.GoldSockets}  ·  trips {_calc.Deliveries}", small);
+                GUI.Label(new Rect(200, 14, 220, 24), $"SOCKETS {_calc.GoldSockets}  ·  TRIPS {_calc.Deliveries}", small);
                 GUI.Label(new Rect(22, 42, 200, 24), $"ROCK  {_calc.RockMass:0}", rockStyle);
                 GUI.Label(new Rect(200, 44, 220, 24),
                     _calc.CarryPiles > 0
-                        ? $"hauling {_calc.CarryPiles}  (R{_calc.CarryRockMass:0} / G{_calc.CarryGoldValue})"
-                        : "hauler seeking…",
+                        ? $"HAUL {_calc.CarryPiles}  (R{_calc.CarryRockMass:0} / G{_calc.CarryGoldValue})"
+                        : "HAULER SEEKING…",
                     small);
+            }
+
+            // ——— Left worker roster (Prospector → Excavator → Hauler) ———
+            float cardW = 168f, cardH = 72f, cardGap = 8f;
+            float cx = 10f, cy = 118f;
+            DrawWorkerCard(new Rect(cx, cy, cardW, cardH), ControlWorker.Prospector,
+                "PROSPECTOR", "SCAN · RADAR", cardTitle, cardSub);
+            DrawWorkerCard(new Rect(cx, cy + cardH + cardGap, cardW, cardH), ControlWorker.Excavator,
+                "EXCAVATOR", "DIG · DRIVE", cardTitle, cardSub);
+            DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 2, cardW, cardH), ControlWorker.Hauler,
+                "HAULER",
+                _hauler != null && _hauler.PreferGold ? "PRIORITY // GOLD" : "PRIORITY // MIXED",
+                cardTitle, cardSub);
+
+            if (_control == ControlWorker.Hauler && _hauler != null)
+            {
+                var goldBtn = new Rect(cx, cy + (cardH + cardGap) * 3 + 4f, cardW, 28f);
+                Block(goldBtn);
+                var prevBg = GUI.backgroundColor;
+                GUI.backgroundColor = _hauler.PreferGold ? new Color(0.55f, 0.4f, 0.05f, 0.95f) : CpBtnIdle;
+                if (GUI.Button(goldBtn, _hauler.PreferGold ? "GOLD FIRST // ON" : "GOLD FIRST // OFF"))
+                    _hauler.TogglePreferGold();
+                GUI.backgroundColor = prevBg;
             }
 
             if (_hoverPile != null)
             {
                 var tip = new GUIStyle(GUI.skin.box)
                 {
-                    fontSize = 13,
+                    fontSize = 12,
                     alignment = TextAnchor.UpperLeft,
-                    normal = { textColor = new Color(1f, 0.95f, 0.8f) },
+                    normal = { textColor = CpCyan },
                     padding = new RectOffset(10, 10, 8, 8)
                 };
                 var mouse = Mouse.current;
@@ -426,13 +507,142 @@ namespace DeepCore.FreeMovement
 
             var style = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 12,
-                normal = { textColor = new Color(0.7f, 0.72f, 0.78f) }
+                fontSize = 11,
+                normal = { textColor = new Color(0.45f, 0.62f, 0.68f) }
             };
-            GUI.Label(new Rect(10, 92, 1100, 40),
-                "Hauler sorts into ROCK (left) and GOLD (right) stockpiles — hover for data.\n" +
-                $"L: lantern ({_lanternCount}/16)  ·  R: reset  ·  LMB dig  ·  dug gold cells {_goldFoundCells}/{_goldCells}",
+            GUI.Label(new Rect(10, Screen.height - 40, 900, 32),
+                "TAB cycle workers  ·  WASD  ·  LMB aim/dig  ·  G gold-first (hauler)  ·  F radar  ·  SPACE scan",
                 style);
+
+            // Right tools — overlays only (select workers on the left)
+            float bw = 132f, bh = 30f;
+            float bx = Screen.width - bw - 14f;
+            float by = 12f;
+            var prev = GUI.backgroundColor;
+
+            bool scanOn = _scanView != null && _scanView.Visible;
+            var rScan = new Rect(bx, by, bw, bh);
+            Block(rScan);
+            GUI.backgroundColor = scanOn ? CpBtnOn : CpBtnIdle;
+            if (GUI.Button(rScan, scanOn ? "SCAN VIEW // ON" : "SCAN VIEW"))
+                _scanView?.Toggle();
+
+            bool tacOn = _tactical != null && _tactical.Visible;
+            var rTac = new Rect(bx, by + bh + 6, bw, bh);
+            Block(rTac);
+            GUI.backgroundColor = tacOn ? new Color(0.55f, 0.4f, 0.05f, 0.95f) : CpBtnIdle;
+            if (GUI.Button(rTac, tacOn ? "TACTICAL // ON" : "TACTICAL"))
+                _tactical?.Toggle();
+            GUI.backgroundColor = prev;
+
+            if (_prospector != null && _control == ControlWorker.Prospector)
+            {
+                float px = bx - 168f;
+                var scanPanel = new Rect(px, by, 156, 148);
+                DrawCpPanel(scanPanel);
+                Block(scanPanel);
+                GUI.Label(new Rect(px + 10, by + 6, 140, 18), "SCAN MODE", hdr);
+
+                string[] distLabels = { "SHORT", "MEDIUM", "LONG" };
+                for (int i = 0; i < 3; i++)
+                {
+                    bool sel = (int)_prospector.Distance == i;
+                    var br = new Rect(px + 10, by + 28 + i * 26, 136, 22);
+                    Block(br);
+                    GUI.backgroundColor = sel ? CpBtnOn : CpBtnIdle;
+                    if (GUI.Button(br, distLabels[i]))
+                        _prospector.SetDistance((ScanDistance)i);
+                }
+
+                var nR = new Rect(px + 10, by + 110, 64, 26);
+                var wR = new Rect(px + 82, by + 110, 64, 26);
+                Block(nR); Block(wR);
+                GUI.backgroundColor = _prospector.Width == ScanWidth.Narrow ? CpBtnOn : CpBtnIdle;
+                if (GUI.Button(nR, "NARROW"))
+                    _prospector.SetWidth(ScanWidth.Narrow);
+                GUI.backgroundColor = _prospector.Width == ScanWidth.Wide ? CpBtnOn : CpBtnIdle;
+                if (GUI.Button(wR, "WIDE"))
+                    _prospector.SetWidth(ScanWidth.Wide);
+                GUI.backgroundColor = prev;
+            }
+
+            if (scanOn)
+            {
+                var leg = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 10,
+                    normal = { textColor = CpDim }
+                };
+                var legR = new Rect(bx - 8, by + (bh + 6) * 2 + 8, bw + 16, 50);
+                DrawCpPanel(legR);
+                Block(legR);
+                GUI.Label(new Rect(bx, by + (bh + 6) * 2 + 14, bw, 42),
+                    "YELLOW ≈ gold zone\nCYAN ≈ bedrock zone\n(soft outlines — estimate)",
+                    leg);
+            }
+        }
+
+        void DrawWorkerCard(Rect r, ControlWorker worker, string title, string subtitle,
+            GUIStyle titleStyle, GUIStyle subStyle)
+        {
+            bool on = _control == worker;
+            Block(r);
+
+            var prev = GUI.color;
+            GUI.color = on
+                ? new Color(0.06f, 0.14f, 0.18f, 0.88f)
+                : new Color(0.04f, 0.07f, 0.1f, 0.7f);
+            GUI.DrawTexture(r, Texture2D.whiteTexture);
+
+            Color frame = on ? CpCyan : new Color(CpCyan.r, CpCyan.g, CpCyan.b, 0.28f);
+            float thick = on ? 2f : 1f;
+            GUI.color = frame;
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, thick), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.yMax - thick, r.width, thick), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.y, thick, r.height), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.xMax - thick, r.y, thick, r.height), Texture2D.whiteTexture);
+            GUI.color = on ? CpCyan : new Color(CpCyan.r, CpCyan.g, CpCyan.b, 0.55f);
+            GUI.DrawTexture(new Rect(r.x, r.y, 22f, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.y, 1f, 14f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.xMax - 22f, r.yMax - 1f, 22f, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.xMax - 1f, r.yMax - 14f, 1f, 14f), Texture2D.whiteTexture);
+
+            Color accent = worker switch
+            {
+                ControlWorker.Prospector => CpCyan,
+                ControlWorker.Excavator => new Color(1f, 0.55f, 0.2f),
+                _ => new Color(0.45f, 0.75f, 1f),
+            };
+            GUI.color = on ? accent : new Color(accent.r, accent.g, accent.b, 0.35f);
+            GUI.DrawTexture(new Rect(r.x + 8, r.y + 10, 3f, r.height - 20), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            var tStyle = new GUIStyle(titleStyle) { normal = { textColor = on ? accent : CpDim } };
+            GUI.Label(new Rect(r.x + 18, r.y + 12, r.width - 28, 22), title, tStyle);
+            GUI.Label(new Rect(r.x + 18, r.y + 34, r.width - 28, 18), subtitle, subStyle);
+            if (on)
+                GUI.Label(new Rect(r.x + 18, r.y + 50, r.width - 28, 16), "// SELECTED", subStyle);
+
+            if (GUI.Button(r, GUIContent.none, GUIStyle.none))
+                SelectWorker(worker);
+        }
+
+        void Block(Rect r) => _hudBlockers.Add(r);
+
+        static void DrawCpPanel(Rect r)
+        {
+            var prev = GUI.color;
+            GUI.color = CpPanel;
+            GUI.DrawTexture(r, Texture2D.whiteTexture);
+            GUI.color = new Color(CpCyan.r, CpCyan.g, CpCyan.b, 0.35f);
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.yMax - 1f, r.width, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.y, 1f, r.height), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.xMax - 1f, r.y, 1f, r.height), Texture2D.whiteTexture);
+            GUI.color = new Color(CpCyan.r, CpCyan.g, CpCyan.b, 0.7f);
+            GUI.DrawTexture(new Rect(r.x, r.y, 18f, 1f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.y, 1f, 10f), Texture2D.whiteTexture);
+            GUI.color = prev;
         }
 
         static Sprite MakeGoalSprite()

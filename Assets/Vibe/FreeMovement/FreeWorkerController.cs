@@ -8,12 +8,12 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class FreeWorkerController : MonoBehaviour
     {
-        [SerializeField] float moveSpeed = 2.0f;
-        [SerializeField] float digMoveSpeed = 0.65f;
-        [SerializeField] float rotateSpeed = 220f;
-        [SerializeField] float digInterval = 0.09f;
-        [SerializeField] int digsPerTick = 2;
-        [SerializeField] int digsWhenStalled = 4;
+        [SerializeField] float moveSpeed = 1.35f;
+        [SerializeField] float digMoveSpeed = 0.28f;
+        [SerializeField] float rotateSpeed = 130f;
+        [SerializeField] float digInterval = 0.28f;
+        [SerializeField] int digsPerTick = 1;
+        [SerializeField] int digsWhenStalled = 1;
         [SerializeField] float tipReach = 0.2f; // past the nose
 
         FineTerrainWorld _world;
@@ -133,14 +133,11 @@ namespace DeepCore.FreeMovement
                         dug++;
                         IsActivelyDigging = true;
                     }
-                    // Light unstick chew — keep it slow, not a shredder
-                    if (_stallFrames > 6 && dug == 0)
+                    // Single unstick chew — slow and deliberate
+                    if (_stallFrames > 10 && dug == 0)
                     {
-                        for (int i = 0; i < 2; i++)
-                        {
-                            if (!DigAnyBlocking(pos, dir)) break;
+                        if (DigAnyBlocking(pos, dir))
                             IsActivelyDigging = true;
-                        }
                     }
                     _world.EndBatch();
 

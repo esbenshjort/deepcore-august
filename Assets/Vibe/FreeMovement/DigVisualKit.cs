@@ -71,6 +71,84 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        /// <summary>
+        /// Loose cell chunk that matches dig-face wall look: dark speckled rock + gold flecks by grade.
+        /// </summary>
+        public static Sprite MakeWallChunk(byte goldGrade, int bedrockCount, int seed)
+        {
+            const int s = 24;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+            Clear(tex, s);
+
+            // Wall palette (same family as FreeMovementTerrainView)
+            Color wallA = new(28 / 255f, 24 / 255f, 20 / 255f);
+            Color wallB = new(36 / 255f, 30 / 255f, 26 / 255f);
+            Color wallC = new(22 / 255f, 20 / 255f, 18 / 255f);
+            Color grain = new(40 / 255f, 34 / 255f, 28 / 255f);
+            Color goldC = new(220 / 255f, 160 / 255f, 42 / 255f);
+            Color goldBright = new(255 / 255f, 210 / 255f, 70 / 255f);
+            Color goldSpeck = new(255 / 255f, 235 / 255f, 140 / 255f);
+
+            if (bedrockCount >= 2)
+            {
+                wallA = Color.Lerp(wallA, new Color(0.07f, 0.08f, 0.09f), 0.35f);
+                wallB = Color.Lerp(wallB, new Color(0.09f, 0.1f, 0.11f), 0.35f);
+            }
+
+            float cx = (s - 1) * 0.5f, cy = (s - 1) * 0.5f;
+            float ox = (seed % 97) * 0.17f;
+            float oy = (seed % 53) * 0.23f;
+
+            for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++)
+            {
+                float dx = (x - cx) / (s * 0.42f);
+                float dy = (y - cy) / (s * 0.42f);
+                float n = Mathf.PerlinNoise(x * 0.28f + ox, y * 0.28f + oy);
+                float n2 = Mathf.PerlinNoise(x * 0.55f + ox + 3f, y * 0.55f + oy);
+                // Irregular rock chip silhouette (not a perfect square)
+                float d = dx * dx + dy * dy;
+                d -= (n - 0.5f) * 0.45f;
+                d -= (n2 - 0.5f) * 0.2f;
+                if (d > 1f) continue;
+
+                float edge = Mathf.Clamp01((1f - d) * 1.6f);
+                Color rock = n < 0.35f ? wallA : (n < 0.7f ? wallB : wallC);
+                rock = Color.Lerp(rock, grain, n2 * 0.35f);
+                if (Hash(x * 3 + seed, y * 7) > 0.75f)
+                    rock = Color.Lerp(rock, grain, 0.3f);
+
+                int goldN = goldGrade;
+                if (goldN > 0)
+                {
+                    float t = goldN / 4f;
+                    float g = 0.12f + t * 0.88f;
+                    if (Hash(x * 5 + seed, y * 11) > 0.55f - t * 0.25f)
+                        rock = Color.Lerp(rock, goldC, g * 0.85f);
+                    if (Hash(x * 9 + seed, y * 3) > 0.78f - t * 0.3f)
+                        rock = Color.Lerp(rock, goldBright, (0.25f + t * 0.55f));
+                    if (goldN >= 3 && Hash(x * 13 + seed, y * 17) > 0.82f)
+                        rock = Color.Lerp(rock, goldSpeck, 0.45f);
+                }
+
+                rock.a = Mathf.Clamp01(edge * 1.15f);
+                // Slight darken at rim so it reads as a chunk on the floor
+                if (edge < 0.45f)
+                    rock = Color.Lerp(rock, new Color(0.05f, 0.04f, 0.03f, rock.a), 0.35f);
+                tex.SetPixel(x, y, rock);
+            }
+
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+        }
+
+        static float Hash(int x, int y)
+        {
+            int n = x * 374761393 + y * 668265263;
+            n = (n ^ (n >> 13)) * 1274126177;
+            return ((n ^ (n >> 16)) & 0x7fffffff) / (float)0x7fffffff;
+        }
+
         public static Sprite LanternBody
         {
             get

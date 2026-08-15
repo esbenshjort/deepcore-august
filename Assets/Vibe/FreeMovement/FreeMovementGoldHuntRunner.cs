@@ -60,6 +60,7 @@ namespace DeepCore.FreeMovement
             viewGo.transform.SetParent(_worldRoot, false);
             viewGo.AddComponent<FreeMovementTerrainView>()
                 .Setup(_world, fogOfWarGold: false, strongCliffEdges: true);
+            GoldVeinShine.Attach(_worldRoot, _world);
 
             // No per-cell ShadowCaster2D — too heavy while digging
             DigVisualKit.PlaceLantern(_lanternRoot, new Vector2(tw * cellSize * 0.5f, 9 * cellSize), local: true, intensity: 2.5f);
@@ -97,9 +98,11 @@ namespace DeepCore.FreeMovement
             // Narrow upward shaft (player must dig the rest)
             _world.ExcavateRect(30, 24, 12, 8);
 
-            // Blind alcoves (empty rock walls — tempting false leads)
-            // Left pocket outline stays solid gold-free
-            // Right higher pocket stays solid
+            // Diggable bedrock patches — slow the climb in a few places
+            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.42f, 0.32f, 0.055f, seed: 711);
+            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.58f, 0.48f, 0.06f, seed: 712);
+            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.35f, 0.62f, 0.05f, seed: 713);
+            GoldVeinPlacer.PlaceBedrockPatch(_world, 0.65f, 0.75f, 0.055f, seed: 714);
 
             // Gold veins ABOVE — only reachable by digging up / sideways
             GoldVeinPlacer.PlaceVein(_world, 0.22f, 0.42f, 0.48f, 0.55f, 0.022f, seed: 701, minGrade: 3, maxGrade: 5);
@@ -160,7 +163,7 @@ namespace DeepCore.FreeMovement
             // Prefer broken cell near tip so ore pops from the cut face
             Vector2 face = Vector2.Lerp(_world.CellCenter(x, y), tip, 0.75f);
             tip = Vector2.Lerp(tip, face, 0.5f);
-            LoosePile.SpawnFromDrill(_looseRoot, tip, _worker.Facing, c.Mass, c.GoldGrade, _world.CellSize, WorkerRadius);
+            LoosePile.SpawnCellFromDrill(_looseRoot, tip, _worker.Facing, c, _world.CellSize, WorkerRadius);
         }
 
         void TryPlaceLantern()
@@ -256,6 +259,8 @@ namespace DeepCore.FreeMovement
             _calc?.Reset();
             _hauler?.ResetToBase();
             _hoverPile = null;
+            var shine = _worldRoot != null ? _worldRoot.GetComponentInChildren<GoldVeinShine>() : null;
+            shine?.Rescan();
         }
 
         void EnsureCamera()

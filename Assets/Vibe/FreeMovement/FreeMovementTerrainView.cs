@@ -219,7 +219,9 @@ namespace DeepCore.FreeMovement
                             if (Hash(px * 5, py * 11) > 0.72f - t * 0.35f)
                                 rock = Lerp(rock, GoldBright, (0.25f + t * 0.7f) * reveal);
                             if (goldN >= 3 && Hash(px * 9, py * 3) > 0.78f)
-                                rock = Lerp(rock, GoldSpeck, 0.55f * reveal);
+                                rock = Lerp(rock, GoldSpeck, 0.45f * reveal);
+                            if (goldN >= 4 && Hash(px * 13, py * 17) > 0.9f)
+                                rock = Lerp(rock, GoldSpeck, 0.5f * reveal);
                         }
                         else if (cell.BedrockCount >= 2)
                         {

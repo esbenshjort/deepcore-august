@@ -63,15 +63,15 @@ namespace DeepCore.FreeMovement
         }
 
         public bool IsUndamageableBorder =>
-            Material == TerrainMaterial.Bedrock && MaxDurability > 12;
+            Material == TerrainMaterial.Bedrock && MaxDurability >= 24;
     }
 
     public sealed class FineTerrainWorld
     {
         public const int SocketCount = 4;
-        /// <summary>Rock / gold socket hit points. Bedrock sockets are 3× this.</summary>
+        /// <summary>Rock / gold socket hit points. Bedrock sockets are much harder.</summary>
         public const int RockSocketHardness = 1;
-        public const int BedrockSocketHardness = 3;
+        public const int BedrockSocketHardness = 5;
 
         public int Width { get; }
         public int Height { get; }
@@ -102,7 +102,7 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Build a cell from exactly 4 sockets (any mix of rock / bedrock / gold).
-        /// Hardness = rock&amp;gold×1 + bedrock×3. Mass follows the same mix.
+                /// Hardness = rock&amp;gold×1 + bedrock×5. Mass follows the same mix.
         /// </summary>
         public static TerrainCell FromSockets(SocketKind s0, SocketKind s1, SocketKind s2, SocketKind s3)
         {
@@ -133,7 +133,8 @@ namespace DeepCore.FreeMovement
                 }
             }
 
-            hardness = Mathf.Clamp(hardness, 1, 12);
+            // Full bedrock cell ≈ 20 hits; rock ≈ 4. Cap leaves border undamageable (>28).
+            hardness = Mathf.Clamp(hardness, 1, 28);
             mass = Mathf.Clamp(mass, 1, 16);
 
             return new TerrainCell
@@ -194,8 +195,8 @@ namespace DeepCore.FreeMovement
         {
             var c = FromSockets(SocketKind.Bedrock, SocketKind.Bedrock, SocketKind.Bedrock, SocketKind.Bedrock);
             c.Material = TerrainMaterial.Bedrock;
-            c.Durability = 24;
-            c.MaxDurability = 24;
+            c.Durability = 32;
+            c.MaxDurability = 32;
             c.Mass = 12;
             return c;
         }

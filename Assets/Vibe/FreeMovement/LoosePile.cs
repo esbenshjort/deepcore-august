@@ -10,6 +10,7 @@ namespace DeepCore.FreeMovement
 
         public float Mass;
         public byte GoldGrade;
+        public byte Sockets;
         public bool IsGold => GoldGrade > 0;
         public bool Claimed { get; set; }
 
@@ -31,88 +32,144 @@ namespace DeepCore.FreeMovement
 
         public static LoosePile Spawn(Transform parent, Sprite ignoredSprite, Vector2 localPos,
             float mass, byte goldGrade, float cellSize, float excavatorRadius = 0.6f,
-            Vector2? ejectFrom = null)
+            Vector2? ejectFrom = null, byte sockets = 0)
         {
             mass = Mathf.Max(1f, mass);
             bool gold = goldGrade > 0;
+            int bedrock = 0;
+            if (sockets != 0)
+            {
+                for (int i = 0; i < 4; i++)
+                    if (((sockets >> (i * 2)) & 0b11) == (int)SocketKind.Bedrock) bedrock++;
+            }
+
             var go = new GameObject(gold ? "LooseGold" : "LooseRock");
             go.transform.SetParent(parent, false);
             go.transform.localPosition = localPos;
 
-            float baseScale = Mathf.Clamp(excavatorRadius * 0.28f, 0.12f, 0.32f);
-            float size = baseScale * (0.75f + Mathf.Clamp(mass, 1f, 10f) * 0.05f);
-            if (gold) size *= 1.06f;
-            if (goldGrade >= 3) size *= 1.05f + (goldGrade - 2) * 0.04f;
-            go.transform.localScale = Vector3.one * (size * 0.55f); // start small — settle grows
-            go.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(-25f, 25f));
+            // ~one wall cell on the floor — slightly smaller so it reads as loose
+            float size = cellSize * Random.Range(0.82f, 0.98f);
+            if (mass > 6f) size *= 1.06f;
+            go.transform.localScale = Vector3.one * (size * 0.55f);
+            go.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(-18f, 18f));
+
+            int seed = (Mathf.RoundToInt(localPos.x * 100f) * 73856093)
+                       ^ (Mathf.RoundToInt(localPos.y * 100f) * 19349663)
+                       ^ (goldGrade * 83492791)
+                       ^ Random.Range(0, 99991);
 
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = gold ? DigVisualKit.GoldNugget : DigVisualKit.RockPile;
+            sr.sprite = DigVisualKit.MakeWallChunk(goldGrade, bedrock, seed);
             sr.sortingOrder = 18;
             DigVisualKit.ApplyLit(sr);
-            float goldWarm = goldGrade / 4f;
-            sr.color = gold
-                ? Color.Lerp(new Color(0.75f, 0.55f, 0.18f), new Color(1f, 0.88f, 0.4f), goldWarm)
-                : Color.Lerp(Color.white, new Color(0.85f, 0.8f, 0.75f), Random.value * 0.25f);
-
-            int chips = gold ? Random.Range(1 + goldGrade, 2 + goldGrade) : Random.Range(2, 4);
-            for (int i = 0; i < chips; i++)
-            {
-                var chip = new GameObject("Chip");
-                chip.transform.SetParent(go.transform, false);
-                chip.transform.localPosition = (Vector3)(Random.insideUnitCircle * 0.4f);
-                chip.transform.localScale = Vector3.one * Random.Range(0.22f, 0.42f);
-                chip.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(0f, 360f));
-                var csr = chip.AddComponent<SpriteRenderer>();
-                csr.sprite = gold ? DigVisualKit.GoldNugget : DigVisualKit.RockPile;
-                csr.sortingOrder = 17;
-                DigVisualKit.ApplyLit(csr);
-                csr.color = sr.color;
-            }
+            sr.color = Color.white;
 
             var pile = go.AddComponent<LoosePile>();
             pile.Mass = mass;
             pile.GoldGrade = goldGrade;
+            pile.Sockets = sockets;
             go.AddComponent<LooseSettle>().Init(localPos, size, ejectFrom);
             return pile;
         }
 
         /// <summary>Spawn rock/gold ejected from a drill tip toward a landing spot.</summary>
         public static LoosePile SpawnFromDrill(Transform parent, Vector2 drillTip, Vector2 facing,
-            float mass, byte goldGrade, float cellSize, float excavatorRadius = 0.6f)
+            float mass, byte goldGrade, float cellSize, float excavatorRadius = 0.6f, byte sockets = 0)
         {
             Vector2 perp = new(-facing.y, facing.x);
-            // Land slightly behind/beside the tip so it feels blasted out of the cut
             Vector2 land = drillTip
                 - facing * Random.Range(0.12f, 0.38f)
                 + perp * Random.Range(-0.22f, 0.22f);
-            return Spawn(parent, null, land, mass, goldGrade, cellSize, excavatorRadius, ejectFrom: drillTip);
+            return Spawn(parent, null, land, mass, goldGrade, cellSize, excavatorRadius,
+                ejectFrom: drillTip, sockets: sockets);
         }
 
-        public static LoosePile FindNearest(Vector2 fromTerrain, float maxDist, bool unclaimedOnly = true)
+        /// <summary>
+        /// One loose piece per excavated cell — same mass / sockets / gold grade as the wall cell.
+        /// Hauler picks up one cell-worth at a time.
+        /// </summary>
+        public static LoosePile SpawnCellFromDrill(Transform parent, Vector2 drillTip, Vector2 facing,
+            TerrainCell cell, float cellSize, float excavatorRadius = 0.6f)
+        {
+            return SpawnFromDrill(parent, drillTip, facing, cell.Mass, cell.GoldGrade,
+                cellSize, excavatorRadius, sockets: cell.Sockets);
+        }
+
+        public static LoosePile FindNearest(Vector2 fromTerrain, float maxDist, bool unclaimedOnly = true,
+            Transform spaceRoot = null)
+        {
+            return FindBest(fromTerrain, maxDist, unclaimedOnly, spaceRoot, preferGold: false);
+        }
+
+        /// <summary>
+        /// Nearest pile, optionally preferring gold (any gold beats rock; richer gold wins ties).
+        /// </summary>
+        public static LoosePile FindBest(Vector2 fromTerrain, float maxDist, bool unclaimedOnly,
+            Transform spaceRoot, bool preferGold)
         {
             LoosePile best = null;
-            float bestD = maxDist * maxDist;
-            for (int i = 0; i < Active.Count; i++)
+            float bestScore = float.MaxValue;
+            float maxSqr = maxDist * maxDist;
+            for (int i = Active.Count - 1; i >= 0; i--)
             {
                 var p = Active[i];
-                if (p == null) continue;
+                if (p == null)
+                {
+                    Active.RemoveAt(i);
+                    continue;
+                }
                 if (unclaimedOnly && p.Claimed) continue;
 
-                // Piles are under Loose/ → world root; resolve to terrain/local space
-                Transform root = p.transform.parent != null ? p.transform.parent.parent : null;
-                Vector2 terrainPos = root != null
-                    ? (Vector2)root.InverseTransformPoint(p.transform.position)
-                    : (Vector2)p.transform.localPosition;
-
+                Vector2 terrainPos = PileTerrainPos(p, spaceRoot);
                 float d = (terrainPos - fromTerrain).sqrMagnitude;
-                if (d < bestD)
+                if (d > maxSqr) continue;
+
+                float score = d;
+                if (preferGold)
                 {
-                    bestD = d;
+                    // Gold always outranks rock; higher grade outranks lower within gold
+                    if (p.IsGold) score = d - p.GoldGrade * 50_000f;
+                    else score = d + 1_000_000f;
+                }
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
                     best = p;
                 }
             }
             return best;
+        }
+
+        public static Vector2 PileTerrainPos(LoosePile p, Transform spaceRoot = null)
+        {
+            if (p == null) return Vector2.zero;
+            if (spaceRoot != null)
+                return spaceRoot.InverseTransformPoint(p.transform.position);
+            // Loose → world root: prefer local under Loose (same as terrain if Loose is at origin)
+            if (p.transform.parent != null)
+                return p.transform.parent.localPosition + (Vector3)p.transform.localPosition;
+            return p.transform.localPosition;
+        }
+
+        public static void ClearAllClaims()
+        {
+            for (int i = 0; i < Active.Count; i++)
+            {
+                var p = Active[i];
+                if (p != null) p.Claimed = false;
+            }
+        }
+
+        public static int LiveCount
+        {
+            get
+            {
+                int n = 0;
+                for (int i = 0; i < Active.Count; i++)
+                    if (Active[i] != null) n++;
+                return n;
+            }
         }
     }
 
