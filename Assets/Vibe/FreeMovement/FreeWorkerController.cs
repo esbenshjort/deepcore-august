@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 namespace DeepCore.FreeMovement
 {
@@ -42,6 +43,22 @@ namespace DeepCore.FreeMovement
         public int RouteCount => _route.Count;
         public FineTerrainWorld World => _world;
         public Vector2 Goal => _goal;
+
+        public void TeleportTo(Vector2 pos)
+        {
+            transform.localPosition = pos;
+            ClearRoute();
+            _hasGoal = false;
+            IsActivelyDigging = false;
+        }
+
+        public void SetCrewVisible(bool on)
+        {
+            foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
+                r.enabled = on;
+            foreach (var l in GetComponentsInChildren<Light2D>(true))
+                l.enabled = on;
+        }
 
         /// <summary>Dig pins / route line — intended for scan view only.</summary>
         public void SetRouteVisible(bool visible)
@@ -225,7 +242,8 @@ namespace DeepCore.FreeMovement
             if (wasd.sqrMagnitude > 0.01f)
             {
                 if (clearGoalOnWasd) ClearRoute();
-                Step(wasd.normalized, moveSpeed, dig: true);
+                float spd = moveSpeed * LoosePile.SpeedMulAt(Position, _moveRadius);
+                Step(wasd.normalized, spd, dig: true);
                 return;
             }
 
@@ -248,6 +266,7 @@ namespace DeepCore.FreeMovement
             // Cruise at full speed on open floor; only crawl when rock is in the way
             bool rockInPath = PathBlockedByRock(pos, dir);
             float speed = rockInPath || _stallFrames > 0 ? digMoveSpeed : moveSpeed;
+            speed *= LoosePile.SpeedMulAt(pos, _moveRadius);
             Step(dir, speed, dig: rockInPath || _stallFrames > 0);
         }
 

@@ -159,6 +159,18 @@ namespace DeepCore.FreeMovement
             RebuildConeMesh();
         }
 
+        public void TeleportTo(Vector2 pos) => ResetTo(pos);
+
+        public void SetCrewVisible(bool on)
+        {
+            foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
+                r.enabled = on;
+            foreach (var l in GetComponentsInChildren<Light2D>(true))
+                l.enabled = on;
+            if (_coneRoot != null && !on)
+                _coneRoot.gameObject.SetActive(false);
+        }
+
         public void SetDistance(ScanDistance d)
         {
             if (_scanning) return;
@@ -566,7 +578,8 @@ namespace DeepCore.FreeMovement
         bool NavFollow(Vector2 goal, float speed)
         {
             if (_nav == null) return (goal - Position).sqrMagnitude < 0.04f;
-            return _nav.Follow(Position, goal, speed, _radius, Face, TryNavStep);
+            float spd = speed * LoosePile.SpeedMulAt(Position, _radius);
+            return _nav.Follow(Position, goal, spd, _radius, Face, TryNavStep);
         }
 
         bool TryNavStep(Vector2 dir, float step)
@@ -660,7 +673,7 @@ namespace DeepCore.FreeMovement
 
         void Step(Vector2 dir, float speed)
         {
-            float step = speed * Time.deltaTime;
+            float step = speed * LoosePile.SpeedMulAt(Position, _radius) * Time.deltaTime;
             Vector2 pos = Position;
             Vector2 next = pos + dir * step;
             if (!_world.CircleHitsSolid(next, _radius))

@@ -34,9 +34,32 @@ namespace DeepCore.FreeMovement
         TacticalMapOverlay _tactical;
         ScanViewOverlay _scanView;
         GasPocketFx _gasFx;
+        CampSleepSite _sleepCamp;
+        Light2D _globalLight;
+        readonly ExcavatedPathfinder[] _crewNav = new ExcavatedPathfinder[4];
+        readonly float[] _crewBodyR = { 0.22f, 0.12f, 0.14f, 0.12f };
         readonly WorkerBanter _banter = new();
         enum ControlWorker : byte { Prospector = 0, Excavator = 1, Hauler = 2, Refiner = 3 }
         ControlWorker _control = ControlWorker.Prospector;
+
+        // ——— Day / shift cycle (24h clock, shift 08:00–18:00) ———
+        enum CrewPhase : byte { OnShift = 0, HeadingHome = 1, Asleep = 2, HeadingOut = 3 }
+        const float ShiftStartHour = 8f;
+        const float ShiftEndHour = 18f;
+        /// <summary>Real seconds per in-game hour (~shift ≈ 2 min, night ≈ 2.3 min).</summary>
+        const float SecondsPerGameHour = 12f;
+        const float TravelSpeed = 1.35f;
+        float _gameHour = 7.7f; // just before first whistle — watch them emerge
+        int _dayIndex = 1;
+        CrewPhase _crewPhase = CrewPhase.HeadingOut;
+        Vector2 _workExcavator;
+        Vector2 _workProspector;
+        Vector2 _workHauler;
+        Vector2 _workRefiner;
+        bool[] _arrived = { false, false, false, false };
+        float _commuteTimer;
+        const float CommuteTimeoutSec = 10f;
+
         // HUD hit-rects (GUI space, y-down) — block world dig/aim clicks
         readonly List<Rect> _hudBlockers = new(12);
         int _goldCells;
@@ -49,7 +72,16 @@ namespace DeepCore.FreeMovement
         float WorkerRadius => CellsAcrossWorker * 0.5f * cellSize;
         int StartX => _world.Width / 2;
         int StartY => 42;
-        Vector2 BasecampPos => _world.CellCenter(StartX, StartY - 10);
+        Vector2 BasecampPos => _world.CellCenter(StartX, StartY - 12);
+
+        bool OnShiftHours => _gameHour >= ShiftStartHour && _gameHour < ShiftEndHour;
+
+        string FormatClock()
+        {
+            int h = Mathf.FloorToInt(_gameHour) % 24;
+            int m = Mathf.FloorToInt((_gameHour - Mathf.Floor(_gameHour)) * 60f);
+            return $"{h:00}:{m:00}";
+        }
 
         void Start() => Build();
 
@@ -89,17 +121,23 @@ namespace DeepCore.FreeMovement
                 "Broke into a gas void. Watch the bit.",
                 "Purple fog. Pocket's open.");
 
-            DigVisualKit.PlaceLantern(_lanternRoot, _world.CellCenter(StartX, StartY - 2), local: true, intensity: 2.6f);
+            DigVisualKit.PlaceLantern(_lanternRoot, _world.CellCenter(StartX, StartY - 4), local: true, intensity: 2.6f);
             _lanternCount = 1;
 
             _calc = new DeliveryCalculator();
             _yard = BasecampYard.Spawn(_worldRoot, BasecampPos);
+            _sleepCamp = CampSleepSite.Spawn(_worldRoot, BasecampPos);
             _calc.BindStockpiles(_yard.Rock, _yard.Gold, _yard.RefinedGold, _yard.Dirt);
             SpawnWorker(_worldRoot);
             _hauler = HaulerPerson.Spawn(_worldRoot, _world, _yard.DropPoint, _calc);
             _refiner = RefinerPerson.Spawn(_worldRoot, _world, _yard, _calc);
             _prospector = ProspectorPerson.Spawn(_worldRoot, _world,
                 _world.CellCenter(StartX - 6, StartY - 2), _scanView);
+
+            RefreshWorkPosts();
+
+            // First whistle — crew emerges from the tent
+            BeginHeadingOut(announce: false);
             _prospector.BindExcavator(_worker);
             _prospector.ScanStarted += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
                 "Radar live. Sweeping the dark.",
@@ -160,7 +198,7 @@ namespace DeepCore.FreeMovement
             _control = ControlWorker.Prospector;
             FrameCamera();
 
-            Debug.Log($"[SocketMap] SPACE radar→scan · SHIFT radar off · worker cards");
+            Debug.Log($"[SocketMap] SHIFT 08–18 · N skip sleep · SPACE radar→scan · worker cards");
         }
 
         void BuildMap()
@@ -179,13 +217,13 @@ namespace DeepCore.FreeMovement
                 _world.Set(tw - 1, y, FineTerrainWorld.MakeBedrock());
             }
 
-            // Larger start chamber + room for wash camp
-            int rx = 42, ry = 28;
-            int floorY = StartY - 14;
+            // Larger start chamber + room for wash camp + tent
+            int rx = 52, ry = 34;
+            int floorY = StartY - 16;
             GoldVeinPlacer.ExcavateHalfOval(_world, StartX, floorY, rx, ry);
-            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, floorY + ry - 2, 10, 20);
-            // Flat camp pad around base
-            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, StartY - 10, 22, 14);
+            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, floorY + ry - 2, 12, 22);
+            // Flat camp pad — washer yard + tent firepit
+            GoldVeinPlacer.ExcavateHalfOval(_world, StartX, StartY - 12, 34, 18);
 
             // Organic bedrock veins + clumps (soft corridors remain diggable)
             GoldVeinPlacer.PlaceOrganicBedrock(_world, seed: 7701);
@@ -312,6 +350,9 @@ namespace DeepCore.FreeMovement
         void Update()
         {
             if (_worker == null) return;
+            TickClock();
+            TickCrewPhase();
+
             var kb = Keyboard.current;
             Vector2 wasd = Vector2.zero;
             bool scanPulse = false;
@@ -325,7 +366,6 @@ namespace DeepCore.FreeMovement
                     _worker.ClearRoute();
                 if (kb.backspaceKey.wasPressedThisFrame && _control == ControlWorker.Excavator)
                     _worker.UndoLastPin();
-                // Drop a pin at excavator feet (keyboard route planning)
                 if (_control == ControlWorker.Excavator &&
                     (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame))
                     _worker.AddPin(_worker.Position, replaceRoute: false);
@@ -334,6 +374,7 @@ namespace DeepCore.FreeMovement
                 if (kb.tKey.wasPressedThisFrame) _tactical?.Toggle();
                 if (kb.tabKey.wasPressedThisFrame) CycleControl(+1);
                 if (kb.vKey.wasPressedThisFrame) _scanView?.Toggle();
+                if (kb.nKey.wasPressedThisFrame) SkipSleep();
                 if (kb.digit1Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Short);
                 if (kb.digit2Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Medium);
                 if (kb.digit3Key.wasPressedThisFrame) _prospector?.SetDistance(ScanDistance.Long);
@@ -342,7 +383,7 @@ namespace DeepCore.FreeMovement
                 if (kb.f1Key.wasPressedThisFrame) _prospector?.SetWorkMode(ProspectorWorkMode.Manual);
                 if (kb.f2Key.wasPressedThisFrame) _prospector?.SetWorkMode(ProspectorWorkMode.SurveyNearby);
                 if (kb.f3Key.wasPressedThisFrame) _prospector?.SetWorkMode(ProspectorWorkMode.AssistExcavator);
-                if (_control == ControlWorker.Prospector && _prospector != null)
+                if (_control == ControlWorker.Prospector && _prospector != null && _crewPhase == CrewPhase.OnShift)
                 {
                     if (kb.leftShiftKey.wasPressedThisFrame || kb.rightShiftKey.wasPressedThisFrame)
                         _prospector.SetRadar(false);
@@ -360,39 +401,305 @@ namespace DeepCore.FreeMovement
                     _refiner?.TogglePriority();
             }
 
-            switch (_control)
+            // Only run normal worker AI while on shift
+            if (_crewPhase == CrewPhase.OnShift)
             {
-                case ControlWorker.Prospector:
-                    _worker.Tick(Vector2.zero);
-                    _prospector?.SetHudVisible(true);
-                    _prospector?.Tick(wasd, scanPulse);
-                    _refiner?.Tick(Vector2.zero);
-                    break;
-                case ControlWorker.Excavator:
-                    _prospector?.SetHudVisible(false);
-                    _worker.Tick(wasd);
-                    _prospector?.Tick(Vector2.zero, false);
-                    _refiner?.Tick(Vector2.zero);
-                    break;
-                case ControlWorker.Hauler:
-                    _worker.Tick(Vector2.zero);
-                    _prospector?.SetHudVisible(false);
-                    _prospector?.Tick(Vector2.zero, false);
-                    _refiner?.Tick(Vector2.zero);
-                    break;
-                case ControlWorker.Refiner:
-                    _worker.Tick(Vector2.zero);
-                    _prospector?.SetHudVisible(false);
-                    _prospector?.Tick(Vector2.zero, false);
-                    _refiner?.Tick(wasd);
-                    break;
+                switch (_control)
+                {
+                    case ControlWorker.Prospector:
+                        _worker.Tick(Vector2.zero);
+                        _prospector?.SetHudVisible(true);
+                        _prospector?.Tick(wasd, scanPulse);
+                        _refiner?.Tick(Vector2.zero);
+                        break;
+                    case ControlWorker.Excavator:
+                        _prospector?.SetHudVisible(false);
+                        _worker.Tick(wasd);
+                        _prospector?.Tick(Vector2.zero, false);
+                        _refiner?.Tick(Vector2.zero);
+                        break;
+                    case ControlWorker.Hauler:
+                        _worker.Tick(Vector2.zero);
+                        _prospector?.SetHudVisible(false);
+                        _prospector?.Tick(Vector2.zero, false);
+                        _refiner?.Tick(Vector2.zero);
+                        break;
+                    case ControlWorker.Refiner:
+                        _worker.Tick(Vector2.zero);
+                        _prospector?.SetHudVisible(false);
+                        _prospector?.Tick(Vector2.zero, false);
+                        _refiner?.Tick(wasd);
+                        break;
+                }
+                _hauler?.Tick();
+            }
+            else
+            {
+                _prospector?.SetHudVisible(false);
+                // Washer can finish mid-walk-home
+                _yard?.Washer?.Tick();
             }
 
-            _hauler?.Tick();
             DiscoverGasNearCrew();
             UpdateStockpileHover();
             SyncRoutePinsToScanView();
             FollowCamera();
+        }
+
+        void TickClock()
+        {
+            float prev = _gameHour;
+            _gameHour += Time.deltaTime / SecondsPerGameHour;
+            if (_gameHour >= 24f)
+            {
+                _gameHour -= 24f;
+                _dayIndex++;
+            }
+            ApplyDayNightLight();
+
+            // Phase transitions driven by clock edges
+            if (_crewPhase == CrewPhase.OnShift && prev < ShiftEndHour && _gameHour >= ShiftEndHour)
+                BeginHeadingHome();
+            if (_crewPhase == CrewPhase.Asleep && prev < ShiftStartHour && _gameHour >= ShiftStartHour)
+                BeginHeadingOut(announce: true);
+        }
+
+        void TickCrewPhase()
+        {
+            if (_sleepCamp == null || _world == null) return;
+            EnsureCrewNav();
+            if (_crewPhase == CrewPhase.HeadingHome)
+            {
+                _commuteTimer += Time.deltaTime;
+                Vector2 door = _sleepCamp.TentDoor;
+                // Walk radii only — excavator dig footprint is too fat for corridors
+                bool all = true;
+                all &= StepCrewHomeOrOut(0, _worker != null ? _worker.transform : null, door, _crewBodyR[0]);
+                all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, door + new Vector2(-0.15f, 0.12f), _crewBodyR[1]);
+                all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, door + new Vector2(0.2f, -0.1f), _crewBodyR[2]);
+                all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, door + new Vector2(-0.05f, -0.2f), _crewBodyR[3]);
+                if (all || _commuteTimer >= CommuteTimeoutSec) EnterSleep();
+            }
+            else if (_crewPhase == CrewPhase.HeadingOut)
+            {
+                _commuteTimer += Time.deltaTime;
+                bool all = true;
+                all &= StepCrewHomeOrOut(0, _worker != null ? _worker.transform : null, _workExcavator, _crewBodyR[0]);
+                all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, _workProspector, _crewBodyR[1]);
+                all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, _workHauler, _crewBodyR[2]);
+                all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, _workRefiner, _crewBodyR[3]);
+                if (all || _commuteTimer >= CommuteTimeoutSec) EnterOnShift();
+            }
+        }
+
+        Vector2 SnapPostToTunnel(Vector2 pos, float bodyR)
+        {
+            var c = _world.WorldToCell(pos);
+            if (_world.IsTunnelOpen(c.x, c.y) && !_world.CircleHitsSolid(pos, bodyR * 0.7f))
+                return pos;
+            Vector2 p = pos;
+            return TrySnapToNearestTunnel(ref p, bodyR) ? p : pos;
+        }
+
+        void RefreshWorkPosts()
+        {
+            _workExcavator = SnapPostToTunnel(_world.CellCenter(StartX, StartY), _crewBodyR[0]);
+            _workProspector = SnapPostToTunnel(_world.CellCenter(StartX - 4, StartY - 1), _crewBodyR[1]);
+            _workHauler = SnapPostToTunnel(_yard != null ? _yard.DropPoint : BasecampPos, _crewBodyR[2]);
+            _workRefiner = SnapPostToTunnel(_refiner != null ? _refiner.WorkPoint : BasecampPos, _crewBodyR[3]);
+        }
+
+        void EnsureCrewNav()
+        {
+            for (int i = 0; i < _crewNav.Length; i++)
+            {
+                if (_crewNav[i] == null)
+                    _crewNav[i] = new ExcavatedPathfinder(_world);
+            }
+        }
+
+        bool StepCrewHomeOrOut(int idx, Transform t, Vector2 target, float bodyR)
+        {
+            if (t == null) { _arrived[idx] = true; return true; }
+            if (_arrived[idx]) return true;
+
+            Vector2 p = t.localPosition;
+            float arrive = Mathf.Max(0.1f, bodyR * 0.85f);
+            if ((target - p).sqrMagnitude <= arrive * arrive)
+            {
+                t.localPosition = target;
+                _arrived[idx] = true;
+                _crewNav[idx]?.Invalidate();
+                return true;
+            }
+
+            // Snap onto nearest open tunnel if somehow stuck in rock
+            var cell = _world.WorldToCell(p);
+            if (!_world.IsTunnelOpen(cell.x, cell.y))
+            {
+                if (TrySnapToNearestTunnel(ref p, bodyR))
+                    t.localPosition = p;
+            }
+
+            float speed = TravelSpeed * LoosePile.SpeedMulAt(p, bodyR);
+            bool done = _crewNav[idx].Follow(
+                p,
+                target,
+                speed,
+                bodyR,
+                face: dir =>
+                {
+                    if (t == _worker?.transform && dir.sqrMagnitude > 0.0001f)
+                        t.up = dir;
+                },
+                tryStep: (dir, step) => CrewTryStep(t, dir, step, bodyR));
+
+            if (done)
+            {
+                t.localPosition = target;
+                _arrived[idx] = true;
+                _crewNav[idx]?.Invalidate();
+            }
+            return _arrived[idx];
+        }
+
+        bool CrewTryStep(Transform t, Vector2 dir, float step, float bodyR)
+        {
+            if (t == null || dir.sqrMagnitude < 0.00001f) return false;
+            Vector2 next = (Vector2)t.localPosition + dir.normalized * step;
+            if (_world.CircleHitsSolid(next, bodyR * 0.85f)) return false;
+            t.localPosition = next;
+            return true;
+        }
+
+        bool TrySnapToNearestTunnel(ref Vector2 p, float bodyR)
+        {
+            var c = _world.WorldToCell(p);
+            for (int r = 1; r <= 8; r++)
+            {
+                for (int oy = -r; oy <= r; oy++)
+                for (int ox = -r; ox <= r; ox++)
+                {
+                    if (Mathf.Abs(ox) != r && Mathf.Abs(oy) != r) continue;
+                    int x = c.x + ox, y = c.y + oy;
+                    if (!_world.IsTunnelOpen(x, y)) continue;
+                    Vector2 cand = _world.CellCenter(x, y);
+                    if (_world.CircleHitsSolid(cand, bodyR * 0.7f)) continue;
+                    p = cand;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void BeginHeadingHome()
+        {
+            _crewPhase = CrewPhase.HeadingHome;
+            _commuteTimer = 0f;
+            for (int i = 0; i < _arrived.Length; i++) _arrived[i] = false;
+            EnsureCrewNav();
+            for (int i = 0; i < _crewNav.Length; i++) _crewNav[i]?.Invalidate();
+            SetAllCrewVisible(true);
+            _worker?.ClearRoute();
+            _prospector?.SetRadar(false);
+            _banter.TrySay(WorkerBanter.Voice.Excavator,
+                "Whistle's blown. Back to the tent.",
+                "Shift's done. Firepit's calling.",
+                "Knock off — see you at 08.");
+            _banter.TrySay(WorkerBanter.Voice.Hauler,
+                "Cart parked. Heading to camp.",
+                "That's a wrap. Boots off soon.");
+        }
+
+        void EnterSleep()
+        {
+            _crewPhase = CrewPhase.Asleep;
+            SetAllCrewVisible(false);
+            if (_sleepCamp != null)
+            {
+                _worker?.TeleportTo(_sleepCamp.TentDoor);
+                _prospector?.TeleportTo(_sleepCamp.TentDoor);
+                _hauler?.TeleportTo(_sleepCamp.TentDoor);
+                _refiner?.TeleportTo(_sleepCamp.TentDoor);
+            }
+            _banter.TrySay(WorkerBanter.Voice.Prospector,
+                "Lights out. Dreaming of veins.",
+                "Tent's warm. See you at dawn.");
+        }
+
+        void BeginHeadingOut(bool announce)
+        {
+            _crewPhase = CrewPhase.HeadingOut;
+            _commuteTimer = 0f;
+            RefreshWorkPosts();
+            for (int i = 0; i < _arrived.Length; i++) _arrived[i] = false;
+            EnsureCrewNav();
+            for (int i = 0; i < _crewNav.Length; i++) _crewNav[i]?.Invalidate();
+            Vector2 door = _sleepCamp != null ? _sleepCamp.TentDoor : BasecampPos;
+            // Door may sit near pad edge — snap onto open floor before walking
+            door = SnapPostToTunnel(door, _crewBodyR[1]);
+            // Stagger slightly outside the flap
+            _worker?.TeleportTo(door + new Vector2(0.1f, -0.15f));
+            _prospector?.TeleportTo(door + new Vector2(-0.2f, 0.05f));
+            _hauler?.TeleportTo(door + new Vector2(0.25f, 0.1f));
+            _refiner?.TeleportTo(door + new Vector2(-0.05f, -0.25f));
+            SetAllCrewVisible(true);
+            if (announce)
+            {
+                _banter.TrySay(WorkerBanter.Voice.Excavator,
+                    "08:00. Bits warm — let's dig.",
+                    "Morning whistle. Out of the tent.",
+                    "New shift. Mountain's waiting.");
+            }
+        }
+
+        void EnterOnShift()
+        {
+            _crewPhase = CrewPhase.OnShift;
+            _commuteTimer = 0f;
+            SetAllCrewVisible(true);
+            // Snap exactly onto posts
+            _worker?.TeleportTo(_workExcavator);
+            _prospector?.TeleportTo(_workProspector);
+            _hauler?.TeleportTo(_workHauler);
+            _refiner?.TeleportTo(_workRefiner);
+        }
+
+        /// <summary>Fast-forward night — jump to next 08:00 and walk out (or skip walk).</summary>
+        public void SkipSleep()
+        {
+            if (_crewPhase == CrewPhase.OnShift || _crewPhase == CrewPhase.HeadingOut)
+                return;
+
+            if (_gameHour >= ShiftStartHour)
+                _dayIndex++;
+            _gameHour = ShiftStartHour;
+            BeginHeadingOut(announce: true);
+            _banter.TrySay(WorkerBanter.Voice.Hauler,
+                "Skipped the snore. Coffee and cart.",
+                "Fast-forward. Boots back on.");
+            ApplyDayNightLight();
+        }
+
+        void SetAllCrewVisible(bool on)
+        {
+            _worker?.SetCrewVisible(on);
+            _prospector?.SetCrewVisible(on);
+            _hauler?.SetCrewVisible(on);
+            _refiner?.SetCrewVisible(on);
+        }
+
+        void ApplyDayNightLight()
+        {
+            if (_globalLight == null) return;
+            // Underground — subtle day/night swing on global fill
+            bool day = OnShiftHours;
+            float target = day ? 0.038f : 0.014f;
+            Color col = day
+                ? new Color(0.42f, 0.45f, 0.52f)
+                : new Color(0.22f, 0.28f, 0.42f);
+            _globalLight.intensity = Mathf.MoveTowards(_globalLight.intensity, target, Time.deltaTime * 0.04f);
+            _globalLight.color = Color.Lerp(_globalLight.color, col, Time.deltaTime * 1.2f);
         }
 
         void DiscoverGasNearCrew()
@@ -443,6 +750,7 @@ namespace DeepCore.FreeMovement
 
         void HandleMouse()
         {
+            if (_crewPhase != CrewPhase.OnShift) return;
             var mouse = Mouse.current;
             var cam = Camera.main;
             if (mouse == null || cam == null) return;
@@ -491,16 +799,22 @@ namespace DeepCore.FreeMovement
         {
             var cam = Camera.main;
             if (cam == null) return;
-            Transform follow = _control switch
+            Vector3 t;
+            if (_crewPhase == CrewPhase.Asleep && _sleepCamp != null)
+                t = new Vector3(_sleepCamp.FirePos.x, _sleepCamp.FirePos.y, -10f);
+            else
             {
-                ControlWorker.Prospector => _prospector != null ? _prospector.transform : null,
-                ControlWorker.Hauler => _hauler != null ? _hauler.transform : null,
-                ControlWorker.Refiner => _refiner != null ? _refiner.transform : null,
-                _ => _worker != null ? _worker.transform : null,
-            };
-            if (follow == null) return;
-            Vector3 t = follow.position;
-            t.z = -10f;
+                Transform follow = _control switch
+                {
+                    ControlWorker.Prospector => _prospector != null ? _prospector.transform : null,
+                    ControlWorker.Hauler => _hauler != null ? _hauler.transform : null,
+                    ControlWorker.Refiner => _refiner != null ? _refiner.transform : null,
+                    _ => _worker != null ? _worker.transform : null,
+                };
+                if (follow == null) return;
+                t = follow.position;
+                t.z = -10f;
+            }
             cam.transform.position = Vector3.Lerp(cam.transform.position, t, 1f - Mathf.Exp(-cameraFollow * Time.deltaTime));
         }
 
@@ -525,6 +839,10 @@ namespace DeepCore.FreeMovement
             _gasFx?.Rescan();
             _banter.Clear();
             _hoverPile = null;
+            RefreshWorkPosts();
+            _dayIndex = 1;
+            _gameHour = 7.7f;
+            BeginHeadingOut(announce: false);
             var shine = _worldRoot != null ? _worldRoot.GetComponentInChildren<GoldVeinShine>() : null;
             shine?.Rescan();
             if (_tactical != null)
@@ -565,7 +883,7 @@ namespace DeepCore.FreeMovement
             foreach (var l in FindObjectsByType<Light2D>(FindObjectsSortMode.None))
             {
                 if (l.lightType != Light2D.LightType.Global) continue;
-                // Bright enough to read gold grades in the wall face
+                _globalLight = l;
                 l.intensity = 0.025f;
                 l.color = new Color(0.35f, 0.4f, 0.55f);
                 return;
@@ -575,6 +893,7 @@ namespace DeepCore.FreeMovement
             light.lightType = Light2D.LightType.Global;
             light.intensity = 0.025f;
             light.color = new Color(0.35f, 0.4f, 0.55f);
+            _globalLight = light;
         }
 
         // Industrial cyberpunk mining HUD palette
@@ -635,9 +954,35 @@ namespace DeepCore.FreeMovement
                     labelMd);
             }
 
+            // ——— Day clock / shift ———
+            bool canSkip = _crewPhase == CrewPhase.Asleep || _crewPhase == CrewPhase.HeadingHome;
+            float clockH = canSkip ? 92f : 64f;
+            var clockR = new Rect(10, 100, 168f, clockH);
+            DrawCyberPanel(clockR, lit: _crewPhase == CrewPhase.OnShift);
+            Block(clockR);
+            GUI.Label(new Rect(clockR.x + 12, clockR.y + 8, 140, 14), $"DAY {_dayIndex}", labelHdr);
+            GUI.Label(new Rect(clockR.x + 12, clockR.y + 24, 140, 22), FormatClock(),
+                LabelStyle(20, UiAmber, bold: true));
+            string phaseLabel = _crewPhase switch
+            {
+                CrewPhase.OnShift => "SHIFT // 08–18",
+                CrewPhase.HeadingHome => "KNOCKING OFF",
+                CrewPhase.Asleep => "CREW ASLEEP",
+                CrewPhase.HeadingOut => "SHIFT STARTING",
+                _ => "",
+            };
+            GUI.Label(new Rect(clockR.x + 12, clockR.y + 46, 150, 14), phaseLabel, labelSm);
+            if (canSkip)
+            {
+                var skipR = new Rect(clockR.x + 12, clockR.y + 64, 144f, 22);
+                Block(skipR);
+                if (DrawCyberButton(skipR, "SKIP SLEEP // N", selected: false, accent: UiAmber))
+                    SkipSleep();
+            }
+
             // ——— Left worker roster ———
             float cardW = 168f, cardH = 70f, cardGap = 6f;
-            float cx = 10f, cy = 108f;
+            float cx = 10f, cy = 100f + clockH + 8f;
             string prosSub = _prospector == null ? "SCAN · RADAR" : _prospector.WorkMode switch
             {
                 ProspectorWorkMode.SurveyNearby => "AUTO // SURVEY",
@@ -648,8 +993,8 @@ namespace DeepCore.FreeMovement
                 "PROSPECTOR", prosSub, cardTitle, cardSub);
             DrawBanterBubble(cx + cardW + 8f, cy, WorkerBanter.Voice.Prospector);
             string digSub = _worker != null && _worker.RouteCount > 0
-                ? $"ROUTE · {_worker.RouteCount} PIN{(_worker.RouteCount == 1 ? "" : "S")}"
-                : "LMB PIN · SHIFT GO";
+                    ? $"ROUTE · {_worker.RouteCount} PIN{(_worker.RouteCount == 1 ? "" : "S")}"
+                    : "LMB PIN · SHIFT GO";
             DrawWorkerCard(new Rect(cx, cy + cardH + cardGap, cardW, cardH), ControlWorker.Excavator,
                 "EXCAVATOR", digSub, cardTitle, cardSub);
             DrawBanterBubble(cx + cardW + 8f, cy + cardH + cardGap, WorkerBanter.Voice.Excavator);
@@ -756,7 +1101,7 @@ namespace DeepCore.FreeMovement
                 // Auto job modes — under scan panel
                 float wx = px;
                 float wy = by + 160f;
-                var workPanel = new Rect(wx, wy, 160, 128);
+                var workPanel = new Rect(wx, wy, 160, 142);
                 DrawCyberPanel(workPanel, lit: true);
                 Block(workPanel);
                 GUI.Label(new Rect(wx + 12, wy + 8, 140, 16), "AUTO JOB", labelHdr);
@@ -776,7 +1121,7 @@ namespace DeepCore.FreeMovement
                     if (DrawCyberButton(br, jobs[i].label, selected: sel))
                         _prospector.SetWorkMode(jobs[i].mode);
                 }
-                GUI.Label(new Rect(wx + 12, wy + 112, 140, 12),
+                GUI.Label(new Rect(wx + 12, wy + 116, 140, 20),
                     _prospector.WorkMode == ProspectorWorkMode.SurveyNearby
                         ? "gold near excavator"
                         : _prospector.WorkMode == ProspectorWorkMode.AssistExcavator
@@ -801,7 +1146,7 @@ namespace DeepCore.FreeMovement
         void DrawKeybindingsPanel()
         {
             const float panelW = 248f;
-            const float panelH = 322f;
+            const float panelH = 355f;
             var r = new Rect(Screen.width - panelW - 12f, Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
             Block(r);
@@ -828,6 +1173,7 @@ namespace DeepCore.FreeMovement
                 ("F1 / F2 / F3", "Manual · Survey · Assist"),
                 ("V", "Scan view overlay"),
                 ("T", "Tactical map"),
+                ("N", "Skip sleep → 08:00"),
                 ("G", "Hauler / Refiner priority"),
                 ("L", "Place lantern"),
                 ("R", "Reset map"),

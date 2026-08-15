@@ -152,6 +152,26 @@ namespace DeepCore.FreeMovement
             return p.transform.localPosition;
         }
 
+        /// <summary>True if standing on / brushing a loose rock chunk on the floor.</summary>
+        public static bool IsOnLoose(Vector2 terrainPos, float bodyRadius = 0.12f)
+        {
+            float hit = bodyRadius + 0.07f;
+            float hit2 = hit * hit;
+            for (int i = 0; i < Active.Count; i++)
+            {
+                var p = Active[i];
+                if (p == null) continue;
+                Vector2 pp = PileTerrainPos(p);
+                if ((pp - terrainPos).sqrMagnitude <= hit2)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>1 on clear floor, 0.5 when walking over loose rock.</summary>
+        public static float SpeedMulAt(Vector2 terrainPos, float bodyRadius = 0.12f) =>
+            IsOnLoose(terrainPos, bodyRadius) ? 0.5f : 1f;
+
         public static void ClearAllClaims()
         {
             for (int i = 0; i < Active.Count; i++)

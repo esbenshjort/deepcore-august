@@ -345,14 +345,14 @@ namespace DeepCore.FreeMovement
             psr.sprite = MakePlatformSprite();
             psr.sortingOrder = 10;
             DigVisualKit.ApplyLit(psr);
-            platform.transform.localScale = Vector3.one * 2.35f;
+            platform.transform.localScale = Vector3.one * 3.1f;
 
-            // Layout (local offsets from drop):
+            // Layout (local offsets from drop) — wider pad for bigger camp
             //   [ORE ROCK]     [WASHER]     [ORE GOLD]
             //   [DIRT]                      [REFINED]
-            float x = 1.15f;
-            float yOre = 0.15f;
-            float yOut = -0.95f;
+            float x = 1.45f;
+            float yOre = 0.25f;
+            float yOut = -1.15f;
 
             yard.Rock = Stockpile.Spawn(root, center + new Vector2(-x, yOre), StockpileKind.Rock);
             yard.Gold = Stockpile.Spawn(root, center + new Vector2(x, yOre), StockpileKind.Gold);

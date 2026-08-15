@@ -110,6 +110,30 @@ namespace DeepCore.FreeMovement
             ClearCargoSlots();
         }
 
+        public void TeleportTo(Vector2 pos)
+        {
+            if (_target != null)
+            {
+                _target.Claimed = false;
+                _target = null;
+            }
+            _state = State.Seek;
+            _depositTimer = 0f;
+            _pickupTimer = 0f;
+            if (_calc != null) _calc.ClearCarry();
+            transform.localPosition = pos;
+            InvalidatePath();
+            ClearCargoSlots();
+        }
+
+        public void SetCrewVisible(bool on)
+        {
+            foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
+                r.enabled = on;
+            foreach (var l in GetComponentsInChildren<Light2D>(true))
+                l.enabled = on;
+        }
+
         void EnsureBfsBuffers()
         {
             if (_world == null) return;
@@ -648,7 +672,7 @@ namespace DeepCore.FreeMovement
             Vector2 dir = to.normalized;
             Face(dir);
 
-            float step = _moveSpeed * Time.deltaTime;
+            float step = _moveSpeed * LoosePile.SpeedMulAt(pos, _radius) * Time.deltaTime;
             if (_calc.CarryPiles > 0)
                 step *= Mathf.Lerp(1f, 0.75f, _cargoCount / (float)CartSlots);
 

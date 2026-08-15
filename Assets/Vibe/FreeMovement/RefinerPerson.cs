@@ -15,7 +15,6 @@ namespace DeepCore.FreeMovement
         BasecampYard _yard;
         DeliveryCalculator _calc;
         WashMachine _washer;
-        float _radius = 0.08f;
         float _moveSpeed = 1.25f;
 
         State _state = State.Idle;
@@ -102,6 +101,28 @@ namespace DeepCore.FreeMovement
                 transform.localPosition = (Vector2)_yard.Washer.transform.localPosition
                                           + new Vector2(-0.45f, -0.35f);
             _washer?.ResetMachine();
+        }
+
+        public void TeleportTo(Vector2 pos)
+        {
+            _holding = false;
+            if (_heldSr != null) _heldSr.gameObject.SetActive(false);
+            _state = State.Idle;
+            _idleTimer = 0.4f;
+            transform.localPosition = pos;
+        }
+
+        public Vector2 WorkPoint =>
+            _yard?.Washer != null
+                ? (Vector2)_yard.Washer.transform.localPosition + new Vector2(-0.45f, -0.35f)
+                : Position;
+
+        public void SetCrewVisible(bool on)
+        {
+            foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
+                r.enabled = on;
+            foreach (var l in GetComponentsInChildren<Light2D>(true))
+                l.enabled = on;
         }
 
         public void Tick(Vector2 wasd)
@@ -263,8 +284,8 @@ namespace DeepCore.FreeMovement
         void Step(Vector2 dir)
         {
             if (dir.sqrMagnitude < 0.0001f) return;
-            // Camp pad — free movement (stockpiles sit on platform, not dig mesh)
-            transform.localPosition = Position + dir.normalized * (_moveSpeed * Time.deltaTime);
+            float mul = LoosePile.SpeedMulAt(Position, 0.12f);
+            transform.localPosition = Position + dir.normalized * (_moveSpeed * mul * Time.deltaTime);
         }
 
         static Sprite MakeBodySprite()
