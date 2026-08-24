@@ -28,6 +28,11 @@ namespace DeepCore.FreeMovement
         public RefinerPriority Priority { get; private set; } = RefinerPriority.GoldOre;
         public Vector2 Position => transform.localPosition;
 
+        /// <summary>Body / Mind / Soul sheet. Data only — unused by wash logic yet.</summary>
+        public WorkerStats Stats => _stats ??= new WorkerStats();
+
+        [SerializeField] WorkerStats _stats = new WorkerStats();
+
         public event System.Action StartedWash;
         public event System.Action FoundGold;
         public event System.Action BatchDone;
@@ -311,6 +316,11 @@ namespace DeepCore.FreeMovement
 
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.2f), s);
+        }
+
+        void OnValidate()
+        {
+            _stats?.ClampAll();
         }
     }
 }

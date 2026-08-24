@@ -29,6 +29,16 @@ namespace DeepCore.FreeMovement
         public byte MaxDurability;
         public byte Mass;
         public byte DamageState;
+        /// <summary>Mining armor from material profile (see FineTerrainWorld.RockArmor / BedrockArmor).</summary>
+        public byte Armor;
+        /// <summary>Full mining HP for this tile type. Per-tile CurrentHP lives in <see cref="Hp"/>.</summary>
+        public byte MaxHp;
+        /// <summary>Current mining HP — independent per tile (CurrentHP).</summary>
+        public byte Hp;
+        /// <summary>True after the excavator has rolled Weak Point for this tile (success or fail).</summary>
+        public bool WeakPointChecked;
+        /// <summary>True if Weak Point roll succeeded — extra armor pen while this tile lives.</summary>
+        public bool HasWeakPoint;
         /// <summary>4 sockets × 2 bits each: Rock=0, Bedrock=1, Gold=2.</summary>
         public byte Sockets;
 
@@ -65,6 +75,9 @@ namespace DeepCore.FreeMovement
 
         public bool IsUndamageableBorder =>
             Material == TerrainMaterial.Bedrock && MaxDurability >= 254;
+
+        /// <summary>True while CurrentHP remains.</summary>
+        public bool HasMiningHp => Hp > 0;
     }
 
     public sealed class FineTerrainWorld
@@ -74,9 +87,25 @@ namespace DeepCore.FreeMovement
         public const int RockSocketHardness = 3;
         public const int BedrockSocketHardness = 50;
 
+        // Mining combat profiles — single source for rock / bedrock Armor + MaxHp
+        public const byte RockArmor = 8;
+        public const byte RockMaxHp = 20;
+        public const byte BedrockArmor = 18;
+        public const byte BedrockMaxHp = 70;
+
+        /// <summary>Weak Point check DC for normal rock (D20 + Finesse).</summary>
+        public const int RockWeakPointDC = 18;
+        /// <summary>Weak Point check DC for bedrock (D20 + Finesse).</summary>
+        public const int BedrockWeakPointDC = 24;
+
         public int Width { get; }
         public int Height { get; }
         public float CellSize { get; }
+
+        TunnelNavGrid _navGrid;
+
+        /// <summary>Shared tunnel walkability / clearance / A* foundation.</summary>
+        public TunnelNavGrid Navigation => _navGrid ??= new TunnelNavGrid(this);
 
         readonly TerrainCell[] _cells;
         bool[] _gas;
@@ -145,7 +174,7 @@ namespace DeepCore.FreeMovement
             hardness = Mathf.Clamp(hardness, 1, 250);
             mass = Mathf.Clamp(mass, 1, 16);
 
-            return new TerrainCell
+            var cell = new TerrainCell
             {
                 Phase = TerrainPhase.Solid,
                 Material = bedrock >= 2 ? TerrainMaterial.Bedrock : TerrainMaterial.Rock,
@@ -155,6 +184,47 @@ namespace DeepCore.FreeMovement
                 DamageState = 0,
                 Sockets = packed,
             };
+            ApplyMiningProfile(ref cell);
+            return cell;
+        }
+
+        /// <summary>
+        /// Sets Armor / MaxHp / CurrentHP (Hp) from rock vs bedrock profile.
+        /// Clears Weak Point state for a fresh tile.
+        /// </summary>
+        public static void ApplyMiningProfile(ref TerrainCell cell)
+        {
+            if (cell.Material == TerrainMaterial.Bedrock)
+            {
+                cell.Armor = BedrockArmor;
+                cell.MaxHp = BedrockMaxHp;
+                cell.Hp = BedrockMaxHp;
+            }
+            else
+            {
+                cell.Armor = RockArmor;
+                cell.MaxHp = RockMaxHp;
+                cell.Hp = RockMaxHp;
+            }
+            cell.WeakPointChecked = false;
+            cell.HasWeakPoint = false;
+        }
+
+        public static int WeakPointDC(TerrainMaterial material) =>
+            material == TerrainMaterial.Bedrock ? BedrockWeakPointDC : RockWeakPointDC;
+
+        /// <summary>
+        /// Record Weak Point check result on the tile. Idempotent if already checked.
+        /// </summary>
+        public bool TrySetWeakPoint(int x, int y, bool success)
+        {
+            if (!InBounds(x, y)) return false;
+            ref var c = ref _cells[y * Width + x];
+            if (c.WeakPointChecked) return false;
+            if (c.Phase == TerrainPhase.Excavated || c.IsUndamageableBorder) return false;
+            c.WeakPointChecked = true;
+            c.HasWeakPoint = success;
+            return true;
         }
 
         public static TerrainCell FromCounts(int rock, int bedrock, int gold)
@@ -206,6 +276,7 @@ namespace DeepCore.FreeMovement
             c.Durability = 255;
             c.MaxDurability = 255;
             c.Mass = 12;
+            ApplyMiningProfile(ref c);
             return c;
         }
 
@@ -265,6 +336,7 @@ namespace DeepCore.FreeMovement
         {
             MarkDirtyCell(x, y);
             TryRevealGasNear(x, y);
+            _navGrid?.NotifyTileChanged(x, y);
             if (_batch > 0) { _dirty = true; return; }
             FlushRegion();
             Changed?.Invoke();
@@ -285,15 +357,51 @@ namespace DeepCore.FreeMovement
         /// <summary>
         /// Walkable tunnel after dig / breach. Sealed gas stays closed until revealed.
         /// Lit floor / gas FX use <see cref="IsFloorOpen"/> so unseen void stays dark.
+        /// Damaged rock (CurrentHP &gt; 0) is never walkable — only fully excavated tiles.
         /// </summary>
         public bool IsTunnelOpen(int x, int y)
         {
             if (!InBounds(x, y)) return false;
-            if (_cells[y * Width + x].Phase != TerrainPhase.Excavated) return false;
+            ref readonly var c = ref _cells[y * Width + x];
+            // Must be excavated AND finished (no remaining mining HP)
+            if (c.Phase != TerrainPhase.Excavated || c.Hp > 0) return false;
             int i = y * Width + x;
             if (_gas != null && _gas[i] && (_gasRevealed == null || !_gasRevealed[i]))
                 return false;
             return true;
+        }
+
+        /// <summary>True if this cell still blocks movement (solid, damaged, or unfinished).</summary>
+        public bool IsMovementBlocker(int x, int y)
+        {
+            if (!InBounds(x, y)) return true;
+            ref readonly var c = ref _cells[y * Width + x];
+            if (c.Phase != TerrainPhase.Excavated) return true;
+            return c.Hp > 0;
+        }
+
+        /// <summary>Count solid / unfinished cells overlapping a world-space circle.</summary>
+        public int CountSolidInCircle(Vector2 center, float radius)
+        {
+            int x0 = Mathf.FloorToInt((center.x - radius) / CellSize);
+            int x1 = Mathf.FloorToInt((center.x + radius) / CellSize);
+            int y0 = Mathf.FloorToInt((center.y - radius) / CellSize);
+            int y1 = Mathf.FloorToInt((center.y + radius) / CellSize);
+            float r2 = radius * radius;
+            int n = 0;
+            for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++)
+            {
+                if (!IsMovementBlocker(x, y)) continue;
+                float cx0 = x * CellSize;
+                float cy0 = y * CellSize;
+                float closestX = Mathf.Clamp(center.x, cx0, cx0 + CellSize);
+                float closestY = Mathf.Clamp(center.y, cy0, cy0 + CellSize);
+                float dx = center.x - closestX;
+                float dy = center.y - closestY;
+                if (dx * dx + dy * dy < r2) n++;
+            }
+            return n;
         }
 
         /// <summary>
@@ -363,37 +471,59 @@ namespace DeepCore.FreeMovement
             c.Phase = TerrainPhase.Excavated;
             c.Durability = 0;
             c.DamageState = c.MaxDurability;
+            c.Hp = 0;
             if (notify) Notify(x, y);
             else { MarkDirtyCell(x, y); _dirty = true; }
         }
 
-        public bool Damage(int x, int y)
+        /// <summary>
+        /// Apply mining damage to this tile's CurrentHP (<see cref="TerrainCell.Hp"/>).
+        /// Excavates when Hp reaches 0. Study soft may double the strike.
+        /// </summary>
+        public bool Damage(int x, int y, int amount = 1)
         {
             if (!InBounds(x, y)) return false;
             ref var c = ref _cells[y * Width + x];
             if (c.Phase == TerrainPhase.Excavated) return false;
             if (c.IsUndamageableBorder) return false;
+            if (amount < 1) amount = 1;
 
-            int hits = 1;
-            // Prospected rock: excavator digs harder while study bonus lasts
+            int strikes = 1;
             if (_studySoft != null)
             {
                 int i = y * Width + x;
                 if (_studySoft.TryGetValue(i, out byte bonus) && bonus > 0)
                 {
-                    hits = 2;
+                    strikes = 2;
                     bonus--;
                     if (bonus == 0) _studySoft.Remove(i);
                     else _studySoft[i] = bonus;
                 }
             }
 
-            for (int h = 0; h < hits && c.Durability > 0; h++)
-                c.Durability--;
-            c.DamageState = (byte)(c.MaxDurability - c.Durability);
-            c.Phase = c.Durability == 0 ? TerrainPhase.Excavated : TerrainPhase.Damaged;
+            for (int s = 0; s < strikes && c.Hp > 0; s++)
+                c.Hp = (byte)Mathf.Max(0, c.Hp - amount);
+
+            SyncDurabilityFromHp(ref c);
+            c.Phase = c.Hp == 0 ? TerrainPhase.Excavated : TerrainPhase.Damaged;
             Notify(x, y);
             return c.Phase == TerrainPhase.Excavated;
+        }
+
+        /// <summary>Keep cracked-rock visuals in sync with mining Hp.</summary>
+        static void SyncDurabilityFromHp(ref TerrainCell c)
+        {
+            if (c.MaxHp <= 0 || c.Hp == 0)
+            {
+                c.Durability = 0;
+                c.DamageState = c.MaxDurability;
+                return;
+            }
+
+            float t = c.Hp / (float)c.MaxHp;
+            c.Durability = (byte)Mathf.Clamp(
+                Mathf.CeilToInt(c.MaxDurability * t), 1, c.MaxDurability);
+            c.DamageState = (byte)(c.MaxDurability - c.Durability);
         }
 
         Dictionary<int, byte> _studySoft;
@@ -628,7 +758,7 @@ namespace DeepCore.FreeMovement
             for (int y = y0; y <= y1; y++)
             for (int x = x0; x <= x1; x++)
             {
-                if (!IsSolid(x, y)) continue;
+                if (!IsMovementBlocker(x, y)) continue;
                 float cx0 = x * CellSize;
                 float cy0 = y * CellSize;
                 float closestX = Mathf.Clamp(center.x, cx0, cx0 + CellSize);

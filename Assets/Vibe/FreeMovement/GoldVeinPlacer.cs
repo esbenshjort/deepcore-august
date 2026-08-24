@@ -62,8 +62,8 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>
-        /// Organic bedrock: noisy veins + irregular clumps, with soft pass-corridors
-        /// so a skilled digger can always snake around.
+        /// Organic bedrock: large continuous lobes / ridges, soft corridors to snake through.
+        /// Speckles and tiny islands are culled so soft rock stays passable; real masses hurt.
         /// </summary>
         public static void PlaceOrganicBedrock(FineTerrainWorld w, int seed)
         {
@@ -77,57 +77,210 @@ namespace DeepCore.FreeMovement
                 var c = w.Get(x, y);
                 if (c.IsUndamageableBorder) continue;
 
-                float n1 = Mathf.PerlinNoise(x * 0.038f + ox, y * 0.038f + oy);
-                float n2 = Mathf.PerlinNoise(x * 0.09f + ox + 8f, y * 0.09f + oy + 3f);
-                float n3 = Mathf.PerlinNoise(x * 0.02f + ox + 20f, y * 0.02f + oy + 11f);
+                // Lower frequencies → fewer speckles, bigger coherent masses
+                float n1 = Mathf.PerlinNoise(x * 0.018f + ox, y * 0.018f + oy);
+                float n2 = Mathf.PerlinNoise(x * 0.042f + ox + 8f, y * 0.042f + oy + 3f);
+                float n3 = Mathf.PerlinNoise(x * 0.011f + ox + 20f, y * 0.011f + oy + 11f);
 
-                // Soft corridors — always diggable rock lanes through the field
-                float pass = Mathf.PerlinNoise(x * 0.028f + 40f + ox, y * 0.028f + 17f + oy);
-                bool corridor = pass > 0.40f && pass < 0.60f;
-                if (corridor && n2 < 0.72f) continue;
+                // Wider soft corridors through the field
+                float pass = Mathf.PerlinNoise(x * 0.016f + 40f + ox, y * 0.016f + 17f + oy);
+                bool corridor = pass > 0.36f && pass < 0.64f;
+                if (corridor && n2 < 0.78f) continue;
 
-                // Vein-like: near ridge of low-frequency noise
+                // Thick ridges
                 float ridge = 1f - Mathf.Abs(n1 - 0.5f) * 2f;
-                bool vein = ridge > 0.78f && n2 > 0.35f && n3 > 0.32f;
+                bool vein = ridge > 0.82f && n2 > 0.42f && n3 > 0.38f;
 
-                // Clumps: irregular blobs (warped threshold, not circles)
-                float clump = n2 * 0.65f + n3 * 0.35f;
-                float warp = Mathf.PerlinNoise(x * 0.14f + oy, y * 0.14f + ox);
-                bool blob = clump > 0.74f + warp * 0.08f;
+                // Large clumps only (high threshold — no pepper noise)
+                float clump = n2 * 0.55f + n3 * 0.45f;
+                float warp = Mathf.PerlinNoise(x * 0.055f + oy, y * 0.055f + ox);
+                bool blob = clump > 0.80f + warp * 0.05f;
 
                 if (!vein && !blob) continue;
 
                 int bedrock;
                 if (vein && blob) bedrock = 4;
-                else if (vein) bedrock = ridge > 0.9f ? 4 : 3;
-                else bedrock = clump > 0.85f ? 4 : 3;
+                else if (vein) bedrock = ridge > 0.91f ? 4 : 3;
+                else bedrock = clump > 0.88f ? 4 : 3;
 
-                // Thin edges of veins stay diggable but still hard (2 sockets)
-                if (vein && ridge < 0.84f && !blob) bedrock = 2;
+                // Soft fringe on veins only — still diggable but not speckled 2-socket crumbs
+                if (vein && ridge < 0.86f && !blob) bedrock = 3;
 
                 w.Set(x, y, FineTerrainWorld.FromCounts(4 - bedrock, bedrock, 0));
             }
             w.EndBatch();
+
+            CullSmallBedrockIslands(w, minCells: 55);
+            FillTinyRockHolesInBedrock(w, maxHoleCells: 28);
+        }
+
+        /// <summary>Remove isolated / tiny bedrock speckles so paths stay open.</summary>
+        static void CullSmallBedrockIslands(FineTerrainWorld w, int minCells)
+        {
+            int n = w.Width * w.Height;
+            var stamp = new int[n];
+            var q = new System.Collections.Generic.Queue<int>(256);
+            int gen = 0;
+            var component = new System.Collections.Generic.List<int>(128);
+
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                int i = y * w.Width + x;
+                if (stamp[i] != 0) continue;
+                if (w.IsExcavated(x, y)) continue;
+                var cell = w.Get(x, y);
+                if (cell.IsUndamageableBorder || cell.BedrockCount < 2) continue;
+
+                gen++;
+                component.Clear();
+                q.Clear();
+                q.Enqueue(i);
+                stamp[i] = gen;
+
+                while (q.Count > 0)
+                {
+                    int cur = q.Dequeue();
+                    component.Add(cur);
+                    int cx = cur % w.Width;
+                    int cy = cur / w.Width;
+                    TryBedEnqueue(w, stamp, q, gen, cx + 1, cy);
+                    TryBedEnqueue(w, stamp, q, gen, cx - 1, cy);
+                    TryBedEnqueue(w, stamp, q, gen, cx, cy + 1);
+                    TryBedEnqueue(w, stamp, q, gen, cx, cy - 1);
+                }
+
+                if (component.Count >= minCells) continue;
+                for (int k = 0; k < component.Count; k++)
+                {
+                    int idx = component[k];
+                    int bx = idx % w.Width;
+                    int by = idx / w.Width;
+                    w.Set(bx, by, FineTerrainWorld.FromCounts(4, 0, 0));
+                }
+            }
+            w.EndBatch();
+        }
+
+        static void TryBedEnqueue(FineTerrainWorld w, int[] stamp,
+            System.Collections.Generic.Queue<int> q, int gen, int x, int y)
+        {
+            if (!w.InBounds(x, y) || w.IsExcavated(x, y)) return;
+            int i = y * w.Width + x;
+            if (stamp[i] == gen) return;
+            var c = w.Get(x, y);
+            if (c.IsUndamageableBorder || c.BedrockCount < 2) return;
+            stamp[i] = gen;
+            q.Enqueue(i);
         }
 
         /// <summary>
-        /// Rare gold: only thin veins + far pockets. Near start is empty —
-        /// finding a signal should feel like a real win.
+        /// Seal tiny soft-rock pockets trapped inside bedrock so hitting a mass feels solid.
+        /// </summary>
+        static void FillTinyRockHolesInBedrock(FineTerrainWorld w, int maxHoleCells)
+        {
+            int n = w.Width * w.Height;
+            var stamp = new int[n];
+            var q = new System.Collections.Generic.Queue<int>(256);
+            int gen = 0;
+            var component = new System.Collections.Generic.List<int>(64);
+
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                int i = y * w.Width + x;
+                if (stamp[i] != 0) continue;
+                if (w.IsExcavated(x, y)) continue;
+                var cell = w.Get(x, y);
+                if (cell.IsUndamageableBorder || cell.BedrockCount >= 2) continue;
+
+                gen++;
+                component.Clear();
+                q.Clear();
+                q.Enqueue(i);
+                stamp[i] = gen;
+                bool touchesBorderOrOpen = false;
+
+                while (q.Count > 0)
+                {
+                    int cur = q.Dequeue();
+                    component.Add(cur);
+                    int cx = cur % w.Width;
+                    int cy = cur / w.Width;
+                    if (cx <= 1 || cy <= 1 || cx >= w.Width - 2 || cy >= w.Height - 2)
+                        touchesBorderOrOpen = true;
+                    TryRockHoleEnqueue(w, stamp, q, gen, cx + 1, cy, ref touchesBorderOrOpen);
+                    TryRockHoleEnqueue(w, stamp, q, gen, cx - 1, cy, ref touchesBorderOrOpen);
+                    TryRockHoleEnqueue(w, stamp, q, gen, cx, cy + 1, ref touchesBorderOrOpen);
+                    TryRockHoleEnqueue(w, stamp, q, gen, cx, cy - 1, ref touchesBorderOrOpen);
+                }
+
+                if (touchesBorderOrOpen || component.Count > maxHoleCells) continue;
+                for (int k = 0; k < component.Count; k++)
+                {
+                    int idx = component[k];
+                    int bx = idx % w.Width;
+                    int by = idx / w.Width;
+                    w.Set(bx, by, FineTerrainWorld.FromCounts(0, 4, 0));
+                }
+            }
+            w.EndBatch();
+        }
+
+        static void TryRockHoleEnqueue(FineTerrainWorld w, int[] stamp,
+            System.Collections.Generic.Queue<int> q, int gen, int x, int y, ref bool touchesOpen)
+        {
+            if (!w.InBounds(x, y))
+            {
+                touchesOpen = true;
+                return;
+            }
+            if (w.IsExcavated(x, y))
+            {
+                touchesOpen = true;
+                return;
+            }
+            int i = y * w.Width + x;
+            if (stamp[i] == gen) return;
+            var c = w.Get(x, y);
+            if (c.IsUndamageableBorder)
+            {
+                touchesOpen = true;
+                return;
+            }
+            if (c.BedrockCount >= 2) return;
+            stamp[i] = gen;
+            q.Enqueue(i);
+        }
+
+        /// <summary>
+        /// Gold: more veins across the mountain, plus a few small near-camp teases.
+        /// Deep veins stay richer; near start stays mostly empty except intentional pockets.
         /// </summary>
         public static void PlaceOrganicGold(FineTerrainWorld w, int startX, int startY, int seed)
         {
             var rng = new System.Random(seed);
             float maxDist = Mathf.Sqrt(w.Width * w.Width + w.Height * w.Height) * 0.85f;
 
-            PlaceVein(w, 0.28f, 0.55f, 0.42f, 0.88f, 0.007f, seed + 11, minGrade: 2, maxGrade: 3);
-            PlaceVein(w, 0.62f, 0.58f, 0.78f, 0.90f, 0.0065f, seed + 22, minGrade: 2, maxGrade: 4);
-            PlaceVein(w, 0.45f, 0.70f, 0.58f, 0.95f, 0.006f, seed + 33, minGrade: 3, maxGrade: 4);
+            // Deep / mid veins (more than before)
+            PlaceVein(w, 0.22f, 0.48f, 0.40f, 0.82f, 0.0075f, seed + 11, minGrade: 2, maxGrade: 3);
+            PlaceVein(w, 0.58f, 0.52f, 0.80f, 0.88f, 0.007f, seed + 22, minGrade: 2, maxGrade: 4);
+            PlaceVein(w, 0.42f, 0.62f, 0.60f, 0.95f, 0.0065f, seed + 33, minGrade: 3, maxGrade: 4);
+            PlaceVein(w, 0.12f, 0.65f, 0.32f, 0.92f, 0.006f, seed + 77, minGrade: 2, maxGrade: 4);
+            PlaceVein(w, 0.70f, 0.45f, 0.90f, 0.78f, 0.0065f, seed + 88, minGrade: 2, maxGrade: 3);
+            PlaceVein(w, 0.35f, 0.40f, 0.55f, 0.68f, 0.0055f, seed + 99, minGrade: 2, maxGrade: 3);
+            PlaceVein(w, 0.48f, 0.78f, 0.72f, 0.96f, 0.006f, seed + 111, minGrade: 3, maxGrade: 4);
 
-            PlaceCluster(w, 0.38f, 0.86f, 0.016f, 5, seed + 44);
-            PlaceCluster(w, 0.72f, 0.84f, 0.014f, 4, seed + 55);
-            PlaceCluster(w, 0.55f, 0.93f, 0.012f, 4, seed + 66);
+            PlaceCluster(w, 0.30f, 0.88f, 0.018f, 6, seed + 44);
+            PlaceCluster(w, 0.75f, 0.82f, 0.016f, 5, seed + 55);
+            PlaceCluster(w, 0.52f, 0.94f, 0.014f, 5, seed + 66);
+            PlaceCluster(w, 0.18f, 0.72f, 0.015f, 5, seed + 122);
+            PlaceCluster(w, 0.85f, 0.60f, 0.014f, 4, seed + 133);
 
-            float clearR = Mathf.Min(w.Width, w.Height) * 0.22f;
+            // Clear accidental gold too close to camp (intentional near-camp veins placed after)
+            float clearR = Mathf.Min(w.Width, w.Height) * 0.18f;
             w.BeginBatch();
             for (int y = 1; y < w.Height - 1; y++)
             for (int x = 1; x < w.Width - 1; x++)
@@ -142,6 +295,7 @@ namespace DeepCore.FreeMovement
             }
             w.EndBatch();
 
+            // Thin deep gold a bit so veins stay readable (not solid carpets)
             w.BeginBatch();
             for (int y = 1; y < w.Height - 1; y++)
             for (int x = 1; x < w.Width - 1; x++)
@@ -151,7 +305,7 @@ namespace DeepCore.FreeMovement
                 float dx = x - startX;
                 float dy = y - startY;
                 float depth = Mathf.Clamp01(Mathf.Sqrt(dx * dx + dy * dy) / maxDist);
-                float keep = Mathf.Lerp(0.15f, 0.5f, depth * depth);
+                float keep = Mathf.Lerp(0.22f, 0.62f, depth * depth);
                 if (rng.NextDouble() > keep)
                 {
                     int bed = c.BedrockCount;
@@ -159,6 +313,16 @@ namespace DeepCore.FreeMovement
                 }
             }
             w.EndBatch();
+
+            // Small near-camp teases — short veins / clusters just outside the pad
+            float invW = 1f / w.Width;
+            float invH = 1f / w.Height;
+            float sx = startX * invW;
+            float sy = startY * invH;
+            PlaceVein(w, sx - 0.04f, sy + 0.06f, sx + 0.05f, sy + 0.14f, 0.004f, seed + 201, minGrade: 1, maxGrade: 2);
+            PlaceVein(w, sx + 0.06f, sy + 0.04f, sx + 0.14f, sy + 0.10f, 0.0035f, seed + 202, minGrade: 1, maxGrade: 2);
+            PlaceCluster(w, sx - 0.08f, sy + 0.10f, 0.010f, 4, seed + 203);
+            PlaceCluster(w, sx + 0.10f, sy + 0.12f, 0.009f, 3, seed + 204);
         }
 
         /// <summary>
@@ -289,6 +453,8 @@ namespace DeepCore.FreeMovement
                     soft.Durability = (byte)Mathf.Max(2, soft.Durability / 3);
                     soft.MaxDurability = soft.Durability;
                     soft.DamageState = 0;
+                    soft.MaxHp = (byte)Mathf.Max(2, soft.MaxHp / 3);
+                    soft.Hp = soft.MaxHp;
                     w.Set(x, y, soft);
                 }
             }

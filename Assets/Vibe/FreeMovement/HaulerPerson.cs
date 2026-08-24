@@ -39,15 +39,12 @@ namespace DeepCore.FreeMovement
         float _slotLocalScale = 0.2f;
         float _pieceWorldSize = 0.09f;
 
-        // Cell BFS path
+        // Shared tunnel A* path
+        ExcavatedPathfinder _nav;
         readonly List<Vector2> _path = new(128);
         int _pathI;
         Vector2 _pathGoal;
         float _repathTimer;
-        readonly Queue<int> _bfsQ = new(512);
-        int[] _bfsCame;
-        int[] _bfsStamp;
-        int _bfsGen;
 
         // Briefly skip piles we couldn't reach
         readonly Dictionary<int, float> _softIgnore = new(16);
@@ -56,6 +53,11 @@ namespace DeepCore.FreeMovement
         public Vector2 Position => transform.localPosition;
         public DeliveryCalculator Calculator => _calc;
         public bool PreferGold { get; private set; }
+
+        /// <summary>Body / Mind / Soul sheet. Data only — unused by haul logic yet.</summary>
+        public WorkerStats Stats => _stats ??= new WorkerStats();
+
+        [SerializeField] WorkerStats _stats = new WorkerStats();
 
         public void SetPreferGold(bool on)
         {
@@ -88,7 +90,7 @@ namespace DeepCore.FreeMovement
             _stuckFrames = 0;
             InvalidatePath();
             _softIgnore.Clear();
-            EnsureBfsBuffers();
+            EnsureNav();
             ClearCargoSlots();
         }
 
@@ -134,13 +136,15 @@ namespace DeepCore.FreeMovement
                 l.enabled = on;
         }
 
-        void EnsureBfsBuffers()
+        void EnsureNav()
         {
             if (_world == null) return;
-            int n = _world.Width * _world.Height;
-            if (_bfsCame != null && _bfsCame.Length == n) return;
-            _bfsCame = new int[n];
-            _bfsStamp = new int[n];
+            if (_nav == null)
+            {
+                _nav = new ExcavatedPathfinder(_world, _radius);
+                _nav.LateralOffset = 0.04f;
+            }
+            _nav.SetAgentRadius(_radius);
         }
 
         void InvalidatePath()
@@ -149,6 +153,7 @@ namespace DeepCore.FreeMovement
             _pathI = 0;
             _pathGoal = new Vector2(float.NaN, float.NaN);
             _repathTimer = 0f;
+            _nav?.Invalidate();
         }
 
         public static HaulerPerson Spawn(Transform parent, FineTerrainWorld world, Vector2 basecamp,
@@ -554,115 +559,20 @@ namespace DeepCore.FreeMovement
         {
             _path.Clear();
             _pathI = 0;
-            EnsureBfsBuffers();
-            if (_world == null) return;
-
-            var start = _world.WorldToCell(from);
-            var goal = _world.WorldToCell(to);
-            if (!_world.InBounds(start.x, start.y)) return;
-
-            if (!_world.IsTunnelOpen(start.x, start.y))
-                start = NearestExcavated(start.x, start.y);
-            if (!_world.InBounds(goal.x, goal.y) || !_world.IsTunnelOpen(goal.x, goal.y))
-                goal = NearestExcavated(goal.x, goal.y);
-            if (!_world.InBounds(start.x, start.y) || !_world.InBounds(goal.x, goal.y)) return;
-
-            if (start.x == goal.x && start.y == goal.y)
+            EnsureNav();
+            if (_nav == null) return;
+            if (!_nav.TryFindPath(from, to, _path))
             {
-                _path.Add(to);
-                return;
-            }
-
-            int w = _world.Width;
-            int startI = start.y * w + start.x;
-            int goalI = goal.y * w + goal.x;
-            _bfsGen++;
-            if (_bfsGen == int.MaxValue)
-            {
-                System.Array.Clear(_bfsStamp, 0, _bfsStamp.Length);
-                _bfsGen = 1;
-            }
-
-            _bfsQ.Clear();
-            _bfsQ.Enqueue(startI);
-            _bfsStamp[startI] = _bfsGen;
-            _bfsCame[startI] = -1;
-            bool found = false;
-            int guard = 0;
-            const int maxExpand = 12000;
-
-            while (_bfsQ.Count > 0 && guard++ < maxExpand)
-            {
-                int cur = _bfsQ.Dequeue();
-                if (cur == goalI)
+                // Soft fail: head toward goal cell center; never through solid rock.
+                if (_world != null)
                 {
-                    found = true;
-                    break;
+                    var g = _world.WorldToCell(to);
+                    if (_world.IsTunnelOpen(g.x, g.y))
+                        _path.Add(_world.CellCenter(g.x, g.y));
                 }
-                int cx = cur % w;
-                int cy = cur / w;
-                TryEnqueue(cx + 1, cy, cur, w);
-                TryEnqueue(cx - 1, cy, cur, w);
-                TryEnqueue(cx, cy + 1, cur, w);
-                TryEnqueue(cx, cy - 1, cur, w);
             }
-
-            if (!found)
-            {
-                _path.Add(_world.CellCenter(goal.x, goal.y));
-                return;
-            }
-
-            var chain = new List<int>(64);
-            for (int at = goalI; at >= 0; at = _bfsCame[at])
-            {
-                chain.Add(at);
-                if (at == startI) break;
-            }
-            chain.Reverse();
-            for (int i = 0; i < chain.Count; i++)
-            {
-                if (i != 0 && i != chain.Count - 1 && (i % 2) != 0) continue;
-                int idx = chain[i];
-                _path.Add(_world.CellCenter(idx % w, idx / w));
-            }
-            if (_path.Count == 0 || (_path[_path.Count - 1] - to).sqrMagnitude > 0.0001f)
-                _path.Add(to);
         }
 
-        void TryEnqueue(int x, int y, int from, int w)
-        {
-            if (!_world.InBounds(x, y) || !_world.IsTunnelOpen(x, y)) return;
-            int i = y * w + x;
-            if (_bfsStamp[i] == _bfsGen) return;
-            _bfsStamp[i] = _bfsGen;
-            _bfsCame[i] = from;
-            _bfsQ.Enqueue(i);
-        }
-
-        Vector2Int NearestExcavated(int x, int y)
-        {
-            Vector2Int best = new(x, y);
-            int bestD = int.MaxValue;
-            for (int r = 0; r <= 8; r++)
-            {
-                for (int oy = -r; oy <= r; oy++)
-                for (int ox = -r; ox <= r; ox++)
-                {
-                    if (Mathf.Abs(ox) != r && Mathf.Abs(oy) != r) continue;
-                    int nx = x + ox, ny = y + oy;
-                    if (!_world.InBounds(nx, ny) || !_world.IsTunnelOpen(nx, ny)) continue;
-                    int d = Mathf.Abs(ox) + Mathf.Abs(oy);
-                    if (d < bestD)
-                    {
-                        bestD = d;
-                        best = new Vector2Int(nx, ny);
-                    }
-                }
-                if (bestD < int.MaxValue) break;
-            }
-            return best;
-        }
 
         void StepToward(Vector2 waypoint, Vector2 ultimateGoal)
         {
@@ -858,6 +768,11 @@ namespace DeepCore.FreeMovement
 
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.9f), s);
+        }
+
+        void OnValidate()
+        {
+            _stats?.ClampAll();
         }
     }
 }

@@ -22,6 +22,9 @@ namespace DeepCore.FreeMovement
         HaulerPerson _hauler;
         ProspectorPerson _prospector;
         RefinerPerson _refiner;
+        EngineerPerson _engineer;
+        bool _engineerWasEnRoute;
+        bool _engineerWasRepairing;
         DeliveryCalculator _calc;
         BasecampYard _yard;
         Stockpile _hoverPile;
@@ -36,10 +39,10 @@ namespace DeepCore.FreeMovement
         GasPocketFx _gasFx;
         CampSleepSite _sleepCamp;
         Light2D _globalLight;
-        readonly ExcavatedPathfinder[] _crewNav = new ExcavatedPathfinder[4];
-        readonly float[] _crewBodyR = { 0.22f, 0.12f, 0.14f, 0.12f };
+        readonly ExcavatedPathfinder[] _crewNav = new ExcavatedPathfinder[5];
+        readonly float[] _crewBodyR = { 0.22f, 0.12f, 0.14f, 0.12f, 0.12f };
         readonly WorkerBanter _banter = new();
-        enum ControlWorker : byte { Prospector = 0, Excavator = 1, Hauler = 2, Refiner = 3 }
+        enum ControlWorker : byte { Prospector = 0, Excavator = 1, Hauler = 2, Refiner = 3, Engineer = 4 }
         ControlWorker _control = ControlWorker.Prospector;
 
         // ——— Day / shift cycle (24h clock, shift 08:00–18:00) ———
@@ -56,9 +59,18 @@ namespace DeepCore.FreeMovement
         Vector2 _workProspector;
         Vector2 _workHauler;
         Vector2 _workRefiner;
-        bool[] _arrived = { false, false, false, false };
+        Vector2 _workEngineer;
+        /// <summary>Where the excavator left the dig face at whistle — next shift walks back here.</summary>
+        Vector2 _excavatorDigResume;
+        bool _hasExcavatorDigResume;
+        bool[] _arrived = { false, false, false, false, false };
+        bool[] _crewStranded = { false, false, false, false, false };
+        /// <summary>Subtle per-crew lateral path stagger (world units).</summary>
+        readonly float[] _crewLateral = { -0.035f, 0.04f, -0.02f, 0.03f, 0.015f };
         float _commuteTimer;
         const float CommuteTimeoutSec = 10f;
+        [SerializeField] bool navDebugDraw;
+        [SerializeField] bool navDebugLog;
 
         // HUD hit-rects (GUI space, y-down) — block world dig/aim clicks
         readonly List<Rect> _hudBlockers = new(12);
@@ -73,6 +85,16 @@ namespace DeepCore.FreeMovement
         int StartX => _world.Width / 2;
         int StartY => 42;
         Vector2 BasecampPos => _world.CellCenter(StartX, StartY - 12);
+
+        /// <summary>Persistent navigation anchor for return-to-camp (tent door or yard pad).</summary>
+        Vector2 CampNavDestination
+        {
+            get
+            {
+                Vector2 door = _sleepCamp != null ? _sleepCamp.TentDoor : BasecampPos;
+                return SnapPostToTunnel(door, _crewBodyR[0]);
+            }
+        }
 
         bool OnShiftHours => _gameHour >= ShiftStartHour && _gameHour < ShiftEndHour;
 
@@ -131,6 +153,9 @@ namespace DeepCore.FreeMovement
             SpawnWorker(_worldRoot);
             _hauler = HaulerPerson.Spawn(_worldRoot, _world, _yard.DropPoint, _calc);
             _refiner = RefinerPerson.Spawn(_worldRoot, _world, _yard, _calc);
+            _engineer = EngineerPerson.Spawn(_worldRoot, _world,
+                _yard != null ? _yard.DropPoint + new Vector2(0.55f, 0.35f) : BasecampPos);
+            _engineer.BindExcavator(_worker);
             _prospector = ProspectorPerson.Spawn(_worldRoot, _world,
                 _world.CellCenter(StartX - 6, StartY - 2), _scanView);
 
@@ -280,6 +305,17 @@ namespace DeepCore.FreeMovement
                 pinsRoot, OnBroke, OnDigImpact, _goalSprite);
             _worker.SetRouteVisible(false);
             DigVisualKit.AttachDrillerVisual(go, _worker);
+
+            _worker.WeakPointFound += (wx, wy) =>
+            {
+                WeakPointFx.Play(_worldRoot, _world, wx, wy);
+                _banter.TrySay(WorkerBanter.Voice.Excavator,
+                    "Nailed it.",
+                    "Weak point!",
+                    "Got this.",
+                    "There — soft spot.",
+                    "Crack opens. Push it.");
+            };
         }
 
         void OnDigImpact(TerrainCell before, bool broke)
@@ -430,8 +466,30 @@ namespace DeepCore.FreeMovement
                         _prospector?.Tick(Vector2.zero, false);
                         _refiner?.Tick(wasd);
                         break;
+                    case ControlWorker.Engineer:
+                        _worker.Tick(Vector2.zero);
+                        _prospector?.SetHudVisible(false);
+                        _prospector?.Tick(Vector2.zero, false);
+                        _refiner?.Tick(Vector2.zero);
+                        break;
                 }
                 _hauler?.Tick();
+                _engineer?.Tick();
+                if (_engineer != null)
+                {
+                    if (_engineer.IsEnRoute && !_engineerWasEnRoute)
+                        _banter.TrySay(WorkerBanter.Voice.Engineer,
+                            "She's redlined. I'm moving.",
+                            "Heat spike — engineer en route.",
+                            "Don't touch the bit. I've got it.");
+                    if (_engineer.IsRepairing && !_engineerWasRepairing)
+                        _banter.TrySay(WorkerBanter.Voice.Engineer,
+                            "Bit's glowing. Hang on — I'll clear the jam.",
+                            "Overheat lock. Coolant and wrench, coming in.",
+                            "Stand by. I'm on the drill.");
+                    _engineerWasEnRoute = _engineer.IsEnRoute;
+                    _engineerWasRepairing = _engineer.IsRepairing;
+                }
             }
             else
             {
@@ -462,6 +520,10 @@ namespace DeepCore.FreeMovement
                 BeginHeadingHome();
             if (_crewPhase == CrewPhase.Asleep && prev < ShiftStartHour && _gameHour >= ShiftStartHour)
                 BeginHeadingOut(announce: true);
+
+            // Sleep recovery: Frustration −2 / real second while crew is asleep
+            if (_crewPhase == CrewPhase.Asleep)
+                _worker?.TickRestFrustrationRelief(Time.deltaTime);
         }
 
         void TickCrewPhase()
@@ -471,14 +533,20 @@ namespace DeepCore.FreeMovement
             if (_crewPhase == CrewPhase.HeadingHome)
             {
                 _commuteTimer += Time.deltaTime;
-                Vector2 door = _sleepCamp.TentDoor;
+                Vector2 door = CampNavDestination;
                 // Walk radii only — excavator dig footprint is too fat for corridors
                 bool all = true;
                 all &= StepCrewHomeOrOut(0, _worker != null ? _worker.transform : null, door, _crewBodyR[0]);
                 all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, door + new Vector2(-0.15f, 0.12f), _crewBodyR[1]);
                 all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, door + new Vector2(0.2f, -0.1f), _crewBodyR[2]);
                 all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, door + new Vector2(-0.05f, -0.2f), _crewBodyR[3]);
-                if (all || _commuteTimer >= CommuteTimeoutSec) EnterSleep();
+                all &= StepCrewHomeOrOut(4, _engineer != null ? _engineer.transform : null, door + new Vector2(0.15f, 0.2f), _crewBodyR[4]);
+                bool anyStranded = false;
+                for (int i = 0; i < _crewStranded.Length; i++)
+                    if (_crewStranded[i]) anyStranded = true;
+                // Never teleport stranded workers through rock; timeout only sleeps if everyone can arrive.
+                if (all) EnterSleep();
+                else if (_commuteTimer >= CommuteTimeoutSec && !anyStranded) EnterSleep();
             }
             else if (_crewPhase == CrewPhase.HeadingOut)
             {
@@ -488,6 +556,7 @@ namespace DeepCore.FreeMovement
                 all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, _workProspector, _crewBodyR[1]);
                 all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, _workHauler, _crewBodyR[2]);
                 all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, _workRefiner, _crewBodyR[3]);
+                all &= StepCrewHomeOrOut(4, _engineer != null ? _engineer.transform : null, _workEngineer, _crewBodyR[4]);
                 if (all || _commuteTimer >= CommuteTimeoutSec) EnterOnShift();
             }
         }
@@ -503,18 +572,30 @@ namespace DeepCore.FreeMovement
 
         void RefreshWorkPosts()
         {
-            _workExcavator = SnapPostToTunnel(_world.CellCenter(StartX, StartY), _crewBodyR[0]);
+            // Excavator returns to last dig face when one was saved; otherwise camp start pad.
+            if (_hasExcavatorDigResume)
+                _workExcavator = SnapPostToTunnel(_excavatorDigResume, _crewBodyR[0]);
+            else
+                _workExcavator = SnapPostToTunnel(_world.CellCenter(StartX, StartY), _crewBodyR[0]);
             _workProspector = SnapPostToTunnel(_world.CellCenter(StartX - 4, StartY - 1), _crewBodyR[1]);
             _workHauler = SnapPostToTunnel(_yard != null ? _yard.DropPoint : BasecampPos, _crewBodyR[2]);
             _workRefiner = SnapPostToTunnel(_refiner != null ? _refiner.WorkPoint : BasecampPos, _crewBodyR[3]);
+            _workEngineer = SnapPostToTunnel(_yard != null ? _yard.DropPoint + new Vector2(0.55f, 0.35f) : BasecampPos, _crewBodyR[4]);
         }
 
         void EnsureCrewNav()
         {
+            TunnelNavGrid.DebugLog = navDebugLog;
+            TunnelPathfinder.DebugLog = navDebugLog;
+            TunnelPathfinder.DebugDraw = navDebugDraw;
             for (int i = 0; i < _crewNav.Length; i++)
             {
                 if (_crewNav[i] == null)
-                    _crewNav[i] = new ExcavatedPathfinder(_world);
+                {
+                    _crewNav[i] = new ExcavatedPathfinder(_world, _crewBodyR[i]);
+                    _crewNav[i].LateralOffset = _crewLateral[i];
+                }
+                _crewNav[i].SetAgentRadius(_crewBodyR[i]);
             }
         }
 
@@ -522,6 +603,7 @@ namespace DeepCore.FreeMovement
         {
             if (t == null) { _arrived[idx] = true; return true; }
             if (_arrived[idx]) return true;
+            if (_crewStranded[idx]) return false;
 
             Vector2 p = t.localPosition;
             float arrive = Mathf.Max(0.1f, bodyR * 0.85f);
@@ -553,6 +635,13 @@ namespace DeepCore.FreeMovement
                         t.up = dir;
                 },
                 tryStep: (dir, step) => CrewTryStep(t, dir, step, bodyR));
+
+            if (_crewNav[idx] != null && _crewNav[idx].Stranded)
+            {
+                _crewStranded[idx] = true;
+                DigHoodLog.Push($"CREW {idx} | STRANDED — no path to destination");
+                return false;
+            }
 
             if (done)
             {
@@ -596,11 +685,28 @@ namespace DeepCore.FreeMovement
         {
             _crewPhase = CrewPhase.HeadingHome;
             _commuteTimer = 0f;
-            for (int i = 0; i < _arrived.Length; i++) _arrived[i] = false;
+            for (int i = 0; i < _arrived.Length; i++)
+            {
+                _arrived[i] = false;
+                _crewStranded[i] = false;
+            }
             EnsureCrewNav();
-            for (int i = 0; i < _crewNav.Length; i++) _crewNav[i]?.Invalidate();
+            for (int i = 0; i < _crewNav.Length; i++)
+            {
+                if (_crewNav[i] == null) continue;
+                _crewNav[i].CampReturnMode = true;
+                _crewNav[i].Invalidate();
+            }
             SetAllCrewVisible(true);
-            _worker?.ClearRoute();
+            // Remember dig face + keep route pins overnight (do not ClearRoute).
+            if (_worker != null)
+            {
+                _excavatorDigResume = SnapPostToTunnel(
+                    _worker.CaptureShiftBreakBookmark(), _crewBodyR[0]);
+                _hasExcavatorDigResume = true;
+                DigHoodLog.Push(
+                    $"SHIFT BREAK | Resume @ {_excavatorDigResume.x:0.0},{_excavatorDigResume.y:0.0}");
+            }
             _prospector?.SetRadar(false);
             _banter.TrySay(WorkerBanter.Voice.Excavator,
                 "Whistle's blown. Back to the tent.",
@@ -621,7 +727,10 @@ namespace DeepCore.FreeMovement
                 _prospector?.TeleportTo(_sleepCamp.TentDoor);
                 _hauler?.TeleportTo(_sleepCamp.TentDoor);
                 _refiner?.TeleportTo(_sleepCamp.TentDoor);
+                _engineer?.TeleportTo(_sleepCamp.TentDoor);
             }
+            // Overnight rest fully cools the excavator machine.
+            _worker?.ResetHeatAfterRest();
             _banter.TrySay(WorkerBanter.Voice.Prospector,
                 "Lights out. Dreaming of veins.",
                 "Tent's warm. See you at dawn.");
@@ -632,9 +741,18 @@ namespace DeepCore.FreeMovement
             _crewPhase = CrewPhase.HeadingOut;
             _commuteTimer = 0f;
             RefreshWorkPosts();
-            for (int i = 0; i < _arrived.Length; i++) _arrived[i] = false;
+            for (int i = 0; i < _arrived.Length; i++)
+            {
+                _arrived[i] = false;
+                _crewStranded[i] = false;
+            }
             EnsureCrewNav();
-            for (int i = 0; i < _crewNav.Length; i++) _crewNav[i]?.Invalidate();
+            for (int i = 0; i < _crewNav.Length; i++)
+            {
+                if (_crewNav[i] == null) continue;
+                _crewNav[i].CampReturnMode = false;
+                _crewNav[i].Invalidate();
+            }
             Vector2 door = _sleepCamp != null ? _sleepCamp.TentDoor : BasecampPos;
             // Door may sit near pad edge — snap onto open floor before walking
             door = SnapPostToTunnel(door, _crewBodyR[1]);
@@ -643,6 +761,7 @@ namespace DeepCore.FreeMovement
             _prospector?.TeleportTo(door + new Vector2(-0.2f, 0.05f));
             _hauler?.TeleportTo(door + new Vector2(0.25f, 0.1f));
             _refiner?.TeleportTo(door + new Vector2(-0.05f, -0.25f));
+            _engineer?.TeleportTo(door + new Vector2(0.3f, 0.15f));
             SetAllCrewVisible(true);
             if (announce)
             {
@@ -658,11 +777,15 @@ namespace DeepCore.FreeMovement
             _crewPhase = CrewPhase.OnShift;
             _commuteTimer = 0f;
             SetAllCrewVisible(true);
-            // Snap exactly onto posts
+            // Snap exactly onto posts (excavator → saved dig face when available)
             _worker?.TeleportTo(_workExcavator);
             _prospector?.TeleportTo(_workProspector);
             _hauler?.TeleportTo(_workHauler);
             _refiner?.TeleportTo(_workRefiner);
+            _engineer?.TeleportTo(_workEngineer);
+            if (_hasExcavatorDigResume && _worker != null && _worker.RouteCount > 0)
+                DigHoodLog.Push(
+                    $"SHIFT START | Back at dig face | Route {_worker.RouteCount} pin{(_worker.RouteCount == 1 ? "" : "s")}");
         }
 
         /// <summary>Fast-forward night — jump to next 08:00 and walk out (or skip walk).</summary>
@@ -671,14 +794,28 @@ namespace DeepCore.FreeMovement
             if (_crewPhase == CrewPhase.OnShift || _crewPhase == CrewPhase.HeadingOut)
                 return;
 
+            // Remaining night as real seconds → Frustration sleep recovery (does not wipe instantly).
+            float hoursLeft = HoursUntilMorning(_gameHour);
+            _worker?.ApplyRestFrustrationForDuration(hoursLeft * SecondsPerGameHour);
+
             if (_gameHour >= ShiftStartHour)
                 _dayIndex++;
             _gameHour = ShiftStartHour;
+            // Skipped night still counts as a full rest for machine heat.
+            _worker?.ResetHeatAfterRest();
             BeginHeadingOut(announce: true);
             _banter.TrySay(WorkerBanter.Voice.Hauler,
                 "Skipped the snore. Coffee and cart.",
                 "Fast-forward. Boots back on.");
             ApplyDayNightLight();
+        }
+
+        /// <summary>Game hours from <paramref name="hour"/> until next shift start (08:00).</summary>
+        static float HoursUntilMorning(float hour)
+        {
+            if (hour < ShiftStartHour)
+                return ShiftStartHour - hour;
+            return (24f - hour) + ShiftStartHour;
         }
 
         void SetAllCrewVisible(bool on)
@@ -687,6 +824,7 @@ namespace DeepCore.FreeMovement
             _prospector?.SetCrewVisible(on);
             _hauler?.SetCrewVisible(on);
             _refiner?.SetCrewVisible(on);
+            _engineer?.SetCrewVisible(on);
         }
 
         void ApplyDayNightLight()
@@ -725,8 +863,8 @@ namespace DeepCore.FreeMovement
 
         void CycleControl(int delta)
         {
-            int n = ((int)_control + delta) % 4;
-            if (n < 0) n += 4;
+            int n = ((int)_control + delta) % 5;
+            if (n < 0) n += 5;
             SelectWorker((ControlWorker)n);
         }
 
@@ -809,6 +947,7 @@ namespace DeepCore.FreeMovement
                     ControlWorker.Prospector => _prospector != null ? _prospector.transform : null,
                     ControlWorker.Hauler => _hauler != null ? _hauler.transform : null,
                     ControlWorker.Refiner => _refiner != null ? _refiner.transform : null,
+                    ControlWorker.Engineer => _engineer != null ? _engineer.transform : null,
                     _ => _worker != null ? _worker.transform : null,
                 };
                 if (follow == null) return;
@@ -915,6 +1054,31 @@ namespace DeepCore.FreeMovement
         static readonly Color CpBtnOn = new(0.08f, 0.28f, 0.36f, 0.92f);
 
         float _uiPulse;
+        bool _showExcavatorStats;
+
+        void OnDrawGizmos()
+        {
+            if (!navDebugDraw || _world == null) return;
+            for (int i = 0; i < _crewNav.Length; i++)
+            {
+                var eng = _crewNav[i]?.Engine;
+                if (eng == null) continue;
+                var raw = eng.LastRawPath;
+                var smooth = eng.LastSmoothPath;
+                if (raw != null && raw.Count > 1)
+                {
+                    Gizmos.color = new Color(0.2f, 0.7f, 1f, 0.35f);
+                    for (int k = 1; k < raw.Count; k++)
+                        Gizmos.DrawLine(raw[k - 1], raw[k]);
+                }
+                if (smooth != null && smooth.Count > 1)
+                {
+                    Gizmos.color = new Color(0.2f, 1f, 0.45f, 0.9f);
+                    for (int k = 1; k < smooth.Count; k++)
+                        Gizmos.DrawLine(smooth[k - 1], smooth[k]);
+                }
+            }
+        }
 
         void OnGUI()
         {
@@ -1009,10 +1173,19 @@ namespace DeepCore.FreeMovement
             DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 3, cardW, cardH), ControlWorker.Refiner,
                 "REFINER", refSub, cardTitle, cardSub);
             DrawBanterBubble(cx + cardW + 8f, cy + (cardH + cardGap) * 3, WorkerBanter.Voice.Refiner);
+            string engSub = _engineer == null ? "STANDBY"
+                : _engineer.IsRepairing ? "REPAIR // ON SITE"
+                : _engineer.IsEnRoute ? "EN ROUTE // DRILL"
+                : _engineer.IsReturning ? "RETURNING // CAMP"
+                : "STANDBY // CAMP";
+            DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 4, cardW, cardH), ControlWorker.Engineer,
+                "ENGINEER", engSub, cardTitle, cardSub);
+            DrawBanterBubble(cx + cardW + 8f, cy + (cardH + cardGap) * 4, WorkerBanter.Voice.Engineer);
+
 
             if (_control == ControlWorker.Hauler && _hauler != null)
             {
-                var goldBtn = new Rect(cx, cy + (cardH + cardGap) * 4 + 4f, cardW, 28f);
+                var goldBtn = new Rect(cx, cy + (cardH + cardGap) * 5 + 4f, cardW, 28f);
                 Block(goldBtn);
                 if (DrawCyberButton(goldBtn, _hauler.PreferGold ? "GOLD FIRST // ON" : "GOLD FIRST // OFF",
                         selected: _hauler.PreferGold, accent: UiAmber))
@@ -1021,7 +1194,7 @@ namespace DeepCore.FreeMovement
 
             if (_control == ControlWorker.Refiner && _refiner != null)
             {
-                float byR = cy + (cardH + cardGap) * 4 + 4f;
+                float byR = cy + (cardH + cardGap) * 5 + 4f;
                 var rockBtn = new Rect(cx, byR, cardW, 28f);
                 var goldBtn = new Rect(cx, byR + 32f, cardW, 28f);
                 Block(rockBtn); Block(goldBtn);
@@ -1141,6 +1314,272 @@ namespace DeepCore.FreeMovement
             }
 
             DrawKeybindingsPanel();
+            DrawDigHoodLog();
+            DrawExcavatorStatsPopup();
+        }
+
+        void DrawExcavatorStatsPopup()
+        {
+            if (_worker == null) return;
+            var cam = Camera.main;
+            if (cam == null) return;
+
+            Vector3 world = _worker.transform.position;
+            Vector3 sp = cam.WorldToScreenPoint(world);
+            if (sp.z <= 0f) return;
+
+            float gx = sp.x;
+            float gy = Screen.height - sp.y;
+
+            // Small chip to the right of the excavator
+            var btn = new Rect(gx + 36f, gy - 36f, 58f, 22f);
+            Block(btn);
+            if (DrawCyberButton(btn, "STATS", selected: _showExcavatorStats, accent: UiAmber))
+                _showExcavatorStats = !_showExcavatorStats;
+
+            if (!_showExcavatorStats) return;
+
+            const float panelW = 292f;
+            const float panelH = 560f;
+            float px = Mathf.Clamp(gx + 36f, 8f, Screen.width - panelW - 8f);
+            float py = Mathf.Clamp(gy - panelH - 12f, 8f, Screen.height - panelH - 8f);
+            var panel = new Rect(px, py, panelW, panelH);
+            DrawCyberPanel(panel, lit: true, accentOverride: UiAmber);
+            Block(panel);
+
+            var hdr = LabelStyle(10, UiAmber, bold: true);
+            var dim = LabelStyle(9, UiDim);
+            var val = LabelStyle(11, UiWhite, bold: true);
+            var pillar = LabelStyle(9, UiCyan, bold: true);
+            var mute = LabelStyle(9, UiMute);
+            var sec = LabelStyle(9, UiCyan, bold: true);
+
+            float x0 = panel.x + 12f;
+            float y = panel.y + 8f;
+            float innerW = panelW - 24f;
+            GUI.Label(new Rect(x0, y, innerW, 14f), "EXCAVATOR // STATS", hdr);
+            y += 18f;
+            DrawHLine(x0, y, innerW, new Color(UiAmber.r, UiAmber.g, UiAmber.b, 0.25f));
+            y += 8f;
+
+            // —— MACHINE ——
+            GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE", sec);
+            y += 14f;
+
+            Color heatCol = _worker.HeatZone switch
+            {
+                ExcavatorHeatZone.Optimal => UiGreen,
+                ExcavatorHeatZone.Danger => UiAmber,
+                ExcavatorHeatZone.Extreme => new Color(1f, 0.45f, 0.2f, 1f),
+                ExcavatorHeatZone.Overheated => new Color(1f, 0.25f, 0.28f, 1f),
+                _ => UiCyan,
+            };
+            string zoneLabel = _worker.HeatZone switch
+            {
+                ExcavatorHeatZone.Optimal => "OPTIMAL",
+                ExcavatorHeatZone.Danger => "DANGER",
+                ExcavatorHeatZone.Extreme => "EXTREME",
+                ExcavatorHeatZone.Overheated => "OVERHEATED",
+                _ => "NORMAL",
+            };
+            DrawConditionRow(ref y, x0, innerW, "HEAT",
+                $"{_worker.Heat:0.#}/100", zoneLabel, _worker.Heat / 100f, heatCol, mute);
+
+            string activity = _worker.MachineActivityLabel;
+            Color actCol = activity switch
+            {
+                "OVERHEATED" => new Color(1f, 0.25f, 0.28f, 1f),
+                "COOLING" => UiCyan,
+                "MINING" => UiGreen,
+                _ => UiDim,
+            };
+            GUI.Label(new Rect(x0, y, 58f, 12f), "ZONE", mute);
+            GUI.Label(new Rect(x0 + 58f, y, 88f, 12f), zoneLabel, LabelStyle(10, UiWhite, bold: true));
+            GUI.Label(new Rect(x0 + 148f, y, innerW - 148f, 12f), activity,
+                LabelStyle(9, actCol, bold: true));
+            y += 16f;
+
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+
+            // —— WORKER CONDITIONS ——
+            GUI.Label(new Rect(x0, y, innerW, 12f), "WORKER CONDITIONS", sec);
+            y += 14f;
+
+            float stamMax = Mathf.Max(1f, _worker.MaxStamina);
+            float stam = _worker.CurrentStamina;
+            string stamState = _worker.StaminaStateLabel;
+            Color stamCol = stamState switch
+            {
+                "RESTING" => UiCyan,
+                "EXHAUSTED" => new Color(1f, 0.3f, 0.28f, 1f),
+                "TIRED" => UiAmber,
+                _ => UiGreen,
+            };
+            DrawConditionRow(ref y, x0, innerW, "STAMINA",
+                $"{stam:0.#}/{stamMax:0.#}", stamState, stam / stamMax, stamCol, mute);
+
+            float fr = _worker.Conditions.Frustration;
+            Color frCol = fr >= 70f ? new Color(1f, 0.35f, 0.3f, 1f)
+                : fr >= 40f ? UiAmber
+                : UiDim;
+            DrawConditionRow(ref y, x0, innerW, "FRUST.",
+                $"{fr:0.#}/100", fr >= 70f ? "HIGH" : fr >= 40f ? "RISING" : "LOW",
+                fr / 100f, frCol, mute);
+
+            float inj = _worker.Conditions.Injury;
+            Color injCol = inj >= FreeWorkerController.InjuryCareThreshold
+                ? new Color(1f, 0.28f, 0.28f, 1f)
+                : inj >= FreeWorkerController.InjurySlowThreshold
+                    ? UiAmber
+                    : UiDim;
+            string injState = inj >= FreeWorkerController.InjuryCareThreshold
+                ? "NEEDS CARE"
+                : inj >= FreeWorkerController.InjurySlowThreshold
+                    ? "HURT"
+                    : "OK";
+            DrawConditionRow(ref y, x0, innerW, "INJURY",
+                $"{inj:0.#}/100", injState, inj / 100f, injCol, mute);
+
+            y += 4f;
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+
+            // —— CURRENT MINING ——
+            GUI.Label(new Rect(x0, y, innerW, 12f), "CURRENT MINING", sec);
+            y += 14f;
+            if (_worker.HasLastDig)
+            {
+                GUI.Label(new Rect(x0, y, 70f, 12f), "MATERIAL", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                    _worker.LastDigMaterial.ToString().ToUpperInvariant(), val);
+                y += 14f;
+                GUI.Label(new Rect(x0, y, 70f, 12f), "HP", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                    $"{_worker.LastDigHp}/{_worker.LastDigMaxHp}", val);
+                y += 14f;
+                GUI.Label(new Rect(x0, y, 70f, 12f), "DAMAGE", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                    $"{_worker.LastDigDamage}  (x{_worker.LastDigThermalMul:0.00})", val);
+                y += 14f;
+                GUI.Label(new Rect(x0, y, 70f, 12f), "WEAK PT", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                    _worker.LastDigWeakPoint ? "YES" : "NO",
+                    LabelStyle(11, _worker.LastDigWeakPoint ? UiGreen : UiDim, bold: true));
+                y += 16f;
+            }
+            else
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f), "NO STRIKE YET", mute);
+                y += 16f;
+            }
+
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+
+            var stats = _worker.Stats;
+            DrawStatPillar(ref y, x0, innerW, "BODY", WorkerStatId.RawPower, 10, stats, pillar, dim, val);
+            y += 4f;
+            DrawStatPillar(ref y, x0, innerW, "MIND", WorkerStatId.Calibration, 10, stats, pillar, dim, val);
+            y += 4f;
+            DrawStatPillar(ref y, x0, innerW, "SOUL", WorkerStatId.Composure, 10, stats, pillar, dim, val);
+
+            // Close affordance
+            var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
+            if (DrawCyberButton(close, "×", selected: false, accent: UiAmber))
+                _showExcavatorStats = false;
+        }
+
+        
+        void DrawConditionRow(ref float y, float x, float w, string label, string value,
+            string state, float fill01, Color accent, GUIStyle mute)
+        {
+            GUI.Label(new Rect(x, y, 58f, 12f), label, mute);
+            GUI.Label(new Rect(x + 58f, y, 88f, 12f), value, LabelStyle(10, UiWhite, bold: true));
+            GUI.Label(new Rect(x + 148f, y, w - 148f, 12f), state,
+                LabelStyle(9, accent, bold: true));
+            y += 13f;
+
+            // Thin technical bar
+            float barW = w;
+            float barH = 4f;
+            var prev = GUI.color;
+            GUI.color = new Color(0.05f, 0.08f, 0.12f, 0.85f);
+            GUI.DrawTexture(new Rect(x, y, barW, barH), Texture2D.whiteTexture);
+            float fill = Mathf.Clamp01(fill01) * barW;
+            if (fill > 0.5f)
+            {
+                GUI.color = new Color(accent.r, accent.g, accent.b, 0.75f);
+                GUI.DrawTexture(new Rect(x, y, fill, barH), Texture2D.whiteTexture);
+            }
+            GUI.color = new Color(accent.r, accent.g, accent.b, 0.35f);
+            GUI.DrawTexture(new Rect(x, y, barW, 1f), Texture2D.whiteTexture);
+            GUI.color = prev;
+            y += 8f;
+        }
+
+static void DrawStatPillar(ref float y, float x, float w, string title,
+            WorkerStatId start, int count, WorkerStats stats,
+            GUIStyle pillar, GUIStyle dim, GUIStyle val)
+        {
+            GUI.Label(new Rect(x, y, w, 12f), title, pillar);
+            y += 14f;
+            float colW = w * 0.5f;
+            float rowY = y;
+            for (int i = 0; i < count; i++)
+            {
+                var id = (WorkerStatId)((int)start + i);
+                bool left = (i % 2) == 0;
+                if (left && i > 0) rowY += 13f;
+                float cx = left ? x : x + colW;
+
+                string name = StatShortName(id);
+                int v = stats.Get(id);
+                GUI.Label(new Rect(cx, rowY, colW - 36f, 12f), name, dim);
+                GUI.Label(new Rect(cx + colW - 34f, rowY, 30f, 12f), v.ToString(), val);
+            }
+            y = rowY + 14f;
+        }
+
+        static string StatShortName(WorkerStatId id) => id switch
+        {
+            WorkerStatId.RawPower => "RAW POWER",
+            WorkerStatId.HeavyLifting => "HEAVY LIFT",
+            WorkerStatId.HeatTolerance => "HEAT TOL.",
+            WorkerStatId.SpatialGeometry => "SPATIAL GEO",
+            WorkerStatId.SafetyProtocol => "SAFETY",
+            WorkerStatId.WorkRate => "WORK RATE",
+            _ => id.ToString().ToUpperInvariant(),
+        };
+
+        void DrawDigHoodLog()
+        {
+            const float panelW = 520f;
+            float lineH = 14f;
+            int n = DigHoodLog.Lines.Count;
+            float panelH = 28f + Mathf.Max(1, n) * lineH + 10f;
+            var r = new Rect(10f, Screen.height - panelH - 12f, panelW, panelH);
+            DrawCyberPanel(r, lit: false);
+            Block(r);
+
+            GUI.Label(new Rect(r.x + 12, r.y + 6, panelW - 24, 14),
+                "DIG HOOD // CurrentHP", LabelStyle(10, UiCyan, bold: true));
+            DrawHLine(r.x + 12, r.y + 22, panelW - 24, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.2f));
+
+            var lineStyle = LabelStyle(9, UiDim);
+            float y = r.y + 28f;
+            if (n == 0)
+            {
+                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH),
+                    "waiting for a dig strike…", lineStyle);
+                return;
+            }
+
+            foreach (var line in DigHoodLog.Lines)
+            {
+                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH), line, lineStyle);
+                y += lineH;
+            }
         }
 
         void DrawKeybindingsPanel()
@@ -1159,7 +1598,7 @@ namespace DeepCore.FreeMovement
 
             (string k, string d)[] rows =
             {
-                ("TAB", "Cycle worker"),
+                ("TAB", "Cycle worker (5)"),
                 ("WASD", "Move / drive"),
                 ("LMB", "Aim · add dig pin"),
                 ("Shift+LMB", "Replace dig route"),
@@ -1207,6 +1646,7 @@ namespace DeepCore.FreeMovement
                 WorkerBanter.Voice.Prospector => UiCyan,
                 WorkerBanter.Voice.Excavator => UiAmber,
                 WorkerBanter.Voice.Refiner => new Color(0.7f, 0.55f, 1f),
+                WorkerBanter.Voice.Engineer => new Color(1f, 0.55f, 0.22f),
                 _ => UiGreen,
             };
             // Soft floating line — no panel / box
@@ -1226,6 +1666,7 @@ namespace DeepCore.FreeMovement
                 ControlWorker.Prospector => UiCyan,
                 ControlWorker.Excavator => UiAmber,
                 ControlWorker.Refiner => new Color(0.7f, 0.55f, 1f),
+                ControlWorker.Engineer => new Color(1f, 0.55f, 0.22f),
                 _ => UiGreen,
             };
 

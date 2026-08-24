@@ -78,6 +78,11 @@ namespace DeepCore.FreeMovement
         public Vector2 Position => transform.localPosition;
         public Vector2 Facing => _facingRoot != null ? (Vector2)_facingRoot.up : Vector2.up;
 
+        /// <summary>Body / Mind / Soul sheet. Data only — unused by scan logic yet.</summary>
+        public WorkerStats Stats => _stats ??= new WorkerStats();
+
+        [SerializeField] WorkerStats _stats = new WorkerStats();
+
         public int ActiveRows => Distance switch
         {
             ScanDistance.Short => 1,
@@ -1127,6 +1132,11 @@ namespace DeepCore.FreeMovement
             Fill(14, 14, 4, 5, new Color(0.35f, 0.75f, 0.9f));
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.15f), s);
+        }
+
+        void OnValidate()
+        {
+            _stats?.ClampAll();
         }
     }
 }

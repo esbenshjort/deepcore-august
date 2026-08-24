@@ -6,7 +6,7 @@ namespace DeepCore.FreeMovement
     /// <summary>Sparse, cooldown-gated worker one-liners for the roster HUD.</summary>
     public sealed class WorkerBanter
     {
-        public enum Voice : byte { Prospector, Excavator, Hauler, Refiner }
+        public enum Voice : byte { Prospector, Excavator, Hauler, Refiner, Engineer }
 
         struct Line
         {
@@ -14,8 +14,8 @@ namespace DeepCore.FreeMovement
             public float Until;
         }
 
-        readonly Line[] _active = new Line[4];
-        readonly float[] _cooldownUntil = new float[4];
+        readonly Line[] _active = new Line[5];
+        readonly float[] _cooldownUntil = new float[5];
         readonly System.Random _rng = new(9081);
 
         const float ShowSeconds = 3.6f;
