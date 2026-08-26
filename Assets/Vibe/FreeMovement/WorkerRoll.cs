@@ -73,6 +73,27 @@ namespace DeepCore.FreeMovement
         public const int DieMin = 1;
         public const int DieMax = 20;
 
+        static System.Random _seededRng;
+        static bool _useSeeded;
+
+        /// <summary>
+        /// Begin deterministic rolls for balance benchmarks. Does not affect UnityEngine.Random
+        /// (visuals / non-combat). Call <see cref="EndSeeded"/> when the run finishes.
+        /// </summary>
+        public static void BeginSeeded(int seed)
+        {
+            _seededRng = new System.Random(seed);
+            _useSeeded = true;
+        }
+
+        public static void EndSeeded()
+        {
+            _useSeeded = false;
+            _seededRng = null;
+        }
+
+        public static bool IsSeeded => _useSeeded;
+
         /// <summary>
         /// RollTotal = d20 + relevantStat + modifiers. Success if RollTotal &gt;= DC.
         /// </summary>
@@ -114,8 +135,13 @@ namespace DeepCore.FreeMovement
             return Resolve(d20, statId, WorkerStats.Clamp(statValue), difficultyClass, modifiers);
         }
 
-        /// <summary>Uniform integer in [1, 20].</summary>
-        public static int RollD20() => Random.Range(DieMin, DieMax + 1);
+        /// <summary>Uniform integer in [1, 20]. Seeded when <see cref="BeginSeeded"/> is active.</summary>
+        public static int RollD20()
+        {
+            if (_useSeeded && _seededRng != null)
+                return _seededRng.Next(DieMin, DieMax + 1);
+            return Random.Range(DieMin, DieMax + 1);
+        }
 
         static WorkerRollResult Resolve(
             int d20,

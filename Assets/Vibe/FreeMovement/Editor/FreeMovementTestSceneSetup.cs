@@ -221,5 +221,59 @@ namespace DeepCore.FreeMovement.Editor
             AssetDatabase.Refresh();
             Debug.Log($"[SocketMap] Scene ready: {SocketMapScenePath}. Open and Play.");
         }
+
+        const string BalanceCompareScenePath = "Assets/Scenes/FreeMovement_BalanceCompare.unity";
+
+        [MenuItem("DeepCore Vibe/Create FreeMovement_BalanceCompare Scene")]
+        public static void CreateBalanceCompareFromMenu()
+        {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                Debug.LogWarning("[BalanceCompare] Stop Play Mode before creating a scene.");
+                return;
+            }
+            CreateBalanceCompare();
+        }
+
+        static void CreateBalanceCompare()
+        {
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            var camGo = new GameObject("Main Camera");
+            var cam = camGo.AddComponent<Camera>();
+            camGo.tag = "MainCamera";
+            camGo.AddComponent<AudioListener>();
+            cam.orthographic = true;
+            cam.orthographicSize = 9.5f;
+            cam.backgroundColor = new Color(0.01f, 0.012f, 0.018f);
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.transform.position = new Vector3(5.5f, 3.2f, -10f);
+            camGo.AddComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
+
+            var lightGo = new GameObject("Global Light 2D");
+            var light = lightGo.AddComponent<UnityEngine.Rendering.Universal.Light2D>();
+            light.lightType = UnityEngine.Rendering.Universal.Light2D.LightType.Global;
+            light.intensity = 0.08f;
+            light.color = new Color(0.45f, 0.55f, 0.7f);
+
+            var runner = new GameObject("ExcavatorBalanceCompareRunner");
+            runner.AddComponent<ExcavatorBalanceCompareRunner>();
+
+            if (!AssetDatabase.IsValidFolder("Assets/Scenes"))
+                AssetDatabase.CreateFolder("Assets", "Scenes");
+
+            EditorSceneManager.SaveScene(scene, BalanceCompareScenePath);
+
+            var scenes = new System.Collections.Generic.List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
+            bool found = false;
+            foreach (var s in scenes)
+                if (s.path == BalanceCompareScenePath) { found = true; break; }
+            if (!found)
+                scenes.Add(new EditorBuildSettingsScene(BalanceCompareScenePath, true));
+            EditorBuildSettings.scenes = scenes.ToArray();
+
+            AssetDatabase.Refresh();
+            Debug.Log($"[BalanceCompare] Scene ready: {BalanceCompareScenePath}. Open and Play.");
+        }
     }
 }

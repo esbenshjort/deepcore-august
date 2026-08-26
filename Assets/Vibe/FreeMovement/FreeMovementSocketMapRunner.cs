@@ -311,11 +311,12 @@ namespace DeepCore.FreeMovement
                 WeakPointFx.Play(_worldRoot, _world, wx, wy);
                 _banter.TrySay(WorkerBanter.Voice.Excavator,
                     "Nailed it.",
-                    "Weak point!",
+                    "Weak Point!",
                     "Got this.",
                     "There — soft spot.",
                     "Crack opens. Push it.");
             };
+            _balance.Bind(_worker);
         }
 
         void OnDigImpact(TerrainCell before, bool broke)
@@ -406,6 +407,7 @@ namespace DeepCore.FreeMovement
                     (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame))
                     _worker.AddPin(_worker.Position, replaceRoute: false);
                 if (kb.rKey.wasPressedThisFrame) ResetMap();
+                if (kb.bKey.wasPressedThisFrame) _showBalanceHarness = !_showBalanceHarness;
                 if (kb.lKey.wasPressedThisFrame) TryPlaceLantern();
                 if (kb.tKey.wasPressedThisFrame) _tactical?.Toggle();
                 if (kb.tabKey.wasPressedThisFrame) CycleControl(+1);
@@ -501,6 +503,7 @@ namespace DeepCore.FreeMovement
             DiscoverGasNearCrew();
             UpdateStockpileHover();
             SyncRoutePinsToScanView();
+            _balance.Tick(Time.deltaTime);
             FollowCamera();
         }
 
@@ -967,6 +970,8 @@ namespace DeepCore.FreeMovement
                 Destroy(_looseRoot.GetChild(i).gameObject);
             _worker.Setup(_world, _world.CellCenter(StartX, StartY), WorkerRadius,
                 _goalMarker, OnBroke, OnDigImpact, _goalSprite);
+            _balance.Bind(_worker);
+            _balance.ResetRun();
             _prospector?.BindExcavator(_worker);
             _calc?.Reset();
             _hauler?.ResetToBase();
@@ -1035,9 +1040,9 @@ namespace DeepCore.FreeMovement
             _globalLight = light;
         }
 
-        // Industrial cyberpunk mining HUD palette
-        static readonly Color UiBg = new(0.02f, 0.04f, 0.07f, 0.78f);
-        static readonly Color UiBgHot = new(0.04f, 0.09f, 0.12f, 0.88f);
+        // Industrial cyberpunk mining HUD palette — thin glass over the dig
+        static readonly Color UiBg = new(0.02f, 0.04f, 0.07f, 0.26f);
+        static readonly Color UiBgHot = new(0.04f, 0.09f, 0.12f, 0.34f);
         static readonly Color UiCyan = new(0.25f, 0.92f, 1f, 1f);
         static readonly Color UiGreen = new(0.35f, 1f, 0.55f, 1f);
         static readonly Color UiAmber = new(1f, 0.72f, 0.22f, 1f);
@@ -1050,11 +1055,13 @@ namespace DeepCore.FreeMovement
         static readonly Color CpGold = UiAmber;
         static readonly Color CpDim = UiDim;
         static readonly Color CpPanel = UiBg;
-        static readonly Color CpBtnIdle = new(0.05f, 0.1f, 0.14f, 0.85f);
-        static readonly Color CpBtnOn = new(0.08f, 0.28f, 0.36f, 0.92f);
+        static readonly Color CpBtnIdle = new(0.05f, 0.1f, 0.14f, 0.32f);
+        static readonly Color CpBtnOn = new(0.08f, 0.28f, 0.36f, 0.42f);
 
         float _uiPulse;
         bool _showExcavatorStats;
+        bool _showBalanceHarness;
+        readonly ExcavatorBalanceHarness _balance = new();
 
         void OnDrawGizmos()
         {
@@ -1161,7 +1168,10 @@ namespace DeepCore.FreeMovement
                     : "LMB PIN · SHIFT GO";
             DrawWorkerCard(new Rect(cx, cy + cardH + cardGap, cardW, cardH), ControlWorker.Excavator,
                 "EXCAVATOR", digSub, cardTitle, cardSub);
-            DrawBanterBubble(cx + cardW + 8f, cy + cardH + cardGap, WorkerBanter.Voice.Excavator);
+            float excavBanterX = (_showExcavatorStats && _worker != null)
+                ? cx + cardW + 8f + 300f
+                : cx + cardW + 8f;
+            DrawBanterBubble(excavBanterX, cy + cardH + cardGap, WorkerBanter.Voice.Excavator);
             DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 2, cardW, cardH), ControlWorker.Hauler,
                 "HAULER",
                 _hauler != null && _hauler.PreferGold ? "PRIORITY // GOLD" : "PRIORITY // MIXED",
@@ -1182,10 +1192,21 @@ namespace DeepCore.FreeMovement
                 "ENGINEER", engSub, cardTitle, cardSub);
             DrawBanterBubble(cx + cardW + 8f, cy + (cardH + cardGap) * 4, WorkerBanter.Voice.Engineer);
 
+            float rosterExtraY = cy + (cardH + cardGap) * 5 + 4f;
+
+            if (_control == ControlWorker.Excavator && _worker != null)
+            {
+                var statsBtn = new Rect(cx, rosterExtraY, cardW, 28f);
+                Block(statsBtn);
+                if (DrawCyberButton(statsBtn, _showExcavatorStats ? "STATS // ON" : "STATS // SHEET",
+                        selected: _showExcavatorStats, accent: UiAmber))
+                    _showExcavatorStats = !_showExcavatorStats;
+                rosterExtraY += 32f;
+            }
 
             if (_control == ControlWorker.Hauler && _hauler != null)
             {
-                var goldBtn = new Rect(cx, cy + (cardH + cardGap) * 5 + 4f, cardW, 28f);
+                var goldBtn = new Rect(cx, rosterExtraY, cardW, 28f);
                 Block(goldBtn);
                 if (DrawCyberButton(goldBtn, _hauler.PreferGold ? "GOLD FIRST // ON" : "GOLD FIRST // OFF",
                         selected: _hauler.PreferGold, accent: UiAmber))
@@ -1194,9 +1215,8 @@ namespace DeepCore.FreeMovement
 
             if (_control == ControlWorker.Refiner && _refiner != null)
             {
-                float byR = cy + (cardH + cardGap) * 5 + 4f;
-                var rockBtn = new Rect(cx, byR, cardW, 28f);
-                var goldBtn = new Rect(cx, byR + 32f, cardW, 28f);
+                var rockBtn = new Rect(cx, rosterExtraY, cardW, 28f);
+                var goldBtn = new Rect(cx, rosterExtraY + 32f, cardW, 28f);
                 Block(rockBtn); Block(goldBtn);
                 if (DrawCyberButton(rockBtn, "PRIORITY // ORE ROCK",
                         selected: _refiner.Priority == RefinerPriority.OreRock, accent: UiDim))
@@ -1205,6 +1225,10 @@ namespace DeepCore.FreeMovement
                         selected: _refiner.Priority == RefinerPriority.GoldOre, accent: UiAmber))
                     _refiner.SetPriority(RefinerPriority.GoldOre);
             }
+
+            // Excavator sheet docks beside the roster (not world-anchored)
+            if (_showExcavatorStats && _worker != null)
+                DrawExcavatorStatsRoster(cx + cardW + 8f, cy);
 
             if (_hoverPile != null)
             {
@@ -1315,34 +1339,122 @@ namespace DeepCore.FreeMovement
 
             DrawKeybindingsPanel();
             DrawDigHoodLog();
-            DrawExcavatorStatsPopup();
+            DrawBalanceHarnessPanel();
         }
 
-        void DrawExcavatorStatsPopup()
+        void DrawBalanceHarnessPanel()
+        {
+            if (!_showBalanceHarness || _worker == null) return;
+
+            const float panelW = 320f;
+            const float panelH = 520f;
+            float top = 96f;
+            float maxH = Mathf.Max(280f, Screen.height - top - 14f);
+            float useH = Mathf.Min(panelH, maxH);
+            var panel = new Rect(Screen.width - panelW - 12f, top, panelW, useH);
+            DrawCyberPanel(panel, lit: true, accentOverride: UiAmber);
+            Block(panel);
+
+            var hdr = LabelStyle(10, UiAmber, bold: true);
+            var mute = LabelStyle(9, UiMute);
+            var val = LabelStyle(11, UiWhite, bold: true);
+            var dim = LabelStyle(9, UiDim);
+
+            float x = panel.x + 12f;
+            float y = panel.y + 8f;
+            float inner = panelW - 24f;
+
+            GUI.Label(new Rect(x, y, inner, 14f), "BALANCE // EXCAVATOR", hdr);
+            y += 16f;
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"ACTIVE  {ExcavatorBalanceHarness.ProfileLabel(_balance.Profile)}",
+                LabelStyle(10, UiCyan, bold: true));
+            y += 16f;
+            DrawHLine(x, y, inner, new Color(UiAmber.r, UiAmber.g, UiAmber.b, 0.25f));
+            y += 8f;
+
+            float btnW = (inner - 6f) * 0.5f;
+            float btnH = 22f;
+            if (DrawCyberButton(new Rect(x, y, btnW, btnH), "BRUTE",
+                    selected: _balance.Profile == ExcavatorTestProfile.Brute, accent: UiAmber))
+                _balance.ApplyProfile(ExcavatorTestProfile.Brute);
+            if (DrawCyberButton(new Rect(x + btnW + 6f, y, btnW, btnH), "TECH",
+                    selected: _balance.Profile == ExcavatorTestProfile.Technician, accent: UiCyan))
+                _balance.ApplyProfile(ExcavatorTestProfile.Technician);
+            y += btnH + 4f;
+            if (DrawCyberButton(new Rect(x, y, btnW, btnH), "PRO",
+                    selected: _balance.Profile == ExcavatorTestProfile.Professional, accent: UiGreen))
+                _balance.ApplyProfile(ExcavatorTestProfile.Professional);
+            if (DrawCyberButton(new Rect(x + btnW + 6f, y, btnW, btnH), "COWBOY",
+                    selected: _balance.Profile == ExcavatorTestProfile.Cowboy, accent: new Color(1f, 0.45f, 0.25f)))
+                _balance.ApplyProfile(ExcavatorTestProfile.Cowboy);
+            y += btnH + 4f;
+            if (DrawCyberButton(new Rect(x, y, btnW, btnH), "ACE",
+                    selected: _balance.Profile == ExcavatorTestProfile.Ace, accent: new Color(1f, 0.92f, 0.35f)))
+                _balance.ApplyProfile(ExcavatorTestProfile.Ace);
+            if (DrawCyberButton(new Rect(x + btnW + 6f, y, btnW, btnH), "GREEN",
+                    selected: _balance.Profile == ExcavatorTestProfile.Green, accent: UiMute))
+                _balance.ApplyProfile(ExcavatorTestProfile.Green);
+            y += btnH + 4f;
+            if (DrawCyberButton(new Rect(x, y, btnW, btnH), "BASELINE",
+                    selected: _balance.Profile == ExcavatorTestProfile.Baseline, accent: UiDim))
+                _balance.ApplyProfile(ExcavatorTestProfile.Baseline);
+            if (DrawCyberButton(new Rect(x + btnW + 6f, y, btnW, btnH), "RESET RUN",
+                    selected: false, accent: UiAmber))
+                _balance.ResetRun();
+            y += btnH + 8f;
+            DrawHLine(x, y, inner, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+
+            var m = _balance.Metrics;
+            void Row(string label, string value)
+            {
+                GUI.Label(new Rect(x, y, 150f, 15f), label, mute);
+                GUI.Label(new Rect(x + 150f, y, inner - 150f, 15f), value, val);
+                y += 15.5f;
+            }
+
+            Row("ROCK DESTROYED", $"{m.RockDestroyed}");
+            Row("BEDROCK DESTROYED", $"{m.BedrockDestroyed}");
+            Row("AVG SEC / ROCK", $"{m.AvgSecondsPerRock:0.00}");
+            Row("AVG SEC / BEDROCK", $"{m.AvgSecondsPerBedrock:0.00}");
+            Row("WEAK POINT", $"{m.WeakPointSuccesses}/{m.WeakPointAttempts}");
+            Row("AVG HEAT", $"{m.AvgHeat:0.#}");
+            Row("MAX HEAT", $"{m.MaxHeat:0.#}");
+            Row("ZONE NORMAL %", $"{m.ZonePct(m.ZoneNormalSec):0.#}");
+            Row("ZONE OPTIMAL %", $"{m.ZonePct(m.ZoneOptimalSec):0.#}");
+            Row("ZONE DANGER %", $"{m.ZonePct(m.ZoneDangerSec):0.#}");
+            Row("ZONE EXTREME %", $"{m.ZonePct(m.ZoneExtremeSec):0.#}");
+            Row("OVERHEAT EVENTS", $"{m.OverheatEvents}");
+            Row("INJURY EVENTS", $"{m.InjuryEvents}");
+            Row("FRUST START→END", $"{m.FrustrationStart:0.#} → {m.FrustrationEnd:0.#}");
+            Row("STAM START→END",
+                $"{m.StaminaStart:0.#}/{m.StaminaMaxAtStart:0.#} → {m.StaminaEnd:0.#}");
+
+            y += 6f;
+            var tip = LabelStyle(9, UiDim);
+            tip.wordWrap = true;
+            GUI.Label(new Rect(x, y, inner, 32f),
+                "B toggle · RESET RUN clears metrics +\nHeat/Stamina/Frust/Injury (map kept)",
+                tip);
+
+            var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
+            if (DrawCyberButton(close, "×", selected: false, accent: UiAmber))
+                _showBalanceHarness = false;
+        }
+
+        void DrawExcavatorStatsRoster(float px, float py)
         {
             if (_worker == null) return;
-            var cam = Camera.main;
-            if (cam == null) return;
-
-            Vector3 world = _worker.transform.position;
-            Vector3 sp = cam.WorldToScreenPoint(world);
-            if (sp.z <= 0f) return;
-
-            float gx = sp.x;
-            float gy = Screen.height - sp.y;
-
-            // Small chip to the right of the excavator
-            var btn = new Rect(gx + 36f, gy - 36f, 58f, 22f);
-            Block(btn);
-            if (DrawCyberButton(btn, "STATS", selected: _showExcavatorStats, accent: UiAmber))
-                _showExcavatorStats = !_showExcavatorStats;
-
-            if (!_showExcavatorStats) return;
 
             const float panelW = 292f;
-            const float panelH = 560f;
-            float px = Mathf.Clamp(gx + 36f, 8f, Screen.width - panelW - 8f);
-            float py = Mathf.Clamp(gy - panelH - 12f, 8f, Screen.height - panelH - 8f);
+            float maxBottom = Screen.height - 12f;
+            // Leave room above Dig Hood
+            float digHoodTop = Screen.height - 160f;
+            float panelH = Mathf.Clamp(digHoodTop - py - 8f, 420f, 640f);
+            if (py + panelH > maxBottom)
+                panelH = Mathf.Max(360f, maxBottom - py);
+
             var panel = new Rect(px, py, panelW, panelH);
             DrawCyberPanel(panel, lit: true, accentOverride: UiAmber);
             Block(panel);
@@ -1357,12 +1469,11 @@ namespace DeepCore.FreeMovement
             float x0 = panel.x + 12f;
             float y = panel.y + 8f;
             float innerW = panelW - 24f;
-            GUI.Label(new Rect(x0, y, innerW, 14f), "EXCAVATOR // STATS", hdr);
+            GUI.Label(new Rect(x0, y, innerW - 48f, 14f), "EXCAVATOR // STATS", hdr);
             y += 18f;
             DrawHLine(x0, y, innerW, new Color(UiAmber.r, UiAmber.g, UiAmber.b, 0.25f));
             y += 8f;
 
-            // —— MACHINE ——
             GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE", sec);
             y += 14f;
 
@@ -1393,16 +1504,15 @@ namespace DeepCore.FreeMovement
                 "MINING" => UiGreen,
                 _ => UiDim,
             };
-            GUI.Label(new Rect(x0, y, 58f, 12f), "ZONE", mute);
-            GUI.Label(new Rect(x0 + 58f, y, 88f, 12f), zoneLabel, LabelStyle(10, UiWhite, bold: true));
-            GUI.Label(new Rect(x0 + 148f, y, innerW - 148f, 12f), activity,
+            GUI.Label(new Rect(x0, y, 58f, 14f), "ZONE", mute);
+            GUI.Label(new Rect(x0 + 58f, y, 88f, 14f), zoneLabel, LabelStyle(10, UiWhite, bold: true));
+            GUI.Label(new Rect(x0 + 148f, y, innerW - 148f, 14f), activity,
                 LabelStyle(9, actCol, bold: true));
             y += 16f;
 
             DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
             y += 8f;
 
-            // —— WORKER CONDITIONS ——
             GUI.Label(new Rect(x0, y, innerW, 12f), "WORKER CONDITIONS", sec);
             y += 14f;
 
@@ -1445,32 +1555,31 @@ namespace DeepCore.FreeMovement
             DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
             y += 8f;
 
-            // —— CURRENT MINING ——
             GUI.Label(new Rect(x0, y, innerW, 12f), "CURRENT MINING", sec);
             y += 14f;
             if (_worker.HasLastDig)
             {
-                GUI.Label(new Rect(x0, y, 70f, 12f), "MATERIAL", mute);
-                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                GUI.Label(new Rect(x0, y, 70f, 14f), "MATERIAL", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 14f),
                     _worker.LastDigMaterial.ToString().ToUpperInvariant(), val);
-                y += 14f;
-                GUI.Label(new Rect(x0, y, 70f, 12f), "HP", mute);
-                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                y += 15f;
+                GUI.Label(new Rect(x0, y, 70f, 14f), "HP", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 14f),
                     $"{_worker.LastDigHp}/{_worker.LastDigMaxHp}", val);
-                y += 14f;
-                GUI.Label(new Rect(x0, y, 70f, 12f), "DAMAGE", mute);
-                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                y += 15f;
+                GUI.Label(new Rect(x0, y, 70f, 14f), "DAMAGE", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 14f),
                     $"{_worker.LastDigDamage}  (x{_worker.LastDigThermalMul:0.00})", val);
-                y += 14f;
-                GUI.Label(new Rect(x0, y, 70f, 12f), "WEAK PT", mute);
-                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 12f),
+                y += 15f;
+                GUI.Label(new Rect(x0, y, 70f, 14f), "WEAK PT", mute);
+                GUI.Label(new Rect(x0 + 70f, y, innerW - 70f, 14f),
                     _worker.LastDigWeakPoint ? "YES" : "NO",
                     LabelStyle(11, _worker.LastDigWeakPoint ? UiGreen : UiDim, bold: true));
                 y += 16f;
             }
             else
             {
-                GUI.Label(new Rect(x0, y, innerW, 12f), "NO STRIKE YET", mute);
+                GUI.Label(new Rect(x0, y, innerW, 14f), "NO STRIKE YET", mute);
                 y += 16f;
             }
 
@@ -1484,27 +1593,26 @@ namespace DeepCore.FreeMovement
             y += 4f;
             DrawStatPillar(ref y, x0, innerW, "SOUL", WorkerStatId.Composure, 10, stats, pillar, dim, val);
 
-            // Close affordance
             var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
             if (DrawCyberButton(close, "×", selected: false, accent: UiAmber))
                 _showExcavatorStats = false;
         }
 
-        
+
         void DrawConditionRow(ref float y, float x, float w, string label, string value,
             string state, float fill01, Color accent, GUIStyle mute)
         {
-            GUI.Label(new Rect(x, y, 58f, 12f), label, mute);
-            GUI.Label(new Rect(x + 58f, y, 88f, 12f), value, LabelStyle(10, UiWhite, bold: true));
-            GUI.Label(new Rect(x + 148f, y, w - 148f, 12f), state,
+            GUI.Label(new Rect(x, y, 58f, 14f), label, mute);
+            GUI.Label(new Rect(x + 58f, y, 88f, 14f), value, LabelStyle(10, UiWhite, bold: true));
+            GUI.Label(new Rect(x + 148f, y, w - 148f, 14f), state,
                 LabelStyle(9, accent, bold: true));
-            y += 13f;
+            y += 14f;
 
             // Thin technical bar
             float barW = w;
             float barH = 4f;
             var prev = GUI.color;
-            GUI.color = new Color(0.05f, 0.08f, 0.12f, 0.85f);
+            GUI.color = new Color(0.05f, 0.08f, 0.12f, 0.4f);
             GUI.DrawTexture(new Rect(x, y, barW, barH), Texture2D.whiteTexture);
             float fill = Mathf.Clamp01(fill01) * barW;
             if (fill > 0.5f)
@@ -1522,23 +1630,23 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             WorkerStatId start, int count, WorkerStats stats,
             GUIStyle pillar, GUIStyle dim, GUIStyle val)
         {
-            GUI.Label(new Rect(x, y, w, 12f), title, pillar);
-            y += 14f;
+            GUI.Label(new Rect(x, y, w, 13f), title, pillar);
+            y += 15f;
             float colW = w * 0.5f;
             float rowY = y;
             for (int i = 0; i < count; i++)
             {
                 var id = (WorkerStatId)((int)start + i);
                 bool left = (i % 2) == 0;
-                if (left && i > 0) rowY += 13f;
+                if (left && i > 0) rowY += 15f;
                 float cx = left ? x : x + colW;
 
                 string name = StatShortName(id);
                 int v = stats.Get(id);
-                GUI.Label(new Rect(cx, rowY, colW - 36f, 12f), name, dim);
-                GUI.Label(new Rect(cx + colW - 34f, rowY, 30f, 12f), v.ToString(), val);
+                GUI.Label(new Rect(cx, rowY, colW - 36f, 14f), name, dim);
+                GUI.Label(new Rect(cx + colW - 34f, rowY, 30f, 14f), v.ToString(), val);
             }
-            y = rowY + 14f;
+            y = rowY + 18f;
         }
 
         static string StatShortName(WorkerStatId id) => id switch
@@ -1557,27 +1665,27 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             const float panelW = 520f;
             float lineH = 14f;
             int n = DigHoodLog.Lines.Count;
-            float panelH = 28f + Mathf.Max(1, n) * lineH + 10f;
+            float panelH = 32f + Mathf.Max(1, n) * lineH + 14f;
             var r = new Rect(10f, Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
             Block(r);
 
-            GUI.Label(new Rect(r.x + 12, r.y + 6, panelW - 24, 14),
+            GUI.Label(new Rect(r.x + 12, r.y + 8, panelW - 24, 14),
                 "DIG HOOD // CurrentHP", LabelStyle(10, UiCyan, bold: true));
-            DrawHLine(r.x + 12, r.y + 22, panelW - 24, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.2f));
+            DrawHLine(r.x + 12, r.y + 24, panelW - 24, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.2f));
 
             var lineStyle = LabelStyle(9, UiDim);
-            float y = r.y + 28f;
+            float y = r.y + 30f;
             if (n == 0)
             {
-                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH),
+                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH + 2f),
                     "waiting for a dig strike…", lineStyle);
                 return;
             }
 
             foreach (var line in DigHoodLog.Lines)
             {
-                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH), line, lineStyle);
+                GUI.Label(new Rect(r.x + 12, y, panelW - 24, lineH + 2f), line, lineStyle);
                 y += lineH;
             }
         }
@@ -1585,7 +1693,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
         void DrawKeybindingsPanel()
         {
             const float panelW = 248f;
-            const float panelH = 355f;
+            const float panelH = 392f;
             var r = new Rect(Screen.width - panelW - 12f, Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
             Block(r);
@@ -1616,14 +1724,15 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 ("G", "Hauler / Refiner priority"),
                 ("L", "Place lantern"),
                 ("R", "Reset map"),
+                ("B", "Balance harness"),
             };
 
             float y = r.y + 34f;
             for (int i = 0; i < rows.Length; i++)
             {
-                GUI.Label(new Rect(r.x + 12, y, 88, 14), rows[i].k, key);
-                GUI.Label(new Rect(r.x + 102, y, panelW - 118, 14), rows[i].d, desc);
-                y += 15.5f;
+                GUI.Label(new Rect(r.x + 12, y, 88, 15), rows[i].k, key);
+                GUI.Label(new Rect(r.x + 102, y, panelW - 118, 15), rows[i].d, desc);
+                y += 16.5f;
             }
         }
 
@@ -1634,6 +1743,10 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 fontStyle = bold ? FontStyle.Bold : FontStyle.Normal,
                 normal = { textColor = color },
                 richText = false,
+                clipping = TextClipping.Overflow,
+                alignment = TextAnchor.UpperLeft,
+                wordWrap = false,
+                padding = new RectOffset(0, 0, 0, 2),
             };
 
         void DrawBanterBubble(float x, float y, WorkerBanter.Voice voice)
@@ -1697,7 +1810,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             bool hover = r.Contains(mouse);
 
             var prev = GUI.color;
-            GUI.color = selected ? UiBgHot : (hover ? new Color(0.05f, 0.1f, 0.14f, 0.9f) : CpBtnIdle);
+            GUI.color = selected ? UiBgHot : (hover ? new Color(0.05f, 0.1f, 0.14f, 0.4f) : CpBtnIdle);
             GUI.DrawTexture(r, Texture2D.whiteTexture);
 
             float borderA = selected ? (0.55f + 0.25f * _uiPulse) : (hover ? 0.55f : 0.28f);

@@ -97,6 +97,15 @@ namespace DeepCore.FreeMovement
         System.Action<TerrainCell, bool> _onDigImpact;
         public event System.Action<int, int> WeakPointFound;
 
+        /// <summary>Balance harness only — dig strike finished (before-cell snapshot, broke).</summary>
+        public event System.Action<TerrainCell, bool> BalanceDigImpact;
+        /// <summary>Balance harness only — Weak Point roll resolved (success flag).</summary>
+        public event System.Action<bool> BalanceWeakPointChecked;
+        /// <summary>Balance harness only — machine entered OVERHEATED.</summary>
+        public event System.Action BalanceOverheatEvent;
+        /// <summary>Balance harness only — Injury applied from overheat check fail.</summary>
+        public event System.Action BalanceInjuryEvent;
+
         /// <summary>Body / Mind / Soul sheet. RawPower + Lithology feed dig damage.</summary>
         public WorkerStats Stats => _stats ??= new WorkerStats();
 
@@ -187,6 +196,24 @@ namespace DeepCore.FreeMovement
                     $"SHIFT BREAK | Keeping dig route | {_route.Count} pin{(_route.Count == 1 ? "" : "s")}");
             }
             return body;
+        }
+
+        /// <summary>
+        /// Debug/balance harness: clear Heat + worker conditions for a clean comparison run.
+        /// Does not clear dig route or rebuild the map.
+        /// </summary>
+        public void ResetBalanceTestState()
+        {
+            _heat = HeatMin;
+            _heatZone = ExcavatorHeatZone.Normal;
+            _isCooling = false;
+            _dugThisTick = false;
+            IsActivelyDigging = false;
+            Conditions.Frustration = 0f;
+            Conditions.Injury = 0f;
+            Conditions.NeedsCare = false;
+            InitStaminaFromStats();
+            DigHoodLog.Push("BALANCE | Conditions reset | Heat 0 | Frust 0 | Injury 0 | Stamina full");
         }
 
         /// <summary>
@@ -493,7 +520,7 @@ namespace DeepCore.FreeMovement
 
             Vector2 pos = transform.localPosition;
             float mul = LoosePile.SpeedMulAt(pos, _moveRadius) * InjuryMoveMul;
-            Vector2 tryPos = pos + dir * (moveSpeed * mul * Time.deltaTime);
+            Vector2 tryPos = pos + dir * (moveSpeed * mul * WorkerSimClock.Delta);
 
             int remainingHere = CountClearanceSolids(pos, dir);
             bool stepBlocked = remainingHere > 0 || _world.CircleHitsSolid(tryPos, _moveRadius);
@@ -556,7 +583,7 @@ namespace DeepCore.FreeMovement
             {
                 IsActivelyDigging = true; // engaged with a mining target (not only on damage frames)
 
-                _digTimer -= Time.deltaTime;
+                _digTimer -= WorkerSimClock.Delta;
                 if (_digTimer <= 0f)
                 {
                     if (TryAuthorizedDig(pos, tryPos, dir))
@@ -647,7 +674,7 @@ namespace DeepCore.FreeMovement
             transform.localRotation = Quaternion.RotateTowards(
                 transform.localRotation,
                 Quaternion.Euler(0f, 0f, ang),
-                rotateSpeed * Time.deltaTime);
+                rotateSpeed * WorkerSimClock.Delta);
         }
 
         /// <summary>
@@ -786,6 +813,7 @@ namespace DeepCore.FreeMovement
             ApplyDigStamina();
 
             _onDigImpact?.Invoke(before, broke);
+            BalanceDigImpact?.Invoke(before, broke);
             if (broke) _onBrokeCell?.Invoke(x, y);
             return true;
         }
@@ -992,10 +1020,10 @@ namespace DeepCore.FreeMovement
             {
                 LogHeatMode(mining: false);
                 float before = _heat;
-                _heat = Mathf.Max(HeatMin, _heat - PassiveCoolPerSecond * Time.deltaTime);
+                _heat = Mathf.Max(HeatMin, _heat - PassiveCoolPerSecond * WorkerSimClock.Delta);
                 if (!Mathf.Approximately(before, _heat))
                     RefreshHeatZone(logOverheat: false);
-                ApplyFrustrationReliefRate("Cooling", FrustrationCoolReliefPerSecond, Time.deltaTime);
+                ApplyFrustrationReliefRate("Cooling", FrustrationCoolReliefPerSecond, WorkerSimClock.Delta);
                 ExitCoolingIfReady();
                 return;
             }
@@ -1010,7 +1038,7 @@ namespace DeepCore.FreeMovement
             LogHeatMode(mining: false);
 
             float beforeIdle = _heat;
-            _heat = Mathf.Max(HeatMin, _heat - PassiveCoolPerSecond * Time.deltaTime);
+            _heat = Mathf.Max(HeatMin, _heat - PassiveCoolPerSecond * WorkerSimClock.Delta);
             if (Mathf.Approximately(beforeIdle, _heat))
                 return;
 
@@ -1047,6 +1075,7 @@ namespace DeepCore.FreeMovement
                 _isCooling = false;
                 IsActivelyDigging = false;
                 DigHoodLog.Push("OVERHEAT | Excavator disabled");
+                BalanceOverheatEvent?.Invoke();
                 // One injury check per OVERHEAT event (zone edge), not while Heat stays at 100.
                 PerformOverheatInjuryCheck();
             }
@@ -1128,6 +1157,7 @@ namespace DeepCore.FreeMovement
                 Conditions.AddInjury(InjuryOnFail);
                 if (Conditions.Injury >= InjuryCareThreshold)
                     Conditions.NeedsCare = true;
+                BalanceInjuryEvent?.Invoke();
             }
 
             LogInjury();
@@ -1207,7 +1237,7 @@ namespace DeepCore.FreeMovement
 
             int recoveryStat = Stats.Get(WorkerStatId.Recovery);
             float perSec = 1f + recoveryStat * 0.20f;
-            float added = Conditions.AddStamina(perSec * Time.deltaTime, MaxStamina);
+            float added = Conditions.AddStamina(perSec * WorkerSimClock.Delta, MaxStamina);
             if (added > 0f)
             {
                 _staminaRecoveryLogAcc += added;
@@ -1269,6 +1299,8 @@ namespace DeepCore.FreeMovement
             DigHoodLog.Push(
                 $"WEAK POINT | {cell.Material} | D20 {roll.D20} | Finesse {roll.StatValue} | " +
                 $"Total {roll.Total} | DC {dc} | {(roll.Success ? "SUCCESS" : "FAIL")}");
+
+            BalanceWeakPointChecked?.Invoke(roll.Success);
 
             if (roll.Success)
             {
