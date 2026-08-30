@@ -18,20 +18,27 @@ namespace DeepCore.FreeMovement
         }
 
         public int GoldCount => Count(SocketKind.Gold);
+        public int DiamondCount => Count(SocketKind.Diamond);
         public int RockCount => Count(SocketKind.Rock);
         public int BedrockCount => Count(SocketKind.Bedrock);
         public bool IsGoldOre => GoldCount > 0;
+        public bool IsDiamondOre => DiamondCount > 0;
+        public bool IsPreciousOre => GoldCount > 0 || DiamondCount > 0;
 
         public static OreCell FromLoose(LoosePile pile)
         {
             if (pile == null) return default;
             byte sockets = pile.Sockets;
-            if (sockets == 0 && pile.GoldGrade > 0)
+            if (sockets == 0 && (pile.GoldGrade > 0 || pile.DiamondGrade > 0))
             {
-                // Reconstruct gold sockets if packed byte missing
-                for (int i = 0; i < pile.GoldGrade && i < 4; i++)
+                int g = pile.GoldGrade;
+                int d = pile.DiamondGrade;
+                int i = 0;
+                for (; i < g && i < 4; i++)
                     sockets |= (byte)((int)SocketKind.Gold << (i * 2));
-                for (int i = pile.GoldGrade; i < 4; i++)
+                for (int j = 0; j < d && i < 4; j++, i++)
+                    sockets |= (byte)((int)SocketKind.Diamond << (i * 2));
+                for (; i < 4; i++)
                     sockets |= (byte)((int)SocketKind.Rock << (i * 2));
             }
             else if (sockets == 0)
@@ -50,5 +57,5 @@ namespace DeepCore.FreeMovement
             new() { Sockets = cell.Sockets, Mass = cell.Mass };
     }
 
-    public enum RefinerPriority : byte { OreRock = 0, GoldOre = 1 }
+    public enum RefinerPriority : byte { OreRock = 0, GoldOre = 1, DiamondOre = 2 }
 }

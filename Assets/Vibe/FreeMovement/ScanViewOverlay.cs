@@ -75,107 +75,29 @@ namespace DeepCore.FreeMovement
 
         public void SetVisible(bool on)
         {
-            _visible = on;
-            if (_sr != null) _sr.enabled = on;
-            if (on) _dirty = true;
+            // Legacy radar Scan View retired — Heavy Scanner Tactical View replaces it.
+            _visible = false;
+            if (_sr != null) _sr.enabled = false;
         }
 
-        public void Toggle() => SetVisible(!_visible);
+        public void Toggle() => SetVisible(false);
 
         public void ClearHints()
         {
             _zones.Clear();
             _dirty = true;
+            if (_sr != null) _sr.enabled = false;
+            _visible = false;
         }
 
         public void Flash() { }
         public void SoftPing() { }
 
-        public void AddHint(int cx, int cy, float gold, float bedrock, int bleed = 2) =>
-            AddHint(cx, cy, gold, bedrock, gas: 0f, bleed);
+        public void AddHint(int cx, int cy, float gold, float bedrock, int bleed = 2) { }
 
         public void AddHint(int cx, int cy, float gold, float bedrock, float gas, int bleed = 2)
         {
-            if (_world == null || !_world.InBounds(cx, cy)) return;
-
-            ScanHintKind kind;
-            float strength;
-            if (gas > gold && gas > bedrock && gas > 0.01f)
-            {
-                kind = ScanHintKind.Gas;
-                strength = gas;
-            }
-            else if (gold >= bedrock && gold > 0.01f)
-            {
-                kind = ScanHintKind.Gold;
-                strength = gold;
-            }
-            else if (bedrock > 0.01f)
-            {
-                kind = ScanHintKind.Bedrock;
-                strength = bedrock;
-            }
-            else return;
-
-            float radius = Mathf.Lerp(3.2f, 5.5f, Mathf.Clamp01(bleed / 3f));
-            float jx = cx + 0.5f;
-            float jy = cy + 0.5f;
-
-            float mergeR = kind switch
-            {
-                ScanHintKind.Gold => 9f,
-                ScanHintKind.Gas => 8f,
-                _ => 7f,
-            };
-            for (int i = 0; i < _zones.Count; i++)
-            {
-                var z = _zones[i];
-                if (z.Kind != kind) continue;
-                float dx = z.X - jx;
-                float dy = z.Y - jy;
-                if (dx * dx + dy * dy > mergeR * mergeR) continue;
-                z.X = (z.X + jx) * 0.5f;
-                z.Y = (z.Y + jy) * 0.5f;
-                z.Radius = Mathf.Min(8f, z.Radius + radius * 0.2f);
-                z.Strength = Mathf.Max(z.Strength, strength);
-                _zones[i] = z;
-                _dirty = true;
-                return;
-            }
-
-            int goldN = 0, bedN = 0, gasN = 0;
-            for (int i = 0; i < _zones.Count; i++)
-            {
-                switch (_zones[i].Kind)
-                {
-                    case ScanHintKind.Gold: goldN++; break;
-                    case ScanHintKind.Gas: gasN++; break;
-                    default: bedN++; break;
-                }
-            }
-
-            if (kind == ScanHintKind.Gold && goldN >= MaxGoldZones)
-            {
-                if (!RemoveWeakest(ScanHintKind.Gold)) return;
-            }
-            else if (kind == ScanHintKind.Bedrock && bedN >= MaxBedZones) return;
-            else if (kind == ScanHintKind.Gas && gasN >= MaxGasZones)
-            {
-                if (!RemoveWeakest(ScanHintKind.Gas)) return;
-            }
-
-            _zones.Add(new Zone
-            {
-                X = jx,
-                Y = jy,
-                Kind = kind,
-                Radius = radius,
-                StretchX = 0.9f + Random.value * 0.25f,
-                StretchY = 0.9f + Random.value * 0.25f,
-                Angle = Random.Range(-0.35f, 0.35f),
-                Strength = Mathf.Clamp01(strength),
-            });
-            _dirty = true;
+            // No-op: legacy round-zone scan marks removed.
         }
 
         bool RemoveWeakest(ScanHintKind kind)

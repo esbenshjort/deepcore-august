@@ -333,20 +333,7 @@ namespace DeepCore.FreeMovement
 
         void PlaceLantern(Transform parent, Vector2 local)
         {
-            var go = new GameObject("Lantern");
-            go.transform.SetParent(parent, false);
-            go.transform.localPosition = local;
-            var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = _pixel;
-            sr.color = new Color(1f, 0.7f, 0.3f);
-            sr.sortingOrder = 25;
-            go.transform.localScale = Vector3.one * 0.12f;
-            var light = go.AddComponent<Light2D>();
-            light.lightType = Light2D.LightType.Point;
-            light.color = new Color(1f, 0.6f, 0.28f);
-            light.intensity = 1.2f;
-            light.pointLightOuterRadius = 2.4f;
-            go.AddComponent<CosyLantern>().Init(go.transform.position, light, 1.2f);
+            DigVisualKit.PlaceLantern(parent, local, local: true, intensity: 1.2f);
         }
 
         void EnsureCamera()

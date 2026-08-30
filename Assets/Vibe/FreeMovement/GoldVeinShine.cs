@@ -4,13 +4,13 @@ using UnityEngine;
 namespace DeepCore.FreeMovement
 {
     /// <summary>
-    /// Rare, tiny specular fleck on discovered rich gold (dig-face, 3–4 sockets).
-    /// Subtle detail only — not a frequent flare.
+    /// Rare specular flecks on discovered rich gold / diamond dig-face cells.
     /// </summary>
     public sealed class GoldVeinShine : MonoBehaviour
     {
-        const int MinGrade = 3;
-        const int MaxActive = 2;
+        const int MinGoldGrade = 1;
+        const int MinDiamondGrade = 1;
+        const int MaxActive = 4;
 
         FineTerrainWorld _world;
         readonly List<Vector2Int> _rich = new(128);
@@ -26,6 +26,7 @@ namespace DeepCore.FreeMovement
             public float T;
             public float Duration;
             public float BaseScale;
+            public bool Diamond;
         }
 
         public static GoldVeinShine Attach(Transform parent, FineTerrainWorld world)
@@ -100,7 +101,8 @@ namespace DeepCore.FreeMovement
             if (_world == null || !_world.InBounds(x, y)) return false;
             var c = _world.Get(x, y);
             if (c.Phase == TerrainPhase.Excavated) return false;
-            if (c.GoldCount < MinGrade) return false;
+            bool precious = c.DiamondCount >= MinDiamondGrade || c.GoldCount >= MinGoldGrade;
+            if (!precious) return false;
             return TouchesExcavated(x, y);
         }
 
@@ -134,11 +136,10 @@ namespace DeepCore.FreeMovement
             _nextPick -= Time.deltaTime;
             if (_nextPick > 0f) return;
             // Rare — a quiet wink every few seconds at most
-            _nextPick = Random.Range(3.5f, 7.5f);
+            _nextPick = Random.Range(2.2f, 5.5f);
             if (_rich.Count == 0 || _active.Count >= MaxActive) return;
-            if (Random.value > 0.55f)
+            if (Random.value > 0.62f)
             {
-                // Often skip even when due — keeps it sparse
                 return;
             }
 
@@ -148,7 +149,7 @@ namespace DeepCore.FreeMovement
 
             int best = -1;
             float bestScore = float.MaxValue;
-            int tries = Mathf.Min(6, _rich.Count);
+            int tries = Mathf.Min(8, _rich.Count);
             for (int t = 0; t < tries; t++)
             {
                 int i = Random.Range(0, _rich.Count);
@@ -159,7 +160,10 @@ namespace DeepCore.FreeMovement
                     continue;
                 }
                 Vector2 p = _world.CellCenter(cell.x, cell.y);
+                var c = _world.Get(cell.x, cell.y);
+                // Prefer diamonds in the pick
                 float score = (p - cam).sqrMagnitude * Random.Range(0.8f, 1.2f);
+                if (c.DiamondCount > 0) score *= 0.55f;
                 if (score < bestScore)
                 {
                     bestScore = score;
@@ -170,15 +174,17 @@ namespace DeepCore.FreeMovement
             if (best < 0) return;
             var pick = _rich[best];
             if (!IsShineCandidate(pick.x, pick.y)) return;
-            BeginTwinkle(_world.CellCenter(pick.x, pick.y), _world.Get(pick.x, pick.y).GoldCount);
+            var cellPick = _world.Get(pick.x, pick.y);
+            BeginTwinkle(_world.CellCenter(pick.x, pick.y), cellPick);
         }
 
-        void BeginTwinkle(Vector2 cellCenter, int grade)
+        void BeginTwinkle(Vector2 cellCenter, TerrainCell cell)
         {
             EnsureAssets();
             float cs = _world.CellSize;
             Vector2 offset = Random.insideUnitCircle * (cs * 0.22f);
-            var go = new GameObject("GoldShimmer");
+            bool diamond = cell.DiamondCount > 0;
+            var go = new GameObject(diamond ? "DiamondShimmer" : "GoldShimmer");
             go.transform.SetParent(transform, false);
             go.transform.localPosition = cellCenter + offset;
 
@@ -186,9 +192,14 @@ namespace DeepCore.FreeMovement
             sr.sprite = _glint;
             sr.sharedMaterial = _unlit;
             sr.sortingOrder = 24;
-            sr.color = new Color(1f, 0.95f, 0.7f, 0f);
+            sr.color = diamond
+                ? new Color(0.85f, 0.95f, 1f, 0f)
+                : new Color(1f, 0.95f, 0.7f, 0f);
 
-            float baseScale = (grade >= 4 ? 0.045f : 0.035f) * Random.Range(0.9f, 1.1f);
+            int grade = diamond ? cell.DiamondCount : cell.GoldCount;
+            float baseScale = (diamond
+                ? (grade >= 3 ? 0.055f : 0.042f)
+                : (grade >= 3 ? 0.05f : 0.04f)) * Random.Range(0.9f, 1.1f);
             go.transform.localScale = Vector3.one * baseScale;
             go.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(0f, 45f));
 
@@ -197,8 +208,9 @@ namespace DeepCore.FreeMovement
                 Go = go,
                 Sr = sr,
                 T = 0f,
-                Duration = Random.Range(0.18f, 0.32f),
+                Duration = Random.Range(diamond ? 0.22f : 0.18f, diamond ? 0.4f : 0.32f),
                 BaseScale = baseScale,
+                Diamond = diamond,
             });
         }
 
@@ -221,10 +233,13 @@ namespace DeepCore.FreeMovement
                 if (t.Sr != null)
                 {
                     var c = t.Sr.color;
-                    // Soft, low alpha — a fleck, not a star
-                    c.a = flash * 0.55f;
+                    c.a = flash * (t.Diamond ? 0.75f : 0.7f);
                     t.Sr.color = c;
-                    t.Go.transform.localScale = Vector3.one * (t.BaseScale * (0.7f + flash * 0.35f));
+                    t.Go.transform.localScale = Vector3.one * (t.BaseScale * (0.7f + flash * 0.45f));
+                    if (t.Diamond)
+                        t.Go.transform.Rotate(0f, 0f, Time.deltaTime * 90f);
+                    else
+                        t.Go.transform.Rotate(0f, 0f, Time.deltaTime * 55f);
                 }
 
                 _active[i] = t;

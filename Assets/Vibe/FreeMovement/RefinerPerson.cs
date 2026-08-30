@@ -9,7 +9,7 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class RefinerPerson : MonoBehaviour
     {
-        enum State { Idle, Fetch, CarryToWash, WaitWash }
+        enum State { Idle, Fetch, CarryToWash, WaitWash, Consulting }
 
         FineTerrainWorld _world;
         BasecampYard _yard;
@@ -18,15 +18,26 @@ namespace DeepCore.FreeMovement
         float _moveSpeed = 1.25f;
 
         State _state = State.Idle;
+        State _resumeAfterConsult = State.Idle;
         OreCell _held;
         RefinerPriority _heldRecipe = RefinerPriority.GoldOre;
         bool _holding;
         SpriteRenderer _heldSr;
         Transform _facing;
         float _idleTimer;
+        bool _consultActive;
+        bool _discussing;
+        Vector2 _consultMeet;
+        Vector2 _consultFaceToward;
+        float _consultHoursLeft;
 
         public RefinerPriority Priority { get; private set; } = RefinerPriority.GoldOre;
         public Vector2 Position => transform.localPosition;
+        public bool IsInConsultation => _consultActive;
+        public bool IsDiscussing => _discussing;
+
+        /// <summary>Fixed meet point by the washer — Prospector walks here instead of chasing.</summary>
+        public Vector2 ConsultationMeetPoint => WorkPoint;
 
         /// <summary>Body / Mind / Soul sheet. Data only — unused by wash logic yet.</summary>
         public WorkerStats Stats => _stats ??= new WorkerStats();
@@ -35,13 +46,17 @@ namespace DeepCore.FreeMovement
 
         public event System.Action StartedWash;
         public event System.Action FoundGold;
+        public event System.Action FoundDiamond;
         public event System.Action BatchDone;
 
         public void SetPriority(RefinerPriority p) => Priority = p;
         public void TogglePriority() =>
-            Priority = Priority == RefinerPriority.GoldOre
-                ? RefinerPriority.OreRock
-                : RefinerPriority.GoldOre;
+            Priority = Priority switch
+            {
+                RefinerPriority.GoldOre => RefinerPriority.DiamondOre,
+                RefinerPriority.DiamondOre => RefinerPriority.OreRock,
+                _ => RefinerPriority.GoldOre,
+            };
 
         public static RefinerPerson Spawn(Transform parent, FineTerrainWorld world,
             BasecampYard yard, DeliveryCalculator calc)
@@ -53,14 +68,7 @@ namespace DeepCore.FreeMovement
 
             var facing = new GameObject("Facing");
             facing.transform.SetParent(go.transform, false);
-
-            var body = new GameObject("Body");
-            body.transform.SetParent(facing.transform, false);
-            var sr = body.AddComponent<SpriteRenderer>();
-            sr.sprite = MakeBodySprite();
-            sr.sortingOrder = 42;
-            DigVisualKit.ApplyLit(sr);
-            body.transform.localScale = Vector3.one * 0.36f;
+            CrewVisualKit.AttachRefiner(facing.transform, out _);
 
             var held = new GameObject("HeldCell");
             held.transform.SetParent(facing.transform, false);
@@ -72,12 +80,12 @@ namespace DeepCore.FreeMovement
 
             var light = go.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(light,
-                new Color(0.7f, 0.55f, 1f),
-                intensity: 0.32f,
-                outer: 0.95f,
-                inner: 0.05f,
+                new Color(1f, 0.6f, 0.35f),
+                intensity: 0.04f,
+                outer: 0.2f,
+                inner: 0.02f,
                 shadows: false,
-                falloff: 0.7f);
+                falloff: 0.9f);
 
             var r = go.AddComponent<RefinerPerson>();
             r._world = world;
@@ -92,14 +100,17 @@ namespace DeepCore.FreeMovement
             {
                 r._washer.BatchComplete += r.OnBatchComplete;
                 r._washer.FoundGold += () => r.FoundGold?.Invoke();
+                r._washer.FoundDiamond += () => r.FoundDiamond?.Invoke();
             }
             return r;
         }
 
         public void ResetToBase()
         {
+            EndConsultation();
             _holding = false;
             if (_heldSr != null) _heldSr.gameObject.SetActive(false);
+            _held = default;
             _state = State.Idle;
             _idleTimer = 0f;
             if (_yard?.Washer != null)
@@ -108,13 +119,70 @@ namespace DeepCore.FreeMovement
             _washer?.ResetMachine();
         }
 
+        /// <summary>Move only — keep wash / consult / held-cell job memory across sleep.</summary>
+        public void SoftTeleport(Vector2 pos)
+        {
+            transform.localPosition = pos;
+        }
+
         public void TeleportTo(Vector2 pos)
         {
-            _holding = false;
-            if (_heldSr != null) _heldSr.gameObject.SetActive(false);
-            _state = State.Idle;
-            _idleTimer = 0.4f;
-            transform.localPosition = pos;
+            SoftTeleport(pos);
+        }
+
+        /// <summary>
+        /// Prospector needs a consult: pause fetch/carry, keep held ore, walk to meet.
+        /// Washer may keep spinning if already running.
+        /// </summary>
+        public void RequestConsultation(Vector2 meetNearProspector, float expectedHours)
+        {
+            if (_consultActive) return;
+            _consultActive = true;
+            _discussing = false;
+            _consultMeet = meetNearProspector;
+            _consultHoursLeft = Mathf.Max(0.2f, expectedHours);
+            if (_state != State.Consulting)
+            {
+                _resumeAfterConsult = _state;
+                _state = State.Consulting;
+            }
+            DigHoodLog.Push("REFINER | pausing for Prospector consult");
+        }
+
+        public void BeginDiscussion(Vector2 faceToward)
+        {
+            if (!_consultActive) RequestConsultation(Position, 1f);
+            _discussing = true;
+            _consultFaceToward = faceToward;
+        }
+
+        public void TickConsultation(float hoursDelta, Vector2 faceToward)
+        {
+            if (!_consultActive) return;
+            _consultFaceToward = faceToward;
+            if (_discussing)
+                _consultHoursLeft -= hoursDelta;
+        }
+
+        public void EndConsultation()
+        {
+            if (!_consultActive && _state != State.Consulting) return;
+            _consultActive = false;
+            _discussing = false;
+            if (_state == State.Consulting)
+            {
+                _state = _resumeAfterConsult;
+                if (_state == State.Consulting) _state = State.Idle;
+                // If we were WaitWash and machine finished overnight/during, recover
+                if (_state == State.WaitWash && _washer != null && !_washer.IsBusy)
+                {
+                    _state = State.Idle;
+                    _idleTimer = 0.05f;
+                }
+                if (_state == State.Idle)
+                    _idleTimer = 0.05f;
+            }
+            DigHoodLog.Push("REFINER | consult done — resuming wash");
         }
 
         public Vector2 WorkPoint =>
@@ -136,8 +204,10 @@ namespace DeepCore.FreeMovement
 
             _washer.Tick();
 
-            // Manual drive only when not mid-wash — never stall the machine loop
-            bool driving = wasd.sqrMagnitude > 0.01f && _state != State.WaitWash;
+            // Manual drive only when not mid-wash / mid-consult
+            bool driving = wasd.sqrMagnitude > 0.01f
+                           && _state != State.WaitWash
+                           && _state != State.Consulting;
             if (driving)
             {
                 Face(wasd.normalized);
@@ -166,7 +236,6 @@ namespace DeepCore.FreeMovement
                     break;
 
                 case State.WaitWash:
-                    // Safety: if machine somehow idled without event, recover
                     if (!_washer.IsBusy)
                     {
                         _state = State.Idle;
@@ -175,7 +244,30 @@ namespace DeepCore.FreeMovement
                     else
                         Face(LocalOf(_washer.transform) - Position);
                     break;
+
+                case State.Consulting:
+                    TickConsultingPresence();
+                    break;
             }
+        }
+
+        void TickConsultingPresence()
+        {
+            // Walk to meet if still approaching; then stand and face Prospector
+            Vector2 meet = _consultMeet.sqrMagnitude > 0.0001f ? _consultMeet : WorkPoint;
+            Vector2 toMeet = meet - Position;
+            if (!_discussing && toMeet.sqrMagnitude > 0.06f)
+            {
+                Face(toMeet.normalized);
+                Step(toMeet.normalized);
+                return;
+            }
+
+            Vector2 face = _consultFaceToward.sqrMagnitude > 0.0001f
+                ? _consultFaceToward - Position
+                : LocalOf(_washer.transform) - Position;
+            if (face.sqrMagnitude > 0.0001f)
+                Face(face.normalized);
         }
 
         /// <summary>Stockpiles live under Basecamp root — always compare in our parent space.</summary>
@@ -188,20 +280,43 @@ namespace DeepCore.FreeMovement
 
         bool TryBeginFetch()
         {
-            // Preferred input pile first, then fallback (ORE ROCK / ORE GOLD — not outputs)
-            Stockpile primary = Priority == RefinerPriority.GoldOre ? _yard.Gold : _yard.Rock;
-            Stockpile secondary = Priority == RefinerPriority.GoldOre ? _yard.Rock : _yard.Gold;
+            Stockpile primary = PickPrimary();
+            Stockpile secondary = PickSecondary();
+            Stockpile tertiary = PickTertiary();
             if (primary != null && primary.HasCells) return true;
             if (secondary != null && secondary.HasCells) return true;
+            if (tertiary != null && tertiary.HasCells) return true;
             return false;
         }
 
+        Stockpile PickPrimary() => Priority switch
+        {
+            RefinerPriority.DiamondOre => _yard.Diamond,
+            RefinerPriority.GoldOre => _yard.Gold,
+            _ => _yard.Rock,
+        };
+
+        Stockpile PickSecondary() => Priority switch
+        {
+            RefinerPriority.DiamondOre => _yard.Gold,
+            RefinerPriority.GoldOre => _yard.Diamond,
+            _ => _yard.Gold,
+        };
+
+        Stockpile PickTertiary() => Priority switch
+        {
+            RefinerPriority.OreRock => _yard.Diamond,
+            _ => _yard.Rock,
+        };
+
         void TickFetch()
         {
-            Stockpile primary = Priority == RefinerPriority.GoldOre ? _yard.Gold : _yard.Rock;
-            Stockpile secondary = Priority == RefinerPriority.GoldOre ? _yard.Rock : _yard.Gold;
+            Stockpile primary = PickPrimary();
+            Stockpile secondary = PickSecondary();
+            Stockpile tertiary = PickTertiary();
             Stockpile src = primary != null && primary.HasCells ? primary
                 : secondary != null && secondary.HasCells ? secondary
+                : tertiary != null && tertiary.HasCells ? tertiary
                 : null;
 
             if (src == null)
@@ -225,9 +340,12 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
-            _heldRecipe = src.Kind == StockpileKind.Gold
-                ? RefinerPriority.GoldOre
-                : RefinerPriority.OreRock;
+            _heldRecipe = src.Kind switch
+            {
+                StockpileKind.Diamond => RefinerPriority.DiamondOre,
+                StockpileKind.Gold => RefinerPriority.GoldOre,
+                _ => RefinerPriority.OreRock,
+            };
             _holding = true;
             ShowHeld(_held);
             _state = State.CarryToWash;
@@ -260,11 +378,14 @@ namespace DeepCore.FreeMovement
             // If busy, stand and retry next frame
         }
 
-        void OnBatchComplete(int gold, int dirt)
+        void OnBatchComplete(int gold, int dirt, int diamond)
         {
-            _calc?.NotifyWashResult(gold, dirt);
-            _state = State.Idle;
-            _idleTimer = 0.08f; // immediately look for next cell
+            _calc?.NotifyWashResult(gold, dirt, diamond);
+            if (_state == State.Consulting)
+                _resumeAfterConsult = State.Idle;
+            else
+                _state = State.Idle;
+            _idleTimer = 0.08f;
             BatchDone?.Invoke();
         }
 
@@ -272,8 +393,12 @@ namespace DeepCore.FreeMovement
         {
             if (_heldSr == null) return;
             int seed = cell.Sockets * 1337 + 17;
-            _heldSr.sprite = DigVisualKit.MakeWallChunk((byte)cell.GoldCount, cell.BedrockCount, seed);
+            _heldSr.sprite = DigVisualKit.MakeWallChunk((byte)cell.GoldCount, cell.BedrockCount, seed,
+                (byte)cell.DiamondCount);
             _heldSr.gameObject.SetActive(true);
+            if (cell.IsDiamondOre || cell.IsGoldOre)
+                OreShimmer.Attach(_heldSr.transform, cell.IsDiamondOre,
+                    (byte)cell.GoldCount, (byte)cell.DiamondCount, 0.11f);
         }
 
         void Face(Vector2 dir)
@@ -291,31 +416,6 @@ namespace DeepCore.FreeMovement
             if (dir.sqrMagnitude < 0.0001f) return;
             float mul = LoosePile.SpeedMulAt(Position, 0.12f);
             transform.localPosition = Position + dir.normalized * (_moveSpeed * mul * Time.deltaTime);
-        }
-
-        static Sprite MakeBodySprite()
-        {
-            const int s = 16;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, Color.clear);
-
-            // coat
-            for (int y = 2; y < 12; y++)
-            for (int x = 4; x < 12; x++)
-                tex.SetPixel(x, y, new Color(0.45f, 0.35f, 0.7f));
-            // head
-            for (int y = 11; y < 15; y++)
-            for (int x = 5; x < 11; x++)
-                tex.SetPixel(x, y, new Color(0.85f, 0.75f, 0.65f));
-            // apron stripe
-            for (int y = 3; y < 10; y++)
-            for (int x = 7; x < 9; x++)
-                tex.SetPixel(x, y, new Color(0.2f, 0.85f, 0.9f));
-
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.2f), s);
         }
 
         void OnValidate()

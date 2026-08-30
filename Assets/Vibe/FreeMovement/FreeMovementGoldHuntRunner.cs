@@ -163,7 +163,7 @@ namespace DeepCore.FreeMovement
             // Prefer broken cell near tip so ore pops from the cut face
             Vector2 face = Vector2.Lerp(_world.CellCenter(x, y), tip, 0.75f);
             tip = Vector2.Lerp(tip, face, 0.5f);
-            LoosePile.SpawnCellFromDrill(_looseRoot, tip, _worker.Facing, c, _world.CellSize, WorkerRadius);
+            LoosePile.SpawnCellFromDrill(_looseRoot, tip, _worker.Facing, c, _world.CellSize, WorkerRadius, x, y);
         }
 
         void TryPlaceLantern()

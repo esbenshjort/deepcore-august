@@ -8,9 +8,12 @@ namespace DeepCore.FreeMovement
     public sealed class DeliveryCalculator
     {
         public float RockMass;
-        public int GoldValue;       // refined gold pieces (post-washer)
-        public int GoldSockets;     // ore gold sockets delivered (pre-wash)
+        public int GoldValue;
+        public int GoldSockets;
+        public int DiamondValue;
+        public int DiamondSockets;
         public int RefinedGold;
+        public int RefinedDiamond;
         public int DirtPieces;
         public int Deliveries;
         public int PilesDelivered;
@@ -22,24 +25,33 @@ namespace DeepCore.FreeMovement
         public int CarryGoldValue;
         public int CarryGoldSockets;
         public int CarryGoldPiles;
+        public float CarryDiamondMass;
+        public int CarryDiamondValue;
+        public int CarryDiamondSockets;
+        public int CarryDiamondPiles;
 
         readonly List<OreCell> _carryCells = new(16);
 
-        public int CarryPiles => CarryRockPiles + CarryGoldPiles;
-        public float CarryRock => CarryRockMass + CarryGoldMass;
+        public int CarryPiles => CarryRockPiles + CarryGoldPiles + CarryDiamondPiles;
+        public float CarryRock => CarryRockMass + CarryGoldMass + CarryDiamondMass;
         public Stockpile RockPile;
         public Stockpile GoldPile;
+        public Stockpile DiamondPile;
         public Stockpile RefinedPile;
+        public Stockpile RefinedDiamondPile;
         public Stockpile DirtPile;
 
         public event Action Changed;
 
         public void BindStockpiles(Stockpile rock, Stockpile gold,
-            Stockpile refined = null, Stockpile dirt = null)
+            Stockpile refined = null, Stockpile dirt = null,
+            Stockpile diamond = null, Stockpile refinedDiamond = null)
         {
             RockPile = rock;
             GoldPile = gold;
+            DiamondPile = diamond;
             RefinedPile = refined;
+            RefinedDiamondPile = refinedDiamond;
             DirtPile = dirt;
         }
 
@@ -48,7 +60,10 @@ namespace DeepCore.FreeMovement
             RockMass = 0f;
             GoldValue = 0;
             GoldSockets = 0;
+            DiamondValue = 0;
+            DiamondSockets = 0;
             RefinedGold = 0;
+            RefinedDiamond = 0;
             DirtPieces = 0;
             Deliveries = 0;
             PilesDelivered = 0;
@@ -56,7 +71,9 @@ namespace DeepCore.FreeMovement
             ClearCarry();
             RockPile?.Reset();
             GoldPile?.Reset();
+            DiamondPile?.Reset();
             RefinedPile?.Reset();
+            RefinedDiamondPile?.Reset();
             DirtPile?.Reset();
             Changed?.Invoke();
         }
@@ -69,6 +86,10 @@ namespace DeepCore.FreeMovement
             CarryGoldValue = 0;
             CarryGoldSockets = 0;
             CarryGoldPiles = 0;
+            CarryDiamondMass = 0f;
+            CarryDiamondValue = 0;
+            CarryDiamondSockets = 0;
+            CarryDiamondPiles = 0;
             _carryCells.Clear();
             Changed?.Invoke();
         }
@@ -78,7 +99,14 @@ namespace DeepCore.FreeMovement
             if (pile == null) return;
             var cell = OreCell.FromLoose(pile);
             _carryCells.Add(cell);
-            if (pile.IsGold)
+            if (pile.IsDiamond)
+            {
+                CarryDiamondMass += pile.Mass;
+                CarryDiamondSockets += pile.DiamondGrade;
+                CarryDiamondValue += pile.DiamondValue;
+                CarryDiamondPiles++;
+            }
+            else if (pile.IsGold)
             {
                 CarryGoldMass += pile.Mass;
                 CarryGoldSockets += pile.GoldGrade;
@@ -97,13 +125,13 @@ namespace DeepCore.FreeMovement
         {
             if (CarryPiles <= 0 && _carryCells.Count == 0) return;
 
-            // Prefer intact cell queue — each cell stays whole until washer
             if (_carryCells.Count > 0)
             {
                 for (int i = 0; i < _carryCells.Count; i++)
                 {
                     var c = _carryCells[i];
-                    if (c.IsGoldOre) GoldPile?.EnqueueOreCell(c);
+                    if (c.IsDiamondOre) DiamondPile?.EnqueueOreCell(c);
+                    else if (c.IsGoldOre) GoldPile?.EnqueueOreCell(c);
                     else RockPile?.EnqueueOreCell(c);
                 }
             }
@@ -113,20 +141,26 @@ namespace DeepCore.FreeMovement
                     RockPile?.DepositRock(CarryRockMass, CarryRockPiles);
                 if (CarryGoldPiles > 0)
                     GoldPile?.DepositGold(CarryGoldMass, CarryGoldSockets, CarryGoldValue, CarryGoldPiles);
+                if (CarryDiamondPiles > 0)
+                    DiamondPile?.DepositDiamond(CarryDiamondMass, CarryDiamondSockets,
+                        CarryDiamondValue, CarryDiamondPiles);
             }
 
             RockMass += CarryRockMass;
             GoldSockets += CarryGoldSockets;
+            DiamondSockets += CarryDiamondSockets;
             PilesDelivered += Mathf.Max(CarryPiles, _carryCells.Count);
             Deliveries++;
             ClearCarry();
         }
 
-        public void NotifyWashResult(int goldPieces, int dirtPieces)
+        public void NotifyWashResult(int goldPieces, int dirtPieces, int diamondPieces = 0)
         {
             RefinedGold += Mathf.Max(0, goldPieces);
+            RefinedDiamond += Mathf.Max(0, diamondPieces);
             DirtPieces += Mathf.Max(0, dirtPieces);
-            GoldValue = RefinedGold; // HUD "GOLD" reads refined output
+            GoldValue = RefinedGold;
+            DiamondValue = RefinedDiamond;
             CellsWashed++;
             Changed?.Invoke();
         }

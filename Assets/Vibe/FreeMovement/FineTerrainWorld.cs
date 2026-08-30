@@ -19,6 +19,7 @@ namespace DeepCore.FreeMovement
         Rock = 0,
         Bedrock = 1,
         Gold = 2,
+        Diamond = 3,
     }
 
     public struct TerrainCell
@@ -39,7 +40,7 @@ namespace DeepCore.FreeMovement
         public bool WeakPointChecked;
         /// <summary>True if Weak Point roll succeeded — extra armor pen while this tile lives.</summary>
         public bool HasWeakPoint;
-        /// <summary>4 sockets × 2 bits each: Rock=0, Bedrock=1, Gold=2.</summary>
+        /// <summary>4 sockets × 2 bits each: Rock=0, Bedrock=1, Gold=2, Diamond=3.</summary>
         public byte Sockets;
 
         public SocketKind GetSocket(int index) =>
@@ -54,11 +55,18 @@ namespace DeepCore.FreeMovement
         }
 
         public int GoldCount => Count(SocketKind.Gold);
+        public int DiamondCount => Count(SocketKind.Diamond);
         public int BedrockCount => Count(SocketKind.Bedrock);
         public int RockCount => Count(SocketKind.Rock);
 
         /// <summary>Gold richness 0–4 (how many gold sockets).</summary>
         public byte GoldGrade => (byte)GoldCount;
+        /// <summary>Diamond richness 0–4.</summary>
+        public byte DiamondGrade => (byte)DiamondCount;
+
+        public bool IsGoldOre => GoldCount > 0;
+        public bool IsDiamondOre => DiamondCount > 0;
+        public bool IsPreciousOre => GoldCount > 0 || DiamondCount > 0;
 
         /// <summary>Bitmask of which sockets hold gold (debug / UI).</summary>
         public byte GoldSockets
@@ -68,6 +76,18 @@ namespace DeepCore.FreeMovement
                 byte m = 0;
                 for (int i = 0; i < 4; i++)
                     if (GetSocket(i) == SocketKind.Gold)
+                        m |= (byte)(1 << i);
+                return m;
+            }
+        }
+
+        public byte DiamondSockets
+        {
+            get
+            {
+                byte m = 0;
+                for (int i = 0; i < 4; i++)
+                    if (GetSocket(i) == SocketKind.Diamond)
                         m |= (byte)(1 << i);
                 return m;
             }
@@ -138,8 +158,8 @@ namespace DeepCore.FreeMovement
             (byte)(((int)a & 3) | (((int)b & 3) << 2) | (((int)c & 3) << 4) | (((int)d & 3) << 6));
 
         /// <summary>
-        /// Build a cell from exactly 4 sockets (any mix of rock / bedrock / gold).
-        /// Hardness = rock&amp;gold×1 + bedrock×50. Full bedrock ≈ 200 digs.
+        /// Build a cell from exactly 4 sockets (any mix of rock / bedrock / gold / diamond).
+        /// Hardness = rock&amp;gold&amp;diamond×1 + bedrock×50. Full bedrock ≈ 200 digs.
         /// </summary>
         public static TerrainCell FromSockets(SocketKind s0, SocketKind s1, SocketKind s2, SocketKind s3)
         {
@@ -147,7 +167,6 @@ namespace DeepCore.FreeMovement
             int hardness = 0;
             int mass = 0;
             int bedrock = 0;
-            int gold = 0;
             Span<SocketKind> sockets = stackalloc SocketKind[4] { s0, s1, s2, s3 };
             for (int i = 0; i < 4; i++)
             {
@@ -161,7 +180,10 @@ namespace DeepCore.FreeMovement
                     case SocketKind.Gold:
                         hardness += RockSocketHardness;
                         mass += 2;
-                        gold++;
+                        break;
+                    case SocketKind.Diamond:
+                        hardness += RockSocketHardness;
+                        mass += 2;
                         break;
                     default:
                         hardness += RockSocketHardness;
@@ -227,21 +249,22 @@ namespace DeepCore.FreeMovement
             return true;
         }
 
-        public static TerrainCell FromCounts(int rock, int bedrock, int gold)
+        public static TerrainCell FromCounts(int rock, int bedrock, int gold, int diamond = 0)
         {
             rock = Mathf.Max(0, rock);
             bedrock = Mathf.Max(0, bedrock);
             gold = Mathf.Max(0, gold);
-            int total = rock + bedrock + gold;
+            diamond = Mathf.Max(0, diamond);
+            int total = rock + bedrock + gold + diamond;
             if (total != 4)
             {
-                // Normalize / pad with rock
                 if (total <= 0) return MakeRock();
                 while (total < 4) { rock++; total++; }
                 while (total > 4)
                 {
                     if (rock > 0) { rock--; total--; }
                     else if (gold > 0) { gold--; total--; }
+                    else if (diamond > 0) { diamond--; total--; }
                     else { bedrock--; total--; }
                 }
             }
@@ -251,6 +274,7 @@ namespace DeepCore.FreeMovement
             for (int n = 0; n < rock; n++) s[i++] = SocketKind.Rock;
             for (int n = 0; n < bedrock; n++) s[i++] = SocketKind.Bedrock;
             for (int n = 0; n < gold; n++) s[i++] = SocketKind.Gold;
+            for (int n = 0; n < diamond; n++) s[i++] = SocketKind.Diamond;
             return FromSockets(s[0], s[1], s[2], s[3]);
         }
 

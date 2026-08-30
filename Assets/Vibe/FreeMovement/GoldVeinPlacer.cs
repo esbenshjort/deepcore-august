@@ -289,9 +289,9 @@ namespace DeepCore.FreeMovement
                 float dy = y - startY;
                 if (dx * dx + dy * dy > clearR * clearR) continue;
                 var c = w.Get(x, y);
-                if (c.GoldCount <= 0 || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
+                if ((c.GoldCount <= 0 && c.DiamondCount <= 0) || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
                 int bed = c.BedrockCount;
-                w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed, bed, 0));
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed, bed, 0, 0));
             }
             w.EndBatch();
 
@@ -309,7 +309,8 @@ namespace DeepCore.FreeMovement
                 if (rng.NextDouble() > keep)
                 {
                     int bed = c.BedrockCount;
-                    w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed, bed, 0));
+                    int dia = c.DiamondCount;
+                    w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed - dia, bed, 0, dia));
                 }
             }
             w.EndBatch();
@@ -323,6 +324,163 @@ namespace DeepCore.FreeMovement
             PlaceVein(w, sx + 0.06f, sy + 0.04f, sx + 0.14f, sy + 0.10f, 0.0035f, seed + 202, minGrade: 1, maxGrade: 2);
             PlaceCluster(w, sx - 0.08f, sy + 0.10f, 0.010f, 4, seed + 203);
             PlaceCluster(w, sx + 0.10f, sy + 0.12f, 0.009f, 3, seed + 204);
+        }
+
+        /// <summary>
+        /// Diamond pipes / pockets — rarer than gold, cool crystalline clusters.
+        /// Includes tiny early-game teases near camp.
+        /// </summary>
+        public static void PlaceOrganicDiamond(FineTerrainWorld w, int startX, int startY, int seed)
+        {
+            var rng = new System.Random(seed + 9001);
+            float invW = 1f / w.Width;
+            float invH = 1f / w.Height;
+            float sx = startX * invW;
+            float sy = startY * invH;
+
+            // Mid / deep diamond pipes (narrower than gold veins)
+            PlaceDiamondVein(w, 0.28f, 0.55f, 0.38f, 0.78f, 0.0045f, seed + 301, 1, 3);
+            PlaceDiamondVein(w, 0.62f, 0.58f, 0.78f, 0.86f, 0.004f, seed + 302, 2, 4);
+            PlaceDiamondVein(w, 0.45f, 0.70f, 0.58f, 0.94f, 0.0038f, seed + 303, 2, 3);
+            PlaceDiamondVein(w, 0.15f, 0.72f, 0.28f, 0.90f, 0.0035f, seed + 304, 1, 3);
+            PlaceDiamondVein(w, 0.78f, 0.50f, 0.92f, 0.72f, 0.004f, seed + 305, 2, 4);
+
+            PlaceDiamondCluster(w, 0.35f, 0.90f, 0.012f, 4, seed + 311);
+            PlaceDiamondCluster(w, 0.70f, 0.88f, 0.011f, 4, seed + 312);
+            PlaceDiamondCluster(w, 0.52f, 0.96f, 0.010f, 3, seed + 313);
+
+            // Clear accidental diamonds too close — then plant intentional early teases
+            float clearR = Mathf.Min(w.Width, w.Height) * 0.16f;
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                float dx = x - startX;
+                float dy = y - startY;
+                if (dx * dx + dy * dy > clearR * clearR) continue;
+                var c = w.Get(x, y);
+                if (c.DiamondCount <= 0 || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
+                int bed = c.BedrockCount;
+                int gold = c.GoldCount;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed - gold, bed, gold, 0));
+            }
+            w.EndBatch();
+
+            // Early-game diamond pockets — small, findable without deep push
+            PlaceDiamondVein(w, sx - 0.02f, sy + 0.08f, sx + 0.04f, sy + 0.16f, 0.003f, seed + 401, 1, 2);
+            PlaceDiamondCluster(w, sx + 0.09f, sy + 0.11f, 0.008f, 3, seed + 402);
+            PlaceDiamondCluster(w, sx - 0.11f, sy + 0.14f, 0.007f, 2, seed + 403);
+
+            // Thin dense carpets
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                var c = w.Get(x, y);
+                if (c.DiamondCount <= 0 || c.IsUndamageableBorder || w.IsExcavated(x, y)) continue;
+                if (rng.NextDouble() > 0.72)
+                {
+                    int bed = c.BedrockCount;
+                    int gold = c.GoldCount;
+                    w.Set(x, y, FineTerrainWorld.FromCounts(4 - bed - gold, bed, gold, 0));
+                }
+            }
+            w.EndBatch();
+        }
+
+        public static void PlaceDiamondVein(FineTerrainWorld w, float nx0, float ny0, float nx1, float ny1,
+            float halfNorm, int seed, byte minGrade = 1, byte maxGrade = 3)
+        {
+            var rng = new System.Random(seed);
+            int ax = Mathf.RoundToInt(nx0 * w.Width);
+            int ay = Mathf.RoundToInt(ny0 * w.Height);
+            int bx = Mathf.RoundToInt(nx1 * w.Width);
+            int by = Mathf.RoundToInt(ny1 * w.Height);
+            int half = Mathf.Max(1, Mathf.RoundToInt(halfNorm * Mathf.Min(w.Width, w.Height)));
+            int steps = Mathf.Max(Mathf.Abs(bx - ax), Mathf.Abs(by - ay)) * 2 + 1;
+
+            w.BeginBatch();
+            for (int i = 0; i <= steps; i++)
+            {
+                float t = i / (float)Mathf.Max(1, steps);
+                float wobble = (float)(rng.NextDouble() - 0.5) * half * 0.7f;
+                int cx = Mathf.RoundToInt(Mathf.Lerp(ax, bx, t) + wobble);
+                int cy = Mathf.RoundToInt(Mathf.Lerp(ay, by, t) + wobble * 0.55f);
+                int r = Mathf.Max(1, half - rng.Next(0, Mathf.Max(1, half / 2)));
+                for (int oy = -r; oy <= r; oy++)
+                for (int ox = -r; ox <= r; ox++)
+                {
+                    if (ox * ox + oy * oy > r * r) continue;
+                    int x = cx + ox, y = cy + oy;
+                    if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                    var c = w.Get(x, y);
+                    if (c.IsUndamageableBorder) continue;
+                    // Prefer soft rock; light diamond sprinkle on gold edges ok
+                    int gold = c.GoldCount;
+                    int bed = c.BedrockCount >= 3 ? 0 : Mathf.Min(c.BedrockCount, 1);
+                    int dia = rng.Next(minGrade, maxGrade + 1);
+                    dia = Mathf.Min(dia, 4 - gold - bed);
+                    if (dia <= 0) continue;
+                    w.Set(x, y, FineTerrainWorld.FromCounts(4 - gold - bed - dia, bed, gold, dia));
+                }
+            }
+            w.EndBatch();
+        }
+
+        public static void PlaceDiamondCluster(FineTerrainWorld w, float nx, float ny, float radiusNorm,
+            int count, int seed)
+        {
+            var rng = new System.Random(seed);
+            int cx = Mathf.RoundToInt(nx * w.Width);
+            int cy = Mathf.RoundToInt(ny * w.Height);
+            int rad = Mathf.Max(2, Mathf.RoundToInt(radiusNorm * Mathf.Min(w.Width, w.Height)));
+            for (int i = 0; i < count; i++)
+            {
+                float ang = (float)(rng.NextDouble() * Mathf.PI * 2);
+                float dist = (float)rng.NextDouble() * rad;
+                int x = cx + Mathf.RoundToInt(Mathf.Cos(ang) * dist);
+                int y = cy + Mathf.RoundToInt(Mathf.Sin(ang) * dist);
+                if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+                int gold = c.GoldCount;
+                int bed = Mathf.Min(c.BedrockCount, 1);
+                int dia = rng.Next(1, 4);
+                dia = Mathf.Min(dia, 4 - gold - bed);
+                if (dia <= 0) continue;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - gold - bed - dia, bed, gold, dia));
+            }
+        }
+
+        /// <summary>
+        /// Soft corridors through bedrock so the mountain is challenging but navigable
+        /// without forced bedrock punches. Leaves gas / gold / diamond intact.
+        /// </summary>
+        public static void CarveSoftExplorationCorridors(FineTerrainWorld w, int startX, int startY, int seed)
+        {
+            float ox = seed * 0.13f;
+            float oy = seed * 0.29f;
+            w.BeginBatch();
+            for (int y = 1; y < w.Height - 1; y++)
+            for (int x = 1; x < w.Width - 1; x++)
+            {
+                if (w.IsExcavated(x, y) || w.IsGas(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+                if (c.IsPreciousOre) continue; // keep mineral finds
+
+                float pass = Mathf.PerlinNoise(x * 0.014f + ox, y * 0.014f + oy);
+                float branch = Mathf.PerlinNoise(x * 0.028f + oy, y * 0.028f + ox);
+                bool corridor = (pass > 0.40f && pass < 0.60f) || (branch > 0.46f && branch < 0.54f);
+                if (!corridor) continue;
+                if (c.BedrockCount < 2) continue;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4, 0, 0, 0));
+            }
+            w.EndBatch();
+
+            // Soft approach cone north of camp — early dig without wall of bedrock
+            FillSoftRockRect(w, startX - 22, startY + 1, 44, 36);
+            FillSoftRockRect(w, startX - 14, startY + 30, 28, 28);
         }
 
         /// <summary>
@@ -540,5 +698,104 @@ namespace DeepCore.FreeMovement
 
         public static void SprinkleDepthGold(FineTerrainWorld w, int startX, int startY, int seed) =>
             PlaceOrganicGold(w, startX, startY, seed);
+
+        /// <summary>
+        /// Full exploration mountain: organic bedrock, gold + diamond veins, gas pockets,
+        /// soft corridors to snake through. Early gold/diamond teases near camp.
+        /// </summary>
+        public static void BuildSocketMapStarterMaze(FineTerrainWorld w, int sx, int sy)
+        {
+            const int seed = 4242;
+            PlaceOrganicBedrock(w, seed);
+            CarveSoftExplorationCorridors(w, sx, sy, seed + 7);
+            PlaceOrganicGold(w, sx, sy, seed + 101);
+            PlaceOrganicDiamond(w, sx, sy, seed + 202);
+            PlaceGasPockets(w, sx, sy, seed + 303);
+
+            // Landmark diamond chamber deep north (reward for careful pathfinding)
+            FillDiamondRect(w, sx - 8, sy + 70, 16, 10, minGrade: 2, maxGrade: 4);
+            // Landmark gold chamber slightly offset
+            FillGoldRect(w, sx + 18, sy + 66, 18, 12, minGrade: 3, maxGrade: 4);
+            // Far gas diversion west — avoidable via soft corridors
+            FillSoftRockRect(w, sx - 72, sy + 40, 22, 22);
+            TryCarveGasPocket(w, sx - 64, sy + 48, rx: 5, ry: 4, stretch: 1f, rockBuffer: 4);
+        }
+
+        /// <summary>Force diggable soft rock (clears accidental bedrock from the corridor).</summary>
+        static void FillSoftRockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
+        {
+            for (int y = y0; y < y0 + height; y++)
+            for (int x = x0; x < x0 + width; x++)
+            {
+                if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+                if (w.IsGas(x, y)) continue;
+                if (c.IsPreciousOre) continue;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4, 0, 0, 0));
+            }
+        }
+
+        static void FillBedrockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
+        {
+            for (int y = y0; y < y0 + height; y++)
+            for (int x = x0; x < x0 + width; x++)
+            {
+                if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+                w.Set(x, y, FineTerrainWorld.FromCounts(0, 4, 0, 0));
+            }
+        }
+
+        static void FillGoldRect(
+            FineTerrainWorld w, int x0, int y0, int width, int height,
+            int minGrade, int maxGrade)
+        {
+            minGrade = Mathf.Clamp(minGrade, 1, 4);
+            maxGrade = Mathf.Clamp(maxGrade, minGrade, 4);
+            int midX = x0 + width / 2;
+            int midY = y0 + height / 2;
+            for (int y = y0; y < y0 + height; y++)
+            for (int x = x0; x < x0 + width; x++)
+            {
+                if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+
+                float dx = (x - midX) / (float)Mathf.Max(1, width * 0.5f);
+                float dy = (y - midY) / (float)Mathf.Max(1, height * 0.5f);
+                float edge = Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dy));
+                int gold = edge < 0.45f ? maxGrade
+                    : edge < 0.75f ? Mathf.Max(minGrade, maxGrade - 1)
+                    : minGrade;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - gold, 0, gold, 0));
+            }
+        }
+
+        static void FillDiamondRect(
+            FineTerrainWorld w, int x0, int y0, int width, int height,
+            int minGrade, int maxGrade)
+        {
+            minGrade = Mathf.Clamp(minGrade, 1, 4);
+            maxGrade = Mathf.Clamp(maxGrade, minGrade, 4);
+            int midX = x0 + width / 2;
+            int midY = y0 + height / 2;
+            for (int y = y0; y < y0 + height; y++)
+            for (int x = x0; x < x0 + width; x++)
+            {
+                if (!w.InBounds(x, y) || w.IsExcavated(x, y)) continue;
+                var c = w.Get(x, y);
+                if (c.IsUndamageableBorder) continue;
+
+                float dx = (x - midX) / (float)Mathf.Max(1, width * 0.5f);
+                float dy = (y - midY) / (float)Mathf.Max(1, height * 0.5f);
+                float edge = Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dy));
+                int dia = edge < 0.4f ? maxGrade
+                    : edge < 0.7f ? Mathf.Max(minGrade, maxGrade - 1)
+                    : minGrade;
+                w.Set(x, y, FineTerrainWorld.FromCounts(4 - dia, 0, 0, dia));
+            }
+        }
     }
 }

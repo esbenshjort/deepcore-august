@@ -3,12 +3,15 @@ using UnityEngine;
 namespace DeepCore.FreeMovement
 {
     /// <summary>
-    /// Full-map unlit overlay: gold (warm), bedrock (cool), gas (purple) for planning.
-    /// Subtle / translucent so the dig face still reads underneath.
-    /// Keep in sync when adding map features (minerals / pockets / hazards).
+    /// DEBUG / DEVELOPMENT overlay: omniscient Ground Truth (Bedrock, Gold, Gas, …).
+    /// Conceptually: <b>TRUTH VIEW</b> — not the future player-facing Tactical View.
+    /// Player Tactical View will later show Prospector evidence / belief only.
+    /// Class name kept as TacticalMapOverlay to avoid a risky rename; labels say TRUTH VIEW.
     /// </summary>
     public sealed class TacticalMapOverlay : MonoBehaviour
     {
+        public const string DebugViewName = "TRUTH VIEW";
+
         const int Ppu = 2;
 
         FineTerrainWorld _world;
@@ -26,6 +29,10 @@ namespace DeepCore.FreeMovement
         static readonly Color32 Gold2 = new(200, 160, 55, 75);
         static readonly Color32 Gold3 = new(220, 180, 65, 95);
         static readonly Color32 Gold4 = new(235, 200, 90, 115);
+        static readonly Color32 Dia1 = new(80, 140, 190, 60);
+        static readonly Color32 Dia2 = new(100, 170, 220, 80);
+        static readonly Color32 Dia3 = new(140, 200, 240, 100);
+        static readonly Color32 Dia4 = new(200, 235, 255, 125);
         static readonly Color32 GasPocket = new(140, 70, 200, 95);
         static readonly Color32 GasCore = new(170, 90, 230, 120);
 
@@ -37,7 +44,7 @@ namespace DeepCore.FreeMovement
 
         public static TacticalMapOverlay Attach(Transform parent, FineTerrainWorld world)
         {
-            var go = new GameObject("TacticalOverlay");
+            var go = new GameObject("TruthOverlay");
             go.transform.SetParent(parent, false);
             var fx = go.AddComponent<TacticalMapOverlay>();
             fx.Setup(world);
@@ -119,6 +126,18 @@ namespace DeepCore.FreeMovement
                     col = Excavated;
                 else if (cell.IsUndamageableBorder)
                     col = new Color32(24, 28, 36, 90);
+                else if (cell.DiamondCount > 0)
+                {
+                    col = cell.DiamondCount switch
+                    {
+                        1 => Dia1,
+                        2 => Dia2,
+                        3 => Dia3,
+                        _ => Dia4,
+                    };
+                    if (cell.BedrockCount >= 2)
+                        col = Lerp(col, BedrockLo, 0.22f);
+                }
                 else if (cell.GoldCount > 0)
                 {
                     col = cell.GoldCount switch

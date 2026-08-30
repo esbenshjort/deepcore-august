@@ -22,6 +22,7 @@ namespace DeepCore.FreeMovement
         }
 
         Stockpile _refinedGold;
+        Stockpile _refinedDiamond;
         Stockpile _dirt;
         SpriteRenderer _cellSr;
         SpriteRenderer _hoodSr;
@@ -35,20 +36,26 @@ namespace DeepCore.FreeMovement
         int _socketI;
         float _phaseT;
         int _totalGold;
+        int _totalDiamond;
         int _totalDirt;
         float _spin;
         bool[] _socketIsGold = new bool[4];
+        IndustrialSteamPlume _steamMain;
+        IndustrialSteamPlume _steamSide;
+        SpriteRenderer _powerLamp;
+        OreShimmer _cellShimmer;
 
         public Phase CurrentPhase => _phase;
         public bool IsBusy => _phase != Phase.Idle;
         public Vector2 WorkPoint => (Vector2)transform.localPosition + new Vector2(0f, -0.4f);
 
-        public event System.Action<int, int> BatchComplete;
+        public event System.Action<int, int, int> BatchComplete;
         public event System.Action FoundGold;
+        public event System.Action FoundDiamond;
         public event System.Action FoundDirt;
 
         public static WashMachine Spawn(Transform parent, Vector2 localPos,
-            Stockpile refinedGold, Stockpile dirt)
+            Stockpile refinedGold, Stockpile dirt, Stockpile refinedDiamond = null)
         {
             var go = new GameObject("WashMachine");
             go.transform.SetParent(parent, false);
@@ -57,29 +64,29 @@ namespace DeepCore.FreeMovement
             var body = new GameObject("Body");
             body.transform.SetParent(go.transform, false);
             var bsr = body.AddComponent<SpriteRenderer>();
-            bsr.sprite = MakeBodySprite();
+            bsr.sprite = YardVisualKit.WasherBody;
             bsr.sortingOrder = 20;
             DigVisualKit.ApplyLit(bsr);
-            body.transform.localScale = Vector3.one * 1.05f;
+            body.transform.localScale = Vector3.one * 0.95f;
 
             var drum = new GameObject("Drum");
             drum.transform.SetParent(go.transform, false);
             drum.transform.localPosition = new Vector3(0f, 0.02f, 0f);
             var dsr = drum.AddComponent<SpriteRenderer>();
-            dsr.sprite = MakeDrumSprite();
+            dsr.sprite = YardVisualKit.WasherDrum;
             dsr.sortingOrder = 21;
             DigVisualKit.ApplyLit(dsr);
-            drum.transform.localScale = Vector3.one * 0.38f;
+            drum.transform.localScale = Vector3.one * 0.42f;
 
             // Hood / cover — cell slides under this
             var hood = new GameObject("Hood");
             hood.transform.SetParent(go.transform, false);
             hood.transform.localPosition = new Vector3(0f, 0.18f, 0f);
             var hoodSr = hood.AddComponent<SpriteRenderer>();
-            hoodSr.sprite = MakeHoodSprite();
+            hoodSr.sprite = YardVisualKit.WasherHood;
             hoodSr.sortingOrder = 26; // above cell while under
             DigVisualKit.ApplyLit(hoodSr);
-            hood.transform.localScale = Vector3.one * 0.55f;
+            hood.transform.localScale = Vector3.one * 0.52f;
 
             var cellGo = new GameObject("CellInMachine");
             cellGo.transform.SetParent(go.transform, false);
@@ -90,6 +97,7 @@ namespace DeepCore.FreeMovement
 
             var wm = go.AddComponent<WashMachine>();
             wm._refinedGold = refinedGold;
+            wm._refinedDiamond = refinedDiamond;
             wm._dirt = dirt;
             wm._cellSr = csr;
             wm._hoodSr = hoodSr;
@@ -120,6 +128,34 @@ namespace DeepCore.FreeMovement
                 wm._out[i] = new OutPiece { Tr = fly.transform, Sr = fsr };
             }
 
+            // Exhaust stack on hood — wet heat steam when spinning
+            wm._steamMain = IndustrialSteamPlume.Attach(go.transform, new Vector2(0.08f, 0.42f), 32, 32)
+                .Configure(
+                    riseDir: new Vector2(0.12f, 1f),
+                    tint: new Color(0.95f, 0.97f, 1f, 1f),
+                    rate: 18f,
+                    spread: 0.1f,
+                    lift: 0.72f);
+            // Side relief valve — thinner jet
+            wm._steamSide = IndustrialSteamPlume.Attach(go.transform, new Vector2(-0.28f, 0.32f), 18, 31)
+                .Configure(
+                    riseDir: new Vector2(-0.35f, 0.9f),
+                    tint: new Color(0.9f, 0.94f, 0.98f, 1f),
+                    rate: 9f,
+                    spread: 0.07f,
+                    lift: 0.48f);
+
+            var power = new GameObject("PowerLamp");
+            power.transform.SetParent(go.transform, false);
+            power.transform.localPosition = new Vector3(0.32f, 0.38f, 0f);
+            var psr = power.AddComponent<SpriteRenderer>();
+            psr.sprite = DigVisualKit.Pixel;
+            psr.sortingOrder = 27;
+            DigVisualKit.ApplyLit(psr);
+            power.transform.localScale = Vector3.one * 0.055f;
+            psr.color = new Color(0.15f, 0.2f, 0.22f, 0.6f);
+            wm._powerLamp = psr;
+
             return wm;
         }
 
@@ -130,13 +166,15 @@ namespace DeepCore.FreeMovement
             _priority = priority;
             _socketI = 0;
             _totalGold = 0;
+            _totalDiamond = 0;
             _totalDirt = 0;
             _phase = Phase.Intake;
             _phaseT = 0f;
 
             int bedrock = cell.BedrockCount;
             int seed = cell.Sockets * 7919 + Mathf.RoundToInt(cell.Mass * 100f);
-            _cellSr.sprite = DigVisualKit.MakeWallChunk((byte)cell.GoldCount, bedrock, seed);
+            _cellSr.sprite = DigVisualKit.MakeWallChunk((byte)cell.GoldCount, bedrock, seed,
+                (byte)cell.DiamondCount);
             _cellSr.color = Color.white;
             _cellSr.sortingOrder = 25; // above hood while entering
             _cellSr.gameObject.SetActive(true);
@@ -144,9 +182,15 @@ namespace DeepCore.FreeMovement
             _cellSr.transform.localScale = Vector3.one * 0.16f;
             _cellSr.transform.localRotation = Quaternion.identity;
 
+            if (cell.IsDiamondOre || cell.IsGoldOre)
+            {
+                _cellShimmer = OreShimmer.Attach(_cellSr.transform, cell.IsDiamondOre,
+                    (byte)cell.GoldCount, (byte)cell.DiamondCount, 0.16f);
+            }
+
             for (int i = 0; i < 4; i++)
             {
-                SetLamp(i, cell.GetSocket(i), lit: false, successGold: false);
+                SetLamp(i, cell.GetSocket(i), lit: false, successPrecious: false);
                 _out[i].Active = false;
                 if (_out[i].Tr != null) _out[i].Tr.gameObject.SetActive(false);
             }
@@ -155,11 +199,27 @@ namespace DeepCore.FreeMovement
 
         public void Tick()
         {
-            if (_phase == Phase.Idle) return;
+            if (_phase == Phase.Idle)
+            {
+                SetSteam(false, 0f);
+                return;
+            }
 
-            _spin += Time.deltaTime * (_phase is Phase.UnderHood or Phase.SplitSocket ? 380f : 80f);
+            bool washing = _phase is Phase.UnderHood or Phase.SplitSocket;
+            _spin += Time.deltaTime * (washing ? 380f : 80f);
             if (_drumSr != null)
                 _drumSr.transform.localRotation = Quaternion.Euler(0f, 0f, _spin);
+
+            // Steam builds as ore hits the wash — peaks while sockets spit
+            float steam = _phase switch
+            {
+                Phase.Intake => Mathf.Clamp01(_phaseT / 0.45f) * 0.35f,
+                Phase.UnderHood => 0.55f + 0.35f * Mathf.Sin(_phaseT * 6f) * 0.5f + 0.2f,
+                Phase.SplitSocket => 0.85f + 0.15f * Mathf.Sin(_phaseT * 9f),
+                Phase.Done => Mathf.Lerp(0.5f, 0f, Mathf.Clamp01(_phaseT / 0.35f)),
+                _ => 0f,
+            };
+            SetSteam(steam > 0.05f, steam);
 
             _phaseT += Time.deltaTime;
 
@@ -180,6 +240,34 @@ namespace DeepCore.FreeMovement
             }
 
             TickFlies();
+        }
+
+        void SetSteam(bool on, float burst)
+        {
+            if (_steamMain != null)
+            {
+                _steamMain.Emitting = on;
+                _steamMain.Burst = burst;
+            }
+            if (_steamSide != null)
+            {
+                _steamSide.Emitting = on && burst > 0.4f;
+                _steamSide.Burst = burst * 0.7f;
+            }
+            if (_powerLamp != null)
+            {
+                if (on)
+                {
+                    float pulse = 0.65f + 0.35f * Mathf.Sin(Time.time * 8f);
+                    _powerLamp.color = new Color(0.25f, 0.95f, 0.45f, pulse);
+                    _powerLamp.transform.localScale = Vector3.one * (0.05f + 0.02f * burst);
+                }
+                else
+                {
+                    _powerLamp.color = new Color(0.15f, 0.2f, 0.22f, 0.55f);
+                    _powerLamp.transform.localScale = Vector3.one * 0.05f;
+                }
+            }
         }
 
         void TickIntake()
@@ -260,15 +348,23 @@ namespace DeepCore.FreeMovement
         void LaunchSocket(int i)
         {
             var kind = _current.GetSocket(i);
-            bool foundGold = RollSocket(kind);
-            _socketIsGold[i] = foundGold;
-            SetLamp(i, kind, lit: true, successGold: foundGold);
+            bool foundPrecious = RollSocket(kind);
+            bool foundGold = foundPrecious && kind == SocketKind.Gold;
+            bool foundDia = foundPrecious && kind == SocketKind.Diamond;
+            _socketIsGold[i] = foundGold || foundDia;
+            SetLamp(i, kind, lit: true, successPrecious: foundPrecious);
 
             if (foundGold)
             {
                 _totalGold++;
                 _refinedGold?.DepositRefinedGold(1);
                 FoundGold?.Invoke();
+            }
+            else if (foundDia)
+            {
+                _totalDiamond++;
+                _refinedDiamond?.DepositRefinedDiamond(1);
+                FoundDiamond?.Invoke();
             }
             else
             {
@@ -284,29 +380,46 @@ namespace DeepCore.FreeMovement
             piece.From = transform.TransformPoint(localFrom);
             Vector3 dest = foundGold && _refinedGold != null
                 ? _refinedGold.transform.position + new Vector3(0f, 0.1f, 0f)
-                : _dirt != null
-                    ? _dirt.transform.position + new Vector3(0f, 0.1f, 0f)
-                    : piece.From + Vector3.down * 0.5f;
+                : foundDia && _refinedDiamond != null
+                    ? _refinedDiamond.transform.position + new Vector3(0f, 0.1f, 0f)
+                    : _dirt != null
+                        ? _dirt.transform.position + new Vector3(0f, 0.1f, 0f)
+                        : piece.From + Vector3.down * 0.5f;
             piece.To = dest;
             piece.T = 0f;
-            piece.Gold = foundGold;
+            piece.Gold = foundGold || foundDia;
             piece.Active = true;
             piece.Tr.position = piece.From;
             piece.Tr.gameObject.SetActive(true);
             if (piece.Sr != null)
             {
-                piece.Sr.color = foundGold
-                    ? new Color(1f, 0.88f, 0.3f, 1f)
-                    : kind == SocketKind.Bedrock
-                        ? new Color(0.35f, 0.7f, 0.9f, 1f)
-                        : new Color(0.55f, 0.45f, 0.35f, 1f);
-                piece.Tr.localScale = Vector3.one * (foundGold ? 0.09f : 0.075f);
+                piece.Sr.color = foundDia
+                    ? new Color(0.75f, 0.92f, 1f, 1f)
+                    : foundGold
+                        ? new Color(1f, 0.88f, 0.3f, 1f)
+                        : kind == SocketKind.Bedrock
+                            ? new Color(0.35f, 0.7f, 0.9f, 1f)
+                            : new Color(0.55f, 0.45f, 0.35f, 1f);
+                piece.Tr.localScale = Vector3.one * (foundDia ? 0.1f : foundGold ? 0.09f : 0.075f);
+                if (foundDia)
+                    OreShimmer.Attach(piece.Tr, true, 0, 1, 0.1f);
+                else if (foundGold)
+                    OreShimmer.Attach(piece.Tr, false, 1, 0, 0.09f);
             }
             _out[i] = piece;
         }
 
         bool RollSocket(SocketKind kind)
         {
+            if (_priority == RefinerPriority.DiamondOre)
+            {
+                if (kind != SocketKind.Diamond) return false;
+                int n = _current.DiamondCount;
+                float chance = 0.55f;
+                if (n > 1) chance += (n - 1) * 0.1f;
+                return Random.value < chance;
+            }
+
             if (_priority == RefinerPriority.GoldOre)
             {
                 if (kind != SocketKind.Gold) return false;
@@ -316,8 +429,10 @@ namespace DeepCore.FreeMovement
                 return Random.value < chance;
             }
 
+            // OreRock / mixed wash — each socket rolls by type
             if (kind == SocketKind.Rock) return Random.value < 0.01f;
             if (kind == SocketKind.Gold) return Random.value < 0.5f;
+            if (kind == SocketKind.Diamond) return Random.value < 0.55f;
             return false;
         }
 
@@ -345,32 +460,41 @@ namespace DeepCore.FreeMovement
 
         void FinishBatch()
         {
-            int g = _totalGold, d = _totalDirt;
+            int g = _totalGold, d = _totalDirt, dia = _totalDiamond;
             _totalGold = 0;
+            _totalDiamond = 0;
             _totalDirt = 0;
             _phase = Phase.Idle;
             _phaseT = 0f;
+            SetSteam(false, 0f);
             if (_hoodSr != null)
                 _hoodSr.color = Color.white;
             for (int i = 0; i < 4; i++)
                 _socketLamp[i].color = new Color(0.2f, 0.25f, 0.3f, 0.45f);
-            BatchComplete?.Invoke(g, d);
+            BatchComplete?.Invoke(g, d, dia);
         }
 
-        void SetLamp(int i, SocketKind kind, bool lit, bool successGold)
+        void SetLamp(int i, SocketKind kind, bool lit, bool successPrecious)
         {
             if (_socketLamp[i] == null) return;
             Color c = kind switch
             {
                 SocketKind.Gold => new Color(1f, 0.82f, 0.25f, 0.95f),
+                SocketKind.Diamond => new Color(0.65f, 0.9f, 1f, 0.95f),
                 SocketKind.Bedrock => new Color(0.35f, 0.75f, 0.95f, 0.85f),
                 _ => new Color(0.55f, 0.48f, 0.4f, 0.85f),
             };
-            if (lit && successGold) c = new Color(1f, 0.95f, 0.45f, 1f);
+            if (lit && successPrecious) c = kind == SocketKind.Diamond
+                ? new Color(0.9f, 0.98f, 1f, 1f)
+                : new Color(1f, 0.95f, 0.45f, 1f);
             else if (lit) c *= 0.65f;
             else c *= 0.4f;
             _socketLamp[i].color = c;
             _socketLamp[i].transform.localScale = Vector3.one * (lit ? 0.07f : 0.048f);
+            if (lit && kind == SocketKind.Diamond && successPrecious)
+                OreShimmer.Attach(_socketLamp[i].transform, true, 0, 1, 0.07f);
+            else if (lit && kind == SocketKind.Gold && successPrecious)
+                OreShimmer.Attach(_socketLamp[i].transform, false, 1, 0, 0.07f);
         }
 
         public void ResetMachine()
@@ -378,7 +502,8 @@ namespace DeepCore.FreeMovement
             _phase = Phase.Idle;
             _phaseT = 0f;
             _socketI = 0;
-            _totalGold = _totalDirt = 0;
+            _totalGold = _totalDirt = _totalDiamond = 0;
+            SetSteam(false, 0f);
             if (_cellSr != null) _cellSr.gameObject.SetActive(false);
             for (int i = 0; i < 4; i++)
             {
@@ -388,64 +513,6 @@ namespace DeepCore.FreeMovement
                     _socketLamp[i].color = new Color(0.2f, 0.25f, 0.3f, 0.45f);
             }
             if (_hoodSr != null) _hoodSr.color = Color.white;
-        }
-
-        static Sprite MakeBodySprite()
-        {
-            const int s = 64;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                bool frame = x < 3 || x > s - 4 || y < 3 || y > s - 4;
-                bool tank = x > 12 && x < 52 && y > 14 && y < 48;
-                bool chuteL = x > 4 && x < 14 && y < 18;
-                bool chuteR = x > 50 && x < 60 && y < 18;
-                if (frame) tex.SetPixel(x, y, new Color(0.25f, 0.55f, 0.65f, 0.95f));
-                else if (tank) tex.SetPixel(x, y, new Color(0.07f, 0.11f, 0.15f, 0.94f));
-                else if (chuteL) tex.SetPixel(x, y, new Color(0.4f, 0.35f, 0.28f, 0.9f));
-                else if (chuteR) tex.SetPixel(x, y, new Color(0.7f, 0.55f, 0.2f, 0.9f));
-                else tex.SetPixel(x, y, Color.clear);
-            }
-            for (int x = 16; x < 48; x++)
-                tex.SetPixel(x, 28, new Color(0.2f, 0.7f, 0.85f, 0.5f));
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.35f), s);
-        }
-
-        static Sprite MakeHoodSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                float dx = (x - 15.5f) / 14f;
-                float dy = (y - 10f) / 9f;
-                if (dy < 0f || dx * dx + dy * dy > 1f) { tex.SetPixel(x, y, Color.clear); continue; }
-                tex.SetPixel(x, y, new Color(0.18f, 0.55f, 0.65f, 0.88f));
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.2f), s);
-        }
-
-        static Sprite MakeDrumSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                float dx = (x - 15.5f) / 12f;
-                float dy = (y - 15.5f) / 12f;
-                float d = dx * dx + dy * dy;
-                if (d > 1f) { tex.SetPixel(x, y, Color.clear); continue; }
-                var c = new Color(0.3f, 0.38f, 0.42f, 0.9f);
-                if (d > 0.72f) c = new Color(0.2f, 0.55f, 0.65f, 0.95f);
-                tex.SetPixel(x, y, c);
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
         }
     }
 }

@@ -6,7 +6,13 @@ namespace DeepCore.FreeMovement
 {
     public enum ScanDistance : byte { Short = 0, Medium = 1, Long = 2 }
     public enum ScanWidth : byte { Narrow = 0, Wide = 1 }
-    public enum ProspectorWorkMode : byte { Manual = 0, SurveyNearby = 1, AssistExcavator = 2 }
+    public enum ProspectorWorkMode : byte
+    {
+        Manual = 0,
+        SurveyNearby = 1,
+        AssistExcavator = 2,
+        Investigate = 3,
+    }
 
     /// <summary>
     /// Prospector with a soft quarter-circle radar (3 rows × 3 cols).
@@ -29,7 +35,9 @@ namespace DeepCore.FreeMovement
         FineTerrainWorld _world;
         ScanViewOverlay _scanView;
         FreeWorkerController _excavator;
+        RefinerPerson _refiner;
         ExcavatedPathfinder _nav;
+        ProspectorInvestigationLoop _investigation;
         float _radius = 0.1f;
         float _moveSpeed = 1.55f;
         float _autoMoveSpeed = 1.15f;
@@ -69,16 +77,34 @@ namespace DeepCore.FreeMovement
         int _focusX = -1, _focusY = -1;
         int _surveyRing;
 
+        // Stage 1–2: heavy scanner setup + scan assignment
+        ProspectorScannerEquipment _assignedScanner;
+        bool _scannerTravelActive;
+        bool _scannerSetupActive;
+        float _debugSetupSpeedMul = 1f;
+        float _debugScanSpeedMul = 1f;
+        ProspectorScanHistory _scanHistory;
+
         public ScanDistance Distance { get; private set; } = ScanDistance.Medium;
         public ScanWidth Width { get; private set; } = ScanWidth.Narrow;
         public ProspectorWorkMode WorkMode { get; private set; } = ProspectorWorkMode.Manual;
         public bool RadarOn { get; private set; }
         public bool IsScanning => _scanning;
+        public bool HasScannerAssignment => _assignedScanner != null;
+        public ProspectorScannerEquipment AssignedScanner => _assignedScanner;
+        public bool IsSettingUpScanner => _scannerSetupActive;
+        public ProspectorScanHistory ScanHistory => _scanHistory ??= new ProspectorScanHistory();
+
+        public void BindScanHistory(ProspectorScanHistory history)
+        {
+            if (history != null) _scanHistory = history;
+        }
 
         public Vector2 Position => transform.localPosition;
         public Vector2 Facing => _facingRoot != null ? (Vector2)_facingRoot.up : Vector2.up;
+        public FineTerrainWorld World => _world;
 
-        /// <summary>Body / Mind / Soul sheet. Data only — unused by scan logic yet.</summary>
+        /// <summary>Body / Mind / Soul sheet. Mechanics / HeavyLifting drive Stage-1 scanner setup.</summary>
         public WorkerStats Stats => _stats ??= new WorkerStats();
 
         [SerializeField] WorkerStats _stats = new WorkerStats();
@@ -90,8 +116,8 @@ namespace DeepCore.FreeMovement
             _ => 3,
         };
 
-        // Long range — slow, deliberate geology read (keep in sync with map features)
-        public float MaxRangeCells => 52.5f;
+        // Long range — keep in sync with heavy scanner Spec (√2 of prior 52.5 ≈ 2× area)
+        public float MaxRangeCells => 52.5f * 1.41421356f;
         public float ScanRangeCells => MaxRangeCells * (ActiveRows / (float)RowCount);
 
         public static ProspectorPerson Spawn(Transform parent, FineTerrainWorld world,
@@ -103,26 +129,20 @@ namespace DeepCore.FreeMovement
 
             var facing = new GameObject("Facing");
             facing.transform.SetParent(go.transform, false);
-
-            var body = new GameObject("Body");
-            body.transform.SetParent(facing.transform, false);
-            var sr = body.AddComponent<SpriteRenderer>();
-            sr.sprite = MakePersonSprite();
-            sr.sortingOrder = 42;
-            DigVisualKit.ApplyLit(sr);
-            body.transform.localScale = Vector3.one * 0.38f;
+            CrewVisualKit.AttachProspector(facing.transform, out _);
 
             var cone = new GameObject("RadarCone");
             cone.transform.SetParent(facing.transform, false);
 
+            // Tiny unlit fill only — forward light is the helmet cone
             var light = go.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(light,
-                new Color(0.55f, 0.85f, 1f),
-                intensity: 0.35f,
-                outer: 1.1f,
-                inner: 0.05f,
+                new Color(0.7f, 0.88f, 1f),
+                intensity: 0.04f,
+                outer: 0.22f,
+                inner: 0.02f,
                 shadows: false,
-                falloff: 0.7f);
+                falloff: 0.9f);
 
             var p = go.AddComponent<ProspectorPerson>();
             p._world = world;
@@ -137,15 +157,192 @@ namespace DeepCore.FreeMovement
         }
 
         public void BindExcavator(FreeWorkerController excavator) => _excavator = excavator;
+        public void BindRefiner(RefinerPerson refiner) => _refiner = refiner;
+
+        public FreeWorkerController Excavator => _excavator;
+        public RefinerPerson Refiner => _refiner;
+        public float BodyRadius => _radius;
+        public float InvestigationMoveSpeed => _autoMoveSpeed * 1.05f;
+
+        public ProspectorInvestigationLoop Investigation =>
+            _investigation ??= new ProspectorInvestigationLoop(this);
+
+        public string InvestigationDebugLine
+        {
+            get
+            {
+                if (WorkMode != ProspectorWorkMode.Investigate) return "";
+                var loop = Investigation;
+                string work = loop.PlayerWorkLabel;
+                string why = loop.PlayerReasonLabel;
+                if (loop.FocusAnomalyId > 0)
+                {
+                    return string.IsNullOrEmpty(why)
+                        ? $"#{loop.FocusAnomalyId:00} · {work}"
+                        : $"#{loop.FocusAnomalyId:00} · {work} · {why}";
+                }
+                return work;
+            }
+        }
+
+        public void SetInvestigationDesk(Vector2 deskWorld) => Investigation.SetDeskPosition(deskWorld);
+
+        public void NotifyInvestigationFinding() => InvestigationFinding?.Invoke();
+
+        public event System.Action InvestigationFinding;
+
+        /// <summary>Used by investigation loop — excavated-path follow.</summary>
+        public bool InvestigationNavFollow(Vector2 goal, float speed)
+        {
+            _nav ??= _world != null ? new ExcavatedPathfinder(_world) : null;
+            return NavFollow(goal, speed);
+        }
+
+        public Vector2 FindInvestigationStandNear(Vector2 target, bool preferBehind)
+        {
+            if (_world == null) return target;
+            float cs = _world.CellSize;
+            Vector2 away = (Position - target);
+            if (away.sqrMagnitude < 0.0001f) away = Vector2.left;
+            away.Normalize();
+            if (!preferBehind) away = -away;
+
+            float[] dist = { 0.55f, 0.85f, 1.15f, 0.4f };
+            float[] side = { 0f, 0.45f, -0.45f, 0.75f, -0.75f };
+            Vector2 perp = new(-away.y, away.x);
+            Vector2 best = target + away * 0.7f;
+            float bestScore = float.MaxValue;
+
+            for (int di = 0; di < dist.Length; di++)
+            for (int si = 0; si < side.Length; si++)
+            {
+                Vector2 cand = target + away * dist[di] + perp * (side[si] * cs * 3f);
+                var cell = _world.WorldToCell(cand);
+                if (!_world.InBounds(cell.x, cell.y) || !_world.IsTunnelOpen(cell.x, cell.y)) continue;
+                Vector2 center = _world.CellCenter(cell.x, cell.y);
+                if (_world.CircleHitsSolid(center, _radius)) continue;
+                float score = Vector2.Distance(center, target) + Vector2.Distance(center, Position) * 0.2f;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = center;
+                }
+            }
+            return best;
+        }
 
         public void SetWorkMode(ProspectorWorkMode mode)
         {
+            if (_assignedScanner != null && mode != ProspectorWorkMode.Manual)
+            {
+                DigHoodLog.Push("SCANNER | Work mode blocked — setup assignment active");
+                return;
+            }
             WorkMode = mode;
             _hasWorkGoal = false;
             _focusX = _focusY = -1;
             _workRetargetT = 0f;
             _workStudyT = 0f;
             _nav?.Invalidate();
+            if (mode != ProspectorWorkMode.Investigate)
+                Investigation.Reset();
+        }
+
+        /// <summary>
+        /// Assign travel + setup for a PACKED scanner. Prospector walks there (no teleport).
+        /// </summary>
+        public void AssignScannerSetup(ProspectorScannerEquipment scanner)
+        {
+            if (scanner == null || _world == null) return;
+            if (scanner.State != ProspectorScannerState.Packed)
+            {
+                DigHoodLog.Push($"SCANNER | Cannot assign — state {scanner.StateLabel}");
+                return;
+            }
+
+            CancelScannerAssignment(clearEquipment: false);
+            _assignedScanner = scanner;
+            _scannerTravelActive = true;
+            _scannerSetupActive = false;
+            _debugSetupSpeedMul = 1f;
+            SetWorkMode(ProspectorWorkMode.Manual);
+            SetRadar(false);
+            _nav ??= new ExcavatedPathfinder(_world);
+            _nav.Invalidate();
+            DigHoodLog.Push(
+                $"SCANNER | ASSIGN SETUP | travel to {scanner.Position.x:0.00},{scanner.Position.y:0.00}");
+        }
+
+        public void CancelScannerAssignment(bool clearEquipment = true)
+        {
+            if (_scannerSetupActive && _assignedScanner != null &&
+                _assignedScanner.State == ProspectorScannerState.SettingUp)
+            {
+                // Leave equipment SettingUp only if we were mid-setup — Stage 1 cancels back to Packed
+                _assignedScanner.BeginPackUp();
+            }
+            _assignedScanner = null;
+            _scannerTravelActive = false;
+            _scannerSetupActive = false;
+            _debugSetupSpeedMul = 1f;
+            if (clearEquipment) { /* reserved for future redeploy ownership */ }
+        }
+
+        /// <summary>Local setup-time multiplier (does not change global game clock).</summary>
+        public void SetDebugSetupSpeedMul(float mul) =>
+            _debugSetupSpeedMul = Mathf.Clamp(mul, 0.25f, 60f);
+
+        /// <summary>Local scan-time multiplier (does not change global game clock).</summary>
+        public void SetDebugScanSpeedMul(float mul) =>
+            _debugScanSpeedMul = Mathf.Clamp(mul, 0.25f, 120f);
+
+        public float DebugScanSpeedMul => _debugScanSpeedMul;
+
+        public void DebugForceFinishScannerSetup()
+        {
+            if (_assignedScanner == null) return;
+            if (_assignedScanner.State == ProspectorScannerState.Packed && _scannerTravelActive)
+            {
+                // Snap only for debug travel skip — normal path never teleports
+                TeleportTo(_assignedScanner.Position);
+                BeginAssignedScannerSetup();
+            }
+            _assignedScanner.DebugForceCompleteSetup();
+            if (_assignedScanner.State == ProspectorScannerState.Ready)
+            {
+                _scannerTravelActive = false;
+                _scannerSetupActive = false;
+                _assignedScanner = null;
+            }
+        }
+
+        void BeginAssignedScannerSetup()
+        {
+            if (_assignedScanner == null) return;
+            float hours = ProspectorScannerSetup.SetupDurationHours(Stats);
+            _assignedScanner.BeginSetup(Stats, "Prospector", hours);
+            _scannerTravelActive = false;
+            _scannerSetupActive = true;
+            Face(_assignedScanner.Facing);
+        }
+
+        /// <summary>
+        /// Advance scanner setup from the authoritative game-hour clock.
+        /// Call with hours advanced this frame (Time.deltaTime / SecondsPerGameHour).
+        /// Stage-2 scan progression is ticked by the runner on the field scanner.
+        /// </summary>
+        public void TickScannerGameTime(float gameHoursDelta)
+        {
+            if (!_scannerSetupActive || _assignedScanner == null) return;
+            if (_assignedScanner.State != ProspectorScannerState.SettingUp) return;
+            float dt = gameHoursDelta * _debugSetupSpeedMul;
+            if (_assignedScanner.TickSetupGameHours(dt))
+            {
+                _scannerSetupActive = false;
+                _scannerTravelActive = false;
+                // Kit stays in world as field scanner; release travel lock so radar Space works
+                _assignedScanner = null;
+            }
         }
 
         public void ResetTo(Vector2 pos)
@@ -157,6 +354,7 @@ namespace DeepCore.FreeMovement
             _pending.Clear();
             _hasWorkGoal = false;
             _focusX = _focusY = -1;
+            CancelScannerAssignment(clearEquipment: false);
             _nav?.Invalidate();
             if (_sweepCore != null) _sweepCore.gameObject.SetActive(false);
             if (_sweepGlow != null) _sweepGlow.gameObject.SetActive(false);
@@ -164,7 +362,23 @@ namespace DeepCore.FreeMovement
             RebuildConeMesh();
         }
 
-        public void TeleportTo(Vector2 pos) => ResetTo(pos);
+        /// <summary>Move only — keep WorkMode / investigation / scanner assignment across sleep.</summary>
+        public void SoftTeleport(Vector2 pos)
+        {
+            transform.localPosition = pos;
+            _nav?.Invalidate();
+            _hasWorkGoal = false;
+            _workRetargetT = 0f;
+        }
+
+        public bool CanReachPoint(Vector2 worldPos)
+        {
+            if (_world == null) return false;
+            _nav ??= new ExcavatedPathfinder(_world);
+            return _nav.TryFindPath(Position, worldPos, null);
+        }
+
+        public void TeleportTo(Vector2 pos) => SoftTeleport(pos);
 
         public void SetCrewVisible(bool on)
         {
@@ -223,6 +437,15 @@ namespace DeepCore.FreeMovement
             if (_scanCooldown > 0f) _scanCooldown -= Time.deltaTime;
             _pulse += Time.deltaTime;
 
+            // Scanner assignment: travel then wait while Setting Up (game-time driven elsewhere)
+            if (_assignedScanner != null && (_scannerTravelActive || _scannerSetupActive))
+            {
+                TickScannerAssignment(wasd);
+                if (_hudVisible && RadarOn)
+                    RebuildConeMesh();
+                return;
+            }
+
             bool playerDriving = !_scanning && wasd.sqrMagnitude > 0.01f;
             if (playerDriving)
             {
@@ -243,6 +466,40 @@ namespace DeepCore.FreeMovement
                 TickWorkMode();
         }
 
+        void TickScannerAssignment(Vector2 wasd)
+        {
+            // Allow player to walk away only if not mid-setup; otherwise hold position and face kit
+            if (_scannerSetupActive)
+            {
+                if (_assignedScanner != null)
+                    Face((_assignedScanner.Position - Position).normalized);
+                return;
+            }
+
+            if (!_scannerTravelActive || _assignedScanner == null) return;
+
+            // WASD can still nudge, but assignment keeps pulling toward scanner
+            if (wasd.sqrMagnitude > 0.01f)
+            {
+                Face(wasd.normalized);
+                Step(wasd.normalized, _moveSpeed * 0.85f);
+            }
+
+            _nav ??= new ExcavatedPathfinder(_world);
+            bool arrived = NavFollow(_assignedScanner.Position, _autoMoveSpeed * 1.1f);
+            if (!arrived)
+            {
+                float moved = Vector2.Distance(Position, _lastPos);
+                _lastPos = Position;
+                if (moved < 0.0015f) _stuckT += Time.deltaTime;
+                else _stuckT = 0f;
+                return;
+            }
+
+            _stuckT = 0f;
+            BeginAssignedScannerSetup();
+        }
+
         void TickWorkMode()
         {
             _workRetargetT -= Time.deltaTime;
@@ -257,7 +514,35 @@ namespace DeepCore.FreeMovement
                 case ProspectorWorkMode.AssistExcavator:
                     TickAssistExcavator();
                     break;
+                case ProspectorWorkMode.Investigate:
+                    Investigation.TickMovement();
+                    break;
             }
+        }
+
+        /// <summary>Game-hour tick for investigation dwells + auto-enter after scan freeze.</summary>
+        public void TickInvestigationGameTime(float gameHoursDelta, float absoluteGameHours)
+        {
+            TryAutoStartInvestigation();
+            if (WorkMode == ProspectorWorkMode.Investigate)
+                Investigation.TickGameHours(gameHoursDelta, absoluteGameHours);
+        }
+
+        void TryAutoStartInvestigation()
+        {
+            if (HasScannerAssignment) return;
+            if (WorkMode != ProspectorWorkMode.Manual && WorkMode != ProspectorWorkMode.Investigate)
+                return;
+            if (!Investigation.HasInvestigationWork()) return;
+            if (WorkMode == ProspectorWorkMode.Investigate) return;
+
+            // After heavy scan freezes with unresolved anomalies — continuous investigator
+            var scan = ScanHistory?.DisplayScan;
+            if (scan != null)
+                SetInvestigationDesk(scan.ScannerPosition);
+            SetWorkMode(ProspectorWorkMode.Investigate);
+            DigHoodLog.Push("PROSPECTOR | Investigation loop started (closest anomalies first)");
+            Debug.Log("[PROSPECTOR] Auto-entered Investigate mode after scan freeze");
         }
 
         void TickSurveyNearby()
@@ -350,8 +635,10 @@ namespace DeepCore.FreeMovement
                 float score = toHub;
                 score += Vector2.Distance(standPos, Position) * 0.35f;
 
-                // Strong bias: gold, then sealed gas hazards, then gold-adjacent walls
-                if (t.GoldCount > 0)
+                // Strong bias: diamonds, gold, then sealed gas hazards
+                if (t.DiamondCount > 0)
+                    score *= 0.18f - t.DiamondCount * 0.03f;
+                else if (t.GoldCount > 0)
                     score *= 0.25f - t.GoldCount * 0.04f;
                 else if (sealedGas)
                     score *= 0.4f;
@@ -417,7 +704,7 @@ namespace DeepCore.FreeMovement
                 if (dx == 0 && dy == 0) continue;
                 int x = cx + dx, y = cy + dy;
                 if (!_world.InBounds(x, y)) continue;
-                if (_world.Get(x, y).GoldCount > 0) n++;
+                if (_world.Get(x, y).IsPreciousOre) n++;
             }
             return n;
         }
@@ -458,7 +745,7 @@ namespace DeepCore.FreeMovement
 
             // Close-range geology — better than radar, still never certain
             const float reliability = 0.62f;
-            bool trueGold = !sealedGas && terrain.GoldCount > 0;
+            bool trueGold = !sealedGas && (terrain.GoldCount > 0 || terrain.DiamondCount > 0);
             bool nearGold = !trueGold && !sealedGas && CountNeighborGold(x, y) > 0;
             bool trueBed = !sealedGas && terrain.BedrockCount >= 2;
             bool trueGas = sealedGas;
@@ -474,7 +761,10 @@ namespace DeepCore.FreeMovement
             else if (Random.value < reliability)
             {
                 if (trueGold)
-                    reportGold = Random.value < (0.55f + terrain.GoldCount * 0.12f);
+                {
+                    int grade = Mathf.Max(terrain.GoldCount, terrain.DiamondCount);
+                    reportGold = Random.value < (0.55f + grade * 0.12f);
+                }
                 else if (nearGold)
                     reportGold = Random.value < 0.28f;
             }
@@ -499,23 +789,6 @@ namespace DeepCore.FreeMovement
                     _workBanterT = Random.Range(7f, 12f);
                 }
                 return;
-            }
-
-            if (_scanView != null)
-            {
-                if (!_scanView.Visible) _scanView.SetVisible(true);
-                float strength = reportGas
-                    ? Mathf.Clamp01(0.55f + Random.Range(-0.08f, 0.15f))
-                    : reportGold
-                        ? Mathf.Clamp01(0.4f + terrain.GoldCount * 0.15f + Random.Range(-0.12f, 0.18f))
-                        : Mathf.Clamp01(0.45f + Random.Range(-0.06f, 0.12f));
-                int jx = x + Random.Range(-1, 2);
-                int jy = y + Random.Range(-1, 2);
-                if (!_world.InBounds(jx, jy)) { jx = x; jy = y; }
-                _scanView.AddHint(jx, jy,
-                    gold: reportGold ? strength : 0f,
-                    bedrock: reportBed ? strength : 0f,
-                    gas: reportGas ? strength : 0f, bleed: 2);
             }
 
             if (reportGas) GasHintFound?.Invoke();
@@ -627,20 +900,6 @@ namespace DeepCore.FreeMovement
                 if (t.BedrockCount < 3 && Random.value < 0.18f)
                     _world.Damage(cell.x, cell.y);
 
-                // Soft scan whisper on hard / gold-ish face (uncertain)
-                if (_scanView != null && Random.value < 0.22f)
-                {
-                    bool maybeGold = t.GoldCount > 0 && Random.value < 0.4f;
-                    bool maybeBed = t.BedrockCount >= 2 && Random.value < 0.55f;
-                    if (maybeGold || maybeBed)
-                    {
-                        if (!_scanView.Visible) _scanView.SetVisible(true);
-                        _scanView.AddHint(cell.x, cell.y,
-                            gold: maybeGold ? 0.35f : 0f,
-                            bedrock: maybeBed ? 0.4f : 0f, bleed: 1);
-                    }
-                }
-
                 marked++;
                 if (marked >= 3) break;
             }
@@ -703,43 +962,8 @@ namespace DeepCore.FreeMovement
 
         void BeginScan()
         {
-            if (_scanView == null || _world == null) return;
-            if (!_scanView.Visible)
-                _scanView.SetVisible(true);
-            _scanView.ClearHints();
-            _saidGoldThisScan = false;
-            _saidBedThisScan = false;
-            _saidGasThisScan = false;
-
-            _scanOrigin = Position;
-            _scanFwd = Facing.normalized;
-            if (_scanFwd.sqrMagnitude < 0.01f) _scanFwd = Vector2.up;
-            _scanRangeWorld = ScanRangeCells * _world.CellSize;
-            _reliability = Distance switch
-            {
-                ScanDistance.Short => 0.88f,
-                ScanDistance.Medium => 0.74f,
-                _ => 0.58f,
-            };
-            // Slow deliberate sweep — info arrives late on purpose
-            _scanDuration = Distance switch
-            {
-                ScanDistance.Short => 2.8f,
-                ScanDistance.Medium => 4.8f,
-                _ => 7.6f,
-            };
-
-            CollectPendingHits();
-            _pending.Sort((a, b) => a.Dist01.CompareTo(b.Dist01));
-
-            _scanT = 0f;
-            _scanning = true;
-            _scanCooldown = _scanDuration + 0.55f;
-            ScanStarted?.Invoke();
-            if (_sweepCore != null) _sweepCore.gameObject.SetActive(true);
-            if (_sweepGlow != null) _sweepGlow.gameObject.SetActive(true);
-            if (_sweepFillMr != null) _sweepFillMr.enabled = true;
-            UpdateSweepArc(0.02f);
+            // Legacy handheld radar sweep + round Scan View zones retired.
+            // Heavy Scanner (Y place → C plan → Enter) is the only scan path.
         }
 
         void CollectPendingHits()
@@ -776,7 +1000,7 @@ namespace DeepCore.FreeMovement
                         if (_world.IsExcavated(cell.x, cell.y) && !trueGas) continue;
 
                         var terrain = _world.Get(cell.x, cell.y);
-                        bool trueGold = !trueGas && terrain.GoldCount > 0;
+                        bool trueGold = !trueGas && terrain.IsPreciousOre;
                         bool trueBed = !trueGas && terrain.BedrockCount >= 2;
 
                         float rowPos = u * ActiveRows;
@@ -788,7 +1012,8 @@ namespace DeepCore.FreeMovement
                         bool reportGas = false;
                         if (Random.value < _reliability)
                         {
-                            reportGold = trueGold && Random.value < (0.18f + terrain.GoldCount * 0.06f);
+                            int grade = Mathf.Max(terrain.GoldCount, terrain.DiamondCount);
+                            reportGold = trueGold && Random.value < (0.18f + grade * 0.06f);
                             // Precise bedrock: high true-positive, low noise
                             reportBed = trueBed && Random.value < (0.86f + (terrain.BedrockCount >= 3 ? 0.08f : 0f));
                             reportGas = trueGas && Random.value < 0.78f;
@@ -1048,7 +1273,7 @@ namespace DeepCore.FreeMovement
             for (int row = 0; row < RowCount; row++)
             {
                 float r = fullRange * ((row + 1) / (float)RowCount);
-                // Only the outer arc of the selected distance is "on"
+                // Only the outer arc of the selected distance — no ghost range rings
                 bool on = (row + 1) == ActiveRows;
                 SetArcPoints(_arcGlow[row], r, -half, half, arcRes);
                 SetArcPoints(_arcCore[row], r, -half, half, arcRes);
@@ -1056,9 +1281,8 @@ namespace DeepCore.FreeMovement
                 _arcCore[row].startColor = _arcCore[row].endColor = on ? activeCore : ghostCore;
                 _arcGlow[row].widthMultiplier = on ? glowW : 0.02f;
                 _arcCore[row].widthMultiplier = on ? coreW : 0.006f;
-                // Ghost rings stay enabled but nearly invisible so size context remains
-                _arcGlow[row].enabled = on || ghostCore.a > 0.001f;
-                _arcCore[row].enabled = true;
+                _arcGlow[row].enabled = on;
+                _arcCore[row].enabled = on;
             }
 
             for (int i = 0; i < ColCount + 1; i++)
@@ -1105,33 +1329,6 @@ namespace DeepCore.FreeMovement
             float r = deg * Mathf.Deg2Rad;
             float ca = Mathf.Cos(r), sa = Mathf.Sin(r);
             return new Vector2(v.x * ca - v.y * sa, v.x * sa + v.y * ca);
-        }
-
-        static Sprite MakePersonSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, new Color(0, 0, 0, 0));
-
-            void Fill(int x0, int y0, int w, int h, Color c)
-            {
-                for (int y = y0; y < y0 + h; y++)
-                for (int x = x0; x < x0 + w; x++)
-                    if (x >= 0 && y >= 0 && x < s && y < s) tex.SetPixel(x, y, c);
-            }
-
-            Fill(11, 2, 4, 8, new Color(0.12f, 0.18f, 0.2f));
-            Fill(17, 2, 4, 8, new Color(0.12f, 0.18f, 0.2f));
-            Fill(10, 9, 12, 12, new Color(0.2f, 0.55f, 0.55f));
-            Fill(6, 11, 4, 7, new Color(0.2f, 0.55f, 0.55f));
-            Fill(22, 11, 4, 7, new Color(0.2f, 0.55f, 0.55f));
-            Fill(12, 21, 8, 8, new Color(0.9f, 0.74f, 0.58f));
-            Fill(11, 26, 10, 5, new Color(0.85f, 0.9f, 0.95f));
-            Fill(14, 14, 4, 5, new Color(0.35f, 0.75f, 0.9f));
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.15f), s);
         }
 
         void OnValidate()

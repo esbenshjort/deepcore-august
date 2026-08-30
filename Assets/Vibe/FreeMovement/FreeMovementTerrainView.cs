@@ -37,6 +37,11 @@ namespace DeepCore.FreeMovement
         static readonly Color32 GoldC = new(220, 160, 42, 255);
         static readonly Color32 GoldBright = new(255, 210, 70, 255);
         static readonly Color32 GoldSpeck = new(255, 235, 140, 255);
+        static readonly Color32 DiaDeep = new(40, 90, 140, 255);
+        static readonly Color32 DiaMid = new(120, 190, 230, 255);
+        static readonly Color32 DiaHi = new(210, 240, 255, 255);
+        static readonly Color32 DiaFlash = new(255, 250, 255, 255);
+        static readonly Color32 DiaPink = new(220, 170, 210, 255);
         static readonly Color32 Clear = new(0, 0, 0, 0);
 
         public void Setup(FineTerrainWorld world, bool fogOfWarGold = false, bool strongCliffEdges = true)
@@ -232,7 +237,24 @@ namespace DeepCore.FreeMovement
                             if (goldN >= 4 && Hash(px * 13, py * 17) > 0.9f)
                                 rock = Lerp(rock, GoldSpeck, 0.5f * reveal);
                         }
-                        else if (cell.BedrockCount >= 2)
+
+                        // Diamonds: cool crystalline cyan / white facets
+                        int diaN = hideGas ? 0 : cell.DiamondCount;
+                        if (diaN > 0)
+                        {
+                            float t = diaN / 4f;
+                            rock = Lerp(rock, DiaDeep, (0.2f + t * 0.55f) * reveal);
+                            float facet = Hash(px * 17, py * 23);
+                            if (facet > 0.78f - t * 0.4f)
+                                rock = Lerp(rock, DiaMid, (0.4f + t * 0.4f) * reveal);
+                            if (facet > 0.9f - t * 0.25f)
+                                rock = Lerp(rock, DiaHi, (0.5f + t * 0.35f) * reveal);
+                            if (diaN >= 2 && Hash(px * 29, py * 7) > 0.88f)
+                                rock = Lerp(rock, DiaFlash, 0.55f * reveal);
+                            if (diaN >= 3 && Hash(px * 41, py * 13) > 0.86f)
+                                rock = Lerp(rock, DiaPink, 0.35f * reveal);
+                        }
+                        else if (goldN <= 0 && cell.BedrockCount >= 2)
                         {
                             // Cooler, denser look for bedrock-heavy cells
                             rock = Lerp(rock, new Color32(18, 20, 24, 255), 0.35f * reveal);
@@ -253,6 +275,86 @@ namespace DeepCore.FreeMovement
                     }
                 }
             }
+
+            // Chunky loose rock along dig-face floor edge (reference rubble lip)
+            StampBorderRubble(cx0, cy0, cx1, cy1, tw, th, w);
+        }
+
+        /// <summary>
+        /// Scatter angular rubble chips on open floor that touches solid wall —
+        /// breaks the hard floor/wall seam like the reference cavern lip.
+        /// </summary>
+        void StampBorderRubble(int cx0, int cy0, int cx1, int cy1, int tw, int th, int texW)
+        {
+            int texH = th * Ppu;
+            int x0 = Mathf.Max(1, cx0 - 1);
+            int y0 = Mathf.Max(1, cy0 - 1);
+            int x1 = Mathf.Min(tw - 2, cx1 + 1);
+            int y1 = Mathf.Min(th - 2, cy1 + 1);
+
+            for (int cy = y0; cy <= y1; cy++)
+            for (int cx = x0; cx <= x1; cx++)
+            {
+                // Only on excavated floor that touches solid rock
+                if (!_world.IsExcavated(cx, cy)) continue;
+                if (_world.IsGas(cx, cy) && !_world.IsFloorOpen(cx, cy)) continue;
+
+                int contacts = 0;
+                float pullX = 0f, pullY = 0f;
+                for (int oy = -1; oy <= 1; oy++)
+                for (int ox = -1; ox <= 1; ox++)
+                {
+                    if (ox == 0 && oy == 0) continue;
+                    int nx = cx + ox, ny = cy + oy;
+                    if (!_world.InBounds(nx, ny)) continue;
+                    if (_world.IsExcavated(nx, ny)) continue;
+                    contacts++;
+                    pullX += ox;
+                    pullY += oy;
+                }
+                if (contacts == 0) continue;
+
+                // Density: more chips when more wall neighbors (corner heaps)
+                int chips = contacts >= 3 ? 5 : (contacts == 2 ? 4 : 3);
+                float invLen = 1f / Mathf.Max(0.01f, Mathf.Sqrt(pullX * pullX + pullY * pullY));
+                float nxDir = pullX * invLen;
+                float nyDir = pullY * invLen;
+
+                float basePx = (cx + 0.5f) * Ppu;
+                float basePy = (cy + 0.5f) * Ppu;
+
+                for (int k = 0; k < chips; k++)
+                {
+                    int seed = cx * 73856093 ^ cy * 19349663 ^ (k * 83492791);
+                    float u = Hash01(cx, cy, 11 + k * 3);
+                    float v = Hash01(cx, cy, 29 + k * 5);
+                    // Bias toward the wall, spill a little onto floor
+                    float along = (u - 0.5f) * Ppu * 0.85f;
+                    float intoWall = (0.15f + v * 0.55f) * Ppu; // toward solid
+                    float intoFloor = (Hash01(cx, cy, 41 + k) - 0.35f) * Ppu * 0.35f;
+                    float px = basePx + nxDir * (intoWall * 0.35f - intoFloor) - nyDir * along;
+                    float py = basePy + nyDir * (intoWall * 0.35f - intoFloor) + nxDir * along;
+
+                    // Size mix: large / mid / pebble (reference)
+                    float sizeRoll = Hash01(cx, cy, 53 + k * 7);
+                    float radius = sizeRoll > 0.72f ? Ppu * 0.42f
+                        : sizeRoll > 0.35f ? Ppu * 0.28f
+                        : Ppu * 0.14f;
+                    radius *= 0.85f + Hash01(cx, cy, 61 + k) * 0.35f;
+
+                    DigVisualKit.StampRubbleChip(_floorPx, texW, texH, px, py, radius, seed);
+                }
+
+                // Extra pebbles hugging the seam
+                for (int k = 0; k < 2; k++)
+                {
+                    int seed = cx * 9973 ^ cy * 7919 ^ (k * 13 + 99);
+                    float u = Hash01(cx, cy, 77 + k);
+                    float px = basePx + nxDir * Ppu * 0.28f + (u - 0.5f) * Ppu * 0.7f;
+                    float py = basePy + nyDir * Ppu * 0.28f + (Hash01(cx, cy, 83 + k) - 0.5f) * Ppu * 0.7f;
+                    DigVisualKit.StampRubbleChip(_floorPx, texW, texH, px, py, Ppu * 0.11f, seed);
+                }
+            }
         }
 
         bool NearGold(int cx, int cy)
@@ -262,7 +364,7 @@ namespace DeepCore.FreeMovement
             {
                 int x = cx + ox, y = cy + oy;
                 if (!_world.InBounds(x, y)) continue;
-                if (_world.Get(x, y).GoldCount > 0) return true;
+                if (_world.Get(x, y).IsPreciousOre) return true;
             }
             return false;
         }

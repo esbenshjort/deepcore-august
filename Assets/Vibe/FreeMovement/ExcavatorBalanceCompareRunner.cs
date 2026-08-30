@@ -189,7 +189,7 @@ namespace DeepCore.FreeMovement
             var c = L.World.Get(x, y);
             Vector2 tip = L.Worker.DrillTip(0.35f);
             LoosePile.SpawnCellFromDrill(L.LooseRoot, tip, L.Worker.Facing, c,
-                L.World.CellSize, WorkerRadius);
+                L.World.CellSize, WorkerRadius, x, y);
         }
 
         void Update()

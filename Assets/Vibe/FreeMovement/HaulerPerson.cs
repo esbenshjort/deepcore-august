@@ -18,10 +18,12 @@ namespace DeepCore.FreeMovement
         DeliveryCalculator _calc;
         Vector2 _basecamp;
         float _radius = 0.055f;
-        float _moveSpeed = 1.15f;
+        float _moveSpeed = 0.68f;          // deliberate walk — heavy boots
         float _pickupRadius = 0.55f;
         int _maxCarryPiles = CartSlots;
-        float _pickupDuration = 0.35f;
+        float _pickupDuration = 1.15f;     // heave each cell into the cart
+        float _depositBaseDuration = 1.05f;
+        float _depositPerPiece = 0.22f;    // unloading a full cart takes real time
         float _seekStuckTimer;
         float _claimRecoverTimer;
 
@@ -46,6 +48,11 @@ namespace DeepCore.FreeMovement
         Vector2 _pathGoal;
         float _repathTimer;
 
+        LogisticsTrafficMap _traffic;
+        MineInfrastructure _infra;
+        Vector2Int _lastTrafficCell = new(int.MinValue, int.MinValue);
+        float _gameHours;
+
         // Briefly skip piles we couldn't reach
         readonly Dictionary<int, float> _softIgnore = new(16);
         static readonly List<int> _tmpIgnoreKeys = new(8);
@@ -53,6 +60,18 @@ namespace DeepCore.FreeMovement
         public Vector2 Position => transform.localPosition;
         public DeliveryCalculator Calculator => _calc;
         public bool PreferGold { get; private set; }
+
+        /// <summary>Debug: current track speed multiplier under the hauler (1 if no track).</summary>
+        public float DebugTrackSpeedMul =>
+            _infra != null ? _infra.TrackSpeedMulAt(Position) : 1f;
+
+        public void BindLogistics(LogisticsTrafficMap traffic, MineInfrastructure infra)
+        {
+            _traffic = traffic;
+            _infra = infra;
+        }
+
+        public void SetGameHours(float absoluteGameHours) => _gameHours = absoluteGameHours;
 
         /// <summary>Body / Mind / Soul sheet. Data only — unused by haul logic yet.</summary>
         public WorkerStats Stats => _stats ??= new WorkerStats();
@@ -63,7 +82,7 @@ namespace DeepCore.FreeMovement
         {
             if (PreferGold == on) return;
             PreferGold = on;
-            if (PreferGold && IsLive(_target) && !_target.IsGold)
+            if (PreferGold && IsLive(_target) && !_target.IsPrecious)
             {
                 _target.Claimed = false;
                 _target = null;
@@ -112,21 +131,22 @@ namespace DeepCore.FreeMovement
             ClearCargoSlots();
         }
 
-        public void TeleportTo(Vector2 pos)
+        public void SoftTeleport(Vector2 pos)
         {
+            // Keep PreferGold, cargo, and FSM — only drop live pile claim and repath
             if (_target != null)
             {
                 _target.Claimed = false;
                 _target = null;
             }
-            _state = State.Seek;
-            _depositTimer = 0f;
+            if (_state == State.PickUp)
+                _state = State.Seek;
             _pickupTimer = 0f;
-            if (_calc != null) _calc.ClearCarry();
             transform.localPosition = pos;
             InvalidatePath();
-            ClearCargoSlots();
         }
+
+        public void TeleportTo(Vector2 pos) => SoftTeleport(pos);
 
         public void SetCrewVisible(bool on)
         {
@@ -165,36 +185,26 @@ namespace DeepCore.FreeMovement
 
             var facing = new GameObject("Facing");
             facing.transform.SetParent(go.transform, false);
+            CrewVisualKit.AttachHauler(facing.transform, out _);
+            var body = facing.transform.Find("Body");
 
-            var body = new GameObject("Body");
-            body.transform.SetParent(facing.transform, false);
-            body.transform.localPosition = new Vector3(0f, 0.08f, 0f);
-            var sr = body.AddComponent<SpriteRenderer>();
-            sr.sprite = MakePersonSprite();
-            sr.sortingOrder = 38;
-            DigVisualKit.ApplyLit(sr);
-            body.transform.localScale = Vector3.one * 0.4f;
-
-            const float cartScale = 0.48f;
+            // Invisible load rack sits in the backpack hopper (sprite owns the crate silhouette).
+            const float cartScale = 0.42f;
             float pieceWorld = world.CellSize * 0.9f;
             float slotLocal = pieceWorld / cartScale;
 
             var cart = new GameObject("Cart");
             cart.transform.SetParent(facing.transform, false);
-            cart.transform.localPosition = new Vector3(0f, -0.28f, 0f);
-            var csr = cart.AddComponent<SpriteRenderer>();
-            csr.sprite = MakeCartSprite();
-            csr.sortingOrder = 37;
-            DigVisualKit.ApplyLit(csr);
+            cart.transform.localPosition = new Vector3(0f, -0.1f, 0f);
             cart.transform.localScale = Vector3.one * cartScale;
 
             var loadRoot = new GameObject("Load");
             loadRoot.transform.SetParent(cart.transform, false);
-            loadRoot.transform.localPosition = new Vector3(0f, 0.08f, 0f);
+            loadRoot.transform.localPosition = new Vector3(0f, 0.02f, 0f);
 
             var h = go.AddComponent<HaulerPerson>();
             h._facing = facing.transform;
-            h._body = body.transform;
+            h._body = body != null ? body : facing.transform;
             h._cart = cart.transform;
             h._pieceWorldSize = pieceWorld;
             h._slotLocalScale = slotLocal;
@@ -213,7 +223,7 @@ namespace DeepCore.FreeMovement
                 slot.transform.localScale = Vector3.one * slotLocal;
                 slot.transform.localRotation = Quaternion.Euler(0f, 0f, (i % 3 - 1) * 4f);
                 var ssr = slot.AddComponent<SpriteRenderer>();
-                ssr.sortingOrder = 39 + row;
+                ssr.sortingOrder = 44 + row;
                 DigVisualKit.ApplyLit(ssr);
                 slot.SetActive(false);
                 h._slotSr[i] = ssr;
@@ -221,12 +231,12 @@ namespace DeepCore.FreeMovement
 
             var light = go.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(light,
-                new Color(0.7f, 0.85f, 1f),
-                intensity: 0.2f,
-                outer: 0.75f,
-                inner: 0.04f,
+                new Color(0.75f, 0.88f, 1f),
+                intensity: 0.04f,
+                outer: 0.2f,
+                inner: 0.02f,
                 shadows: false,
-                falloff: 0.8f);
+                falloff: 0.9f);
 
             h.Setup(world, basecamp, calc);
             return h;
@@ -286,7 +296,7 @@ namespace DeepCore.FreeMovement
 
             if (IsLive(_target) && (_stuckFrames > 55 || _seekStuckTimer > 5f))
             {
-                SoftIgnore(_target, PreferGold && _target.IsGold ? 2.5f : 4f);
+                SoftIgnore(_target, PreferGold && _target.IsPrecious ? 2.5f : 4f);
                 _target.Claimed = false;
                 _target = null;
                 _stuckFrames = 0;
@@ -331,11 +341,14 @@ namespace DeepCore.FreeMovement
             }
 
             Vector2 pilePos = LoosePile.PileTerrainPos(_target, space);
-            float reachR = _target.IsGold ? _pickupRadius * 1.25f : _pickupRadius;
+            float reachR = _target.IsPrecious ? _pickupRadius * 1.25f : _pickupRadius;
             if ((pilePos - Position).sqrMagnitude <= reachR * reachR)
             {
                 _state = State.PickUp;
-                _pickupTimer = _pickupDuration;
+                // Rock is heavier to lift; precious still takes a solid heave
+                float heave = _target.IsPrecious ? 0.95f : 1.2f;
+                if (_target.Mass > 6f) heave += 0.2f;
+                _pickupTimer = _pickupDuration * heave;
                 _seekStuckTimer = 0f;
                 InvalidatePath();
                 return;
@@ -369,7 +382,8 @@ namespace DeepCore.FreeMovement
                 float score = d;
                 if (PreferGold)
                 {
-                    if (p.IsGold) score = d - p.GoldGrade * 50_000f;
+                    if (p.IsDiamond) score = d - 2_000_000f - p.DiamondGrade * 80_000f;
+                    else if (p.IsGold) score = d - p.GoldGrade * 50_000f;
                     else score = d + 1_000_000f;
                 }
                 if (score < bestScore)
@@ -420,7 +434,7 @@ namespace DeepCore.FreeMovement
             if (_pickupTimer > 0f) return;
 
             PlaceIntoCart(_target);
-            bool gold = _target.IsGold;
+            bool gold = _target.IsPrecious;
             _calc.AddCarry(_target);
             Destroy(_target.gameObject);
             _target = null;
@@ -441,7 +455,8 @@ namespace DeepCore.FreeMovement
             if ((_basecamp - Position).sqrMagnitude < 0.12f * 0.12f)
             {
                 _state = State.Deposit;
-                _depositTimer = 0.45f;
+                int pieces = Mathf.Max(_cargoCount, _calc != null ? _calc.CarryPiles : 0);
+                _depositTimer = _depositBaseDuration + pieces * _depositPerPiece;
                 InvalidatePath();
                 return;
             }
@@ -497,8 +512,10 @@ namespace DeepCore.FreeMovement
             for (int s = 0; s < 4; s++)
                 if (((pile.Sockets >> (s * 2)) & 0b11) == (int)SocketKind.Bedrock) bedrock++;
 
-            int seed = i * 7919 + pile.GoldGrade * 97 + (int)(pile.Mass * 10f);
-            sr.sprite = DigVisualKit.MakeWallChunk(pile.GoldGrade, bedrock, seed);
+            int seed = i * 7919 + pile.GoldGrade * 97 + pile.DiamondGrade * 53 + (int)(pile.Mass * 10f);
+            sr.sprite = DigVisualKit.MakeWallChunk(pile.GoldGrade, bedrock, seed, pile.DiamondGrade);
+            if (pile.IsDiamond || pile.IsGold)
+                OreShimmer.Attach(sr.transform, pile.IsDiamond, pile.GoldGrade, pile.DiamondGrade, 0.08f);
             sr.color = Color.white;
             sr.gameObject.SetActive(true);
             sr.transform.localScale = Vector3.one * (_slotLocalScale * 0.75f);
@@ -583,8 +600,19 @@ namespace DeepCore.FreeMovement
             Face(dir);
 
             float step = _moveSpeed * LoosePile.SpeedMulAt(pos, _radius) * Time.deltaTime;
-            if (_calc.CarryPiles > 0)
-                step *= Mathf.Lerp(1f, 0.75f, _cargoCount / (float)CartSlots);
+            if (_infra != null)
+                step *= _infra.TrackSpeedMulAt(pos);
+            // Loaded cart is a grind — fuller = slower (full cart ≈ 40% walk speed)
+            if (_calc != null && _calc.CarryPiles > 0)
+            {
+                float load = Mathf.Clamp01(_cargoCount / (float)CartSlots);
+                step *= Mathf.Lerp(0.72f, 0.40f, load);
+            }
+            else if (_state == State.Seek && IsLive(_target))
+            {
+                // Closing on a pile: settle into a careful approach
+                step *= 0.82f;
+            }
 
             float r = _radius;
             if (_stuckFrames > 6) r = _radius * 0.55f;
@@ -698,7 +726,19 @@ namespace DeepCore.FreeMovement
             Vector2 tryPos = pos + dir.normalized * step;
             if (_world.CircleHitsSolid(tryPos, r)) return false;
             transform.localPosition = tryPos;
+            RecordTrafficIfCellChanged();
             return true;
+        }
+
+        void RecordTrafficIfCellChanged()
+        {
+            if (_traffic == null || _world == null) return;
+            _traffic.SetGameHours(_gameHours);
+            var c = _world.WorldToCell(Position);
+            if (c.x == _lastTrafficCell.x && c.y == _lastTrafficCell.y) return;
+            _lastTrafficCell = c;
+            bool loaded = _cargoCount > 0 || (_calc != null && _calc.CarryPiles > 0);
+            _traffic.RecordVisit(c.x, c.y, loaded);
         }
 
         static bool IsLive(LoosePile p) => p != null && p;
@@ -711,63 +751,6 @@ namespace DeepCore.FreeMovement
                 _facing.localRotation,
                 Quaternion.Euler(0f, 0f, ang),
                 220f * Time.deltaTime);
-        }
-
-        static Sprite MakePersonSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, new Color(0, 0, 0, 0));
-
-            void Fill(int x0, int y0, int w, int h, Color c)
-            {
-                for (int y = y0; y < y0 + h; y++)
-                for (int x = x0; x < x0 + w; x++)
-                    if (x >= 0 && y >= 0 && x < s && y < s) tex.SetPixel(x, y, c);
-            }
-
-            Fill(11, 2, 4, 8, new Color(0.15f, 0.18f, 0.28f));
-            Fill(17, 2, 4, 8, new Color(0.15f, 0.18f, 0.28f));
-            Fill(10, 9, 12, 12, new Color(0.25f, 0.55f, 0.72f));
-            Fill(6, 11, 4, 7, new Color(0.25f, 0.55f, 0.72f));
-            Fill(22, 11, 4, 7, new Color(0.25f, 0.55f, 0.72f));
-            Fill(12, 21, 8, 8, new Color(0.92f, 0.75f, 0.58f));
-            Fill(11, 26, 10, 5, new Color(0.95f, 0.75f, 0.2f));
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.15f), s);
-        }
-
-        static Sprite MakeCartSprite()
-        {
-            const int s = 80;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, new Color(0, 0, 0, 0));
-
-            void Fill(int x0, int y0, int w, int h, Color c)
-            {
-                for (int y = y0; y < y0 + h; y++)
-                for (int x = x0; x < x0 + w; x++)
-                    if (x >= 0 && y >= 0 && x < s && y < s) tex.SetPixel(x, y, c);
-            }
-
-            Fill(6, 18, 68, 34, new Color(0.38f, 0.25f, 0.14f));
-            Fill(10, 21, 60, 26, new Color(0.52f, 0.36f, 0.18f));
-            Fill(14, 24, 52, 20, new Color(0.28f, 0.18f, 0.1f));
-            Fill(6, 50, 68, 4, new Color(0.3f, 0.2f, 0.11f));
-            Fill(6, 18, 4, 36, new Color(0.3f, 0.2f, 0.11f));
-            Fill(70, 18, 4, 36, new Color(0.3f, 0.2f, 0.11f));
-            Fill(34, 52, 12, 16, new Color(0.34f, 0.24f, 0.13f));
-            Fill(16, 4, 14, 14, new Color(0.16f, 0.14f, 0.12f));
-            Fill(50, 4, 14, 14, new Color(0.16f, 0.14f, 0.12f));
-            Fill(20, 8, 6, 6, new Color(0.4f, 0.38f, 0.35f));
-            Fill(54, 8, 6, 6, new Color(0.4f, 0.38f, 0.35f));
-
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.9f), s);
         }
 
         void OnValidate()

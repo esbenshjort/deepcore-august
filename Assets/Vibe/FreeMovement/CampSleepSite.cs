@@ -4,13 +4,20 @@ using UnityEngine.Rendering.Universal;
 namespace DeepCore.FreeMovement
 {
     /// <summary>
-    /// Tent + firepit sleep site. Crew returns here after shift (18:00) and emerges at 08:00.
+    /// Big wall tent + rooftop industrial AC. Crew returns here after shift (18:00)
+    /// and emerges at 08:00. AC runs continuously (steam + live power indicators).
     /// </summary>
     public sealed class CampSleepSite : MonoBehaviour
     {
         public Vector2 TentDoor { get; private set; }
         public Vector2 FirePos { get; private set; }
         public Transform Root => transform;
+
+        IndustrialSteamPlume _acSteam;
+        SpriteRenderer _powerLed;
+        SpriteRenderer _acFan;
+        Light2D _powerGlow;
+        float _fanSpin;
 
         public static CampSleepSite Spawn(Transform parent, Vector2 campCenter)
         {
@@ -23,58 +30,156 @@ namespace DeepCore.FreeMovement
 
         void Build(Vector2 campCenter)
         {
-            // West of wash pad — keep inside excavated camp (cellSize 0.1)
-            TentDoor = campCenter + new Vector2(-1.85f, -0.15f);
-            FirePos = campCenter + new Vector2(-1.15f, -1.05f);
+            // Farther west of wash pad — separate sleep cluster (cellSize 0.1)
+            TentDoor = campCenter + new Vector2(-3.85f, -0.35f);
+            FirePos = campCenter + new Vector2(-2.95f, -1.55f);
             transform.localPosition = Vector3.zero;
 
             // Packed dirt pad under camp
-            var pad = MakeSpriteGo("SleepPad", TentDoor + new Vector2(0.35f, -0.35f),
-                MakePadSprite(), 9, 1.55f);
+            var pad = MakeSpriteGo("SleepPad", TentDoor + new Vector2(0.55f, -0.35f),
+                YardVisualKit.SleepPad, 9, 2.35f);
             DigVisualKit.ApplyLit(pad);
 
-            // A-frame tent
-            var tent = MakeSpriteGo("Tent", TentDoor + new Vector2(0.15f, 0.05f),
-                MakeTentSprite(), 16, 0.95f);
+            // Large marquee / wall tent
+            var tent = MakeSpriteGo("Tent", TentDoor + new Vector2(0.45f, 0.1f),
+                YardVisualKit.Tent, 16, 1.55f);
             DigVisualKit.ApplyLit(tent);
 
-            // Door flap darker
-            var flap = MakeSpriteGo("TentFlap", TentDoor + new Vector2(-0.02f, -0.12f),
-                MakeFlapSprite(), 17, 0.42f);
+            // Door flap (west entry)
+            var flap = MakeSpriteGo("TentFlap", TentDoor + new Vector2(-0.15f, -0.05f),
+                YardVisualKit.TentFlap, 17, 0.55f);
             DigVisualKit.ApplyLit(flap);
 
-            // Bedroll hints outside
-            var bed = MakeSpriteGo("Bedrolls", TentDoor + new Vector2(0.55f, -0.35f),
-                MakeBedrollSprite(), 15, 0.55f);
+            // Soft warm interior spill from doorway
+            var doorGlow = MakeSpriteGo("DoorGlow", TentDoor + new Vector2(-0.05f, -0.02f),
+                DigVisualKit.LanternGlow, 15, 0.55f);
+            var unlit = Shader.Find("Sprites/Default");
+            if (unlit != null) doorGlow.sharedMaterial = new Material(unlit);
+            doorGlow.color = new Color(1f, 0.55f, 0.2f, 0.35f);
+
+            // Big rooftop AC / condenser on the east end of the tent
+            Vector2 acPos = TentDoor + new Vector2(1.15f, 0.35f);
+            var ac = MakeSpriteGo("Aircon", acPos, YardVisualKit.Aircon, 19, 0.72f);
+            DigVisualKit.ApplyLit(ac);
+
+            // Spinning fan disc (reads as powered condenser)
+            _acFan = MakeSpriteGo("AcFan", acPos + new Vector2(-0.06f, 0.02f),
+                DigVisualKit.Pixel, 20, 0.14f);
+            DigVisualKit.ApplyLit(_acFan);
+            _acFan.color = new Color(0.35f, 0.38f, 0.42f, 0.55f);
+            _acFan.transform.localScale = new Vector3(0.22f, 0.22f, 1f);
+
+            // Exhaust steam — continuous condensate plume
+            _acSteam = IndustrialSteamPlume.Attach(transform, acPos + new Vector2(0.18f, 0.22f), 36, 33)
+                .Configure(
+                    riseDir: new Vector2(0.25f, 1f),
+                    tint: new Color(0.88f, 0.94f, 1f, 1f),
+                    rate: 12f,
+                    spread: 0.11f,
+                    lift: 0.85f);
+            _acSteam.Emitting = true;
+            _acSteam.Burst = 0.72f;
+
+            // Power cable from AC toward tent / junction
+            Vector2 boxPos = TentDoor + new Vector2(0.85f, -0.55f);
+            var cable = MakeSpriteGo("PowerCable",
+                Vector2.Lerp(acPos, boxPos, 0.5f) + new Vector2(-0.05f, -0.15f),
+                YardVisualKit.PowerCable, 14, 0.55f);
+            DigVisualKit.ApplyLit(cable);
+            cable.transform.localRotation = Quaternion.Euler(0f, 0f, -38f);
+
+            var box = MakeSpriteGo("PowerBox", boxPos, YardVisualKit.PowerBox, 18, 0.28f);
+            DigVisualKit.ApplyLit(box);
+
+            _powerLed = MakeSpriteGo("PowerLed", boxPos + new Vector2(-0.04f, 0.02f),
+                DigVisualKit.Pixel, 21, 0.06f);
+            DigVisualKit.ApplyLit(_powerLed);
+            _powerLed.color = new Color(0.3f, 1f, 0.45f, 0.95f);
+
+            // Live electricity glow on the AC / power box
+            var lightGo = new GameObject("AcPowerLight");
+            lightGo.transform.SetParent(transform, false);
+            lightGo.transform.localPosition = acPos + new Vector2(0.05f, 0.05f);
+            _powerGlow = lightGo.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(_powerGlow,
+                new Color(0.35f, 0.85f, 1f),
+                intensity: 0.85f,
+                outer: 1.15f,
+                inner: 0.05f,
+                shadows: false,
+                falloff: 0.7f);
+
+            // Bedrolls near door
+            var bed = MakeSpriteGo("Bedrolls", TentDoor + new Vector2(0.35f, -0.7f),
+                YardVisualKit.Bedrolls, 15, 0.48f);
             DigVisualKit.ApplyLit(bed);
 
-            // Firepit ring + logs
-            var pit = MakeSpriteGo("FirePit", FirePos, MakeFirePitSprite(), 15, 0.48f);
+            // Cut-barrel firepit + logs
+            var pit = MakeSpriteGo("FirePit", FirePos, YardVisualKit.FirePit, 15, 0.52f);
             DigVisualKit.ApplyLit(pit);
 
-            var flame = MakeSpriteGo("Flame", FirePos + new Vector2(0f, 0.06f),
-                MakeFlameSprite(), 18, 0.32f);
-            DigVisualKit.ApplyLit(flame);
+            var flame = MakeSpriteGo("Flame", FirePos + new Vector2(0f, 0.07f),
+                YardVisualKit.Flame, 18, 0.36f);
+            if (unlit != null) flame.sharedMaterial = new Material(unlit);
+            flame.color = new Color(1f, 0.85f, 0.45f, 0.95f);
             flame.gameObject.AddComponent<CampFireFlicker>().Bind(flame);
 
-            // Warm fire light (no 2D shadows — keep lanterns cheap)
-            var lightGo = new GameObject("FireLight");
-            lightGo.transform.SetParent(transform, false);
-            lightGo.transform.localPosition = FirePos + new Vector2(0f, 0.05f);
-            var light = lightGo.AddComponent<Light2D>();
-            DigVisualKit.ConfigurePointLight(light,
-                new Color(1f, 0.45f, 0.18f),
-                intensity: 1.55f,
-                outer: 2.4f,
+            var ember = MakeSpriteGo("EmberGlow", FirePos + new Vector2(0f, 0.04f),
+                DigVisualKit.LanternGlow, 17, 0.45f);
+            if (unlit != null) ember.sharedMaterial = new Material(unlit);
+            ember.color = new Color(1f, 0.45f, 0.12f, 0.55f);
+
+            var fireLightGo = new GameObject("FireLight");
+            fireLightGo.transform.SetParent(transform, false);
+            fireLightGo.transform.localPosition = FirePos + new Vector2(0f, 0.05f);
+            var fireLight = fireLightGo.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(fireLight,
+                new Color(1f, 0.42f, 0.14f),
+                intensity: 1.65f,
+                outer: 2.55f,
                 inner: 0.08f,
                 shadows: false,
-                falloff: 0.68f);
-            lightGo.AddComponent<CosyLantern>().Init(lightGo.transform.position, light, 1.55f);
+                falloff: 0.66f);
+            fireLightGo.AddComponent<CosyLantern>().Init(fireLightGo.transform.position, fireLight, 1.65f);
 
-            // Small supply crate by tent
-            var crate = MakeSpriteGo("Crate", TentDoor + new Vector2(0.85f, -0.55f),
-                MakeCrateSprite(), 14, 0.28f);
+            // Supply crates
+            var crate = MakeSpriteGo("Crate", TentDoor + new Vector2(1.35f, -0.75f),
+                YardVisualKit.Crate, 14, 0.32f);
             DigVisualKit.ApplyLit(crate);
+            var crate2 = MakeSpriteGo("Crate2", TentDoor + new Vector2(1.55f, -0.45f),
+                YardVisualKit.Crate, 14, 0.26f);
+            DigVisualKit.ApplyLit(crate2);
+            crate2.transform.localRotation = Quaternion.Euler(0f, 0f, 12f);
+
+            DigVisualKit.PlaceLantern(transform,
+                TentDoor + new Vector2(1.75f, -0.95f), local: true, intensity: 1.85f);
+        }
+
+        void Update()
+        {
+            // Condenser fan spin + living power indicators
+            _fanSpin += Time.deltaTime * 220f;
+            if (_acFan != null)
+                _acFan.transform.localRotation = Quaternion.Euler(0f, 0f, _fanSpin);
+
+            float pulse = 0.7f + 0.3f * Mathf.Sin(Time.time * 5.5f);
+            if (_powerLed != null)
+            {
+                _powerLed.color = new Color(0.25f, 1f, 0.4f, pulse);
+                float s = 0.05f + 0.015f * pulse;
+                _powerLed.transform.localScale = Vector3.one * s;
+            }
+
+            if (_powerGlow != null)
+                _powerGlow.intensity = 0.7f + 0.25f * Mathf.Sin(Time.time * 3.2f);
+
+            // AC load breathes — occasional harder blast of condensate
+            if (_acSteam != null)
+            {
+                float load = 0.55f + 0.3f * Mathf.Sin(Time.time * 0.35f)
+                             + 0.12f * Mathf.Sin(Time.time * 1.7f);
+                _acSteam.Burst = Mathf.Clamp01(load);
+            }
         }
 
         SpriteRenderer MakeSpriteGo(string name, Vector2 local, Sprite sprite, int order, float scale)
@@ -87,169 +192,6 @@ namespace DeepCore.FreeMovement
             sr.sprite = sprite;
             sr.sortingOrder = order;
             return sr;
-        }
-
-        static Sprite MakePadSprite()
-        {
-            const int s = 64;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                float dx = (x - 31.5f) / 30f;
-                float dy = (y - 28f) / 22f;
-                float d = dx * dx + dy * dy;
-                if (d > 1f) { tex.SetPixel(x, y, Color.clear); continue; }
-                float n = Mathf.PerlinNoise(x * 0.18f, y * 0.18f);
-                var c = Color.Lerp(new Color(0.32f, 0.24f, 0.14f, 0.9f),
-                    new Color(0.42f, 0.32f, 0.18f, 0.88f), n);
-                if (d > 0.82f) c.a *= 0.55f;
-                tex.SetPixel(x, y, c);
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.4f), s);
-        }
-
-        static Sprite MakeTentSprite()
-        {
-            const int s = 64;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, Color.clear);
-
-            // Canvas triangle
-            for (int y = 8; y < 56; y++)
-            {
-                float t = (y - 8) / 48f;
-                int half = Mathf.RoundToInt(Mathf.Lerp(2, 26, t));
-                int mid = 32;
-                for (int x = mid - half; x <= mid + half; x++)
-                {
-                    float edge = Mathf.Abs(x - mid) / (float)Mathf.Max(1, half);
-                    Color c;
-                    if (edge > 0.88f)
-                        c = new Color(0.22f, 0.18f, 0.12f, 0.95f); // seam
-                    else if (y < 18)
-                        c = new Color(0.45f, 0.28f, 0.12f, 0.95f); // peak
-                    else
-                        c = Color.Lerp(new Color(0.55f, 0.38f, 0.18f, 0.94f),
-                            new Color(0.4f, 0.26f, 0.12f, 0.94f), edge);
-                    // stripe
-                    if ((y + x) % 9 == 0) c *= 0.9f;
-                    tex.SetPixel(x, y, c);
-                }
-            }
-            // Pole
-            for (int y = 6; y < 58; y++)
-            for (int x = 31; x <= 33; x++)
-                tex.SetPixel(x, y, new Color(0.25f, 0.18f, 0.1f, 1f));
-
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.15f), s);
-        }
-
-        static Sprite MakeFlapSprite()
-        {
-            const int s = 24;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                if (x < 4 || x > 19 || y < 2 || y > 20) { tex.SetPixel(x, y, Color.clear); continue; }
-                tex.SetPixel(x, y, new Color(0.18f, 0.12f, 0.08f, 0.92f));
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.2f), s);
-        }
-
-        static Sprite MakeBedrollSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, Color.clear);
-            for (int i = 0; i < 2; i++)
-            {
-                int y0 = 8 + i * 10;
-                for (int y = y0; y < y0 + 7; y++)
-                for (int x = 4; x < 28; x++)
-                {
-                    var c = i == 0
-                        ? new Color(0.25f, 0.35f, 0.4f, 0.9f)
-                        : new Color(0.35f, 0.28f, 0.18f, 0.9f);
-                    if (x < 6 || x > 25) c *= 0.7f;
-                    tex.SetPixel(x, y, c);
-                }
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
-        }
-
-        static Sprite MakeFirePitSprite()
-        {
-            const int s = 40;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                float dx = (x - 19.5f) / 16f;
-                float dy = (y - 19.5f) / 16f;
-                float d = Mathf.Sqrt(dx * dx + dy * dy);
-                if (d > 1f || d < 0.45f) { tex.SetPixel(x, y, Color.clear); continue; }
-                // Stone ring
-                float a = Mathf.Atan2(dy, dx);
-                float bump = 0.5f + 0.5f * Mathf.Sin(a * 5f);
-                var c = Color.Lerp(new Color(0.35f, 0.32f, 0.28f), new Color(0.5f, 0.45f, 0.38f), bump);
-                tex.SetPixel(x, y, new Color(c.r, c.g, c.b, 0.95f));
-            }
-            // Ash center
-            for (int y = 14; y < 26; y++)
-            for (int x = 14; x < 26; x++)
-            {
-                float dx = (x - 19.5f) / 6f, dy = (y - 19.5f) / 6f;
-                if (dx * dx + dy * dy > 1f) continue;
-                tex.SetPixel(x, y, new Color(0.12f, 0.1f, 0.08f, 0.85f));
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
-        }
-
-        static Sprite MakeFlameSprite()
-        {
-            const int s = 24;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                float dx = (x - 11.5f) / 6f;
-                float dy = (y - 6f) / 14f;
-                float d = dx * dx + dy * dy * 0.55f;
-                if (d > 1f || y < 2) { tex.SetPixel(x, y, Color.clear); continue; }
-                float t = 1f - d;
-                var c = Color.Lerp(new Color(1f, 0.25f, 0.05f, 0.7f),
-                    new Color(1f, 0.85f, 0.35f, 0.95f), t);
-                tex.SetPixel(x, y, c);
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.15f), s);
-        }
-
-        static Sprite MakeCrateSprite()
-        {
-            const int s = 20;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-            {
-                if (x < 2 || y < 2 || x > 17 || y > 17)
-                    tex.SetPixel(x, y, new Color(0.2f, 0.14f, 0.08f, 1f));
-                else
-                    tex.SetPixel(x, y, new Color(0.42f, 0.3f, 0.16f, 1f));
-            }
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
         }
     }
 
@@ -271,9 +213,12 @@ namespace DeepCore.FreeMovement
         {
             if (_sr == null) return;
             _t += Time.deltaTime * 7f;
-            float s = 1f + 0.12f * Mathf.Sin(_t) + 0.06f * Mathf.Sin(_t * 2.3f);
-            _sr.transform.localScale = _baseScale * s;
-            float a = 0.75f + 0.2f * Mathf.Sin(_t * 1.7f);
+            float s = 1f + 0.14f * Mathf.Sin(_t) + 0.07f * Mathf.Sin(_t * 2.3f);
+            _sr.transform.localScale = new Vector3(
+                _baseScale.x * (0.92f + 0.08f * Mathf.Sin(_t * 1.4f)),
+                _baseScale.y * s,
+                _baseScale.z);
+            float a = 0.78f + 0.2f * Mathf.Sin(_t * 1.7f);
             var c = _sr.color;
             c.a = a;
             _sr.color = c;

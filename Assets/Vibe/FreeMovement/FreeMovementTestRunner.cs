@@ -185,25 +185,7 @@ namespace DeepCore.FreeMovement
 
         void PlaceLantern(Transform root, Vector2 pos)
         {
-            var go = new GameObject("Lantern");
-            go.transform.SetParent(root);
-            go.transform.position = pos;
-
-            var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = MakeLanternSprite();
-            sr.sortingOrder = 25;
-            go.transform.localScale = Vector3.one * 0.28f;
-
-            var light = go.AddComponent<Light2D>();
-            light.lightType = Light2D.LightType.Point;
-            light.color = new Color(1f, 0.62f, 0.28f);
-            light.intensity = 1.55f;
-            light.pointLightInnerRadius = 0.15f;
-            light.pointLightOuterRadius = 3.2f;
-            light.falloffIntensity = 0.4f;
-
-            var cosy = go.AddComponent<CosyLantern>();
-            cosy.Init(pos, light, 1.55f);
+            DigVisualKit.PlaceLantern(root, pos, local: false, intensity: 1.55f);
         }
 
         void SpawnWorker(Transform root)
@@ -243,7 +225,7 @@ namespace DeepCore.FreeMovement
             var c = _world.Get(x, y);
             // Land under the excavator body (slight scatter) — not at the dug cell
             Vector2 under = _worker.Position + Random.insideUnitCircle * (_worker.Radius * 0.4f);
-            LoosePile.SpawnCellFromDrill(_looseRoot, under, _worker.Facing, c, _world.CellSize, _worker.Radius);
+            LoosePile.SpawnCellFromDrill(_looseRoot, under, _worker.Facing, c, _world.CellSize, _worker.Radius, x, y);
         }
 
         Transform BuildFootprintRing(Transform parent)
@@ -496,21 +478,6 @@ namespace DeepCore.FreeMovement
                 tex.SetPixel(x, y, Color.white);
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, 4, 4), new Vector2(0.5f, 0.5f), 4f);
-        }
-
-        static Sprite MakeLanternSprite()
-        {
-            const int s = 32;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-            for (int y = 0; y < s; y++)
-            for (int x = 0; x < s; x++)
-                tex.SetPixel(x, y, new Color(0, 0, 0, 0));
-            // cage
-            Fill(tex, 12, 8, 8, 14, new Color(0.35f, 0.28f, 0.18f));
-            Fill(tex, 13, 10, 6, 8, new Color(1f, 0.7f, 0.25f, 0.95f));
-            Fill(tex, 14, 22, 4, 4, new Color(0.55f, 0.45f, 0.25f));
-            tex.Apply();
-            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
         }
 
         static Sprite MakeGoalSprite()

@@ -1,10 +1,12 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 namespace DeepCore.FreeMovement
 {
     /// <summary>
     /// Drill points with digger. Dig dust + heat smoke (dark grey) + overheat sparks.
     /// Smoke sits between floor and rock-wall layers, drifts back into open tunnel only.
+    /// Subtle green status bulbs pulse on the hazard suit.
     /// </summary>
     public sealed class DrillerVisual : MonoBehaviour
     {
@@ -22,8 +24,11 @@ namespace DeepCore.FreeMovement
         float _sparkTimer;
         Vector3 _bodyBase;
         Vector3 _drillBase;
+        Light2D[] _statusBulbs;
+        float[] _bulbBaseIntensity;
 
-        public void Init(FreeWorkerController worker, Transform drill, Transform body)
+        public void Init(FreeWorkerController worker, Transform drill, Transform body,
+            Light2D[] statusBulbs = null)
         {
             _worker = worker;
             _drill = drill;
@@ -32,6 +37,14 @@ namespace DeepCore.FreeMovement
             _drillBase = drill != null ? drill.localPosition : Vector3.zero;
             if (_drill != null)
                 _drill.localRotation = Quaternion.identity;
+
+            _statusBulbs = statusBulbs;
+            if (_statusBulbs != null)
+            {
+                _bulbBaseIntensity = new float[_statusBulbs.Length];
+                for (int i = 0; i < _statusBulbs.Length; i++)
+                    _bulbBaseIntensity[i] = _statusBulbs[i] != null ? _statusBulbs[i].intensity : 0.14f;
+            }
 
             // World-root smoke so it doesn't rotate with the digger mid-flight
             _smokeRoot = new GameObject("DrillSmoke").transform;
@@ -76,6 +89,8 @@ namespace DeepCore.FreeMovement
                 _drill.localPosition = Vector3.Lerp(_drill.localPosition, _drillBase, 14f * Time.deltaTime);
             }
 
+            TickStatusBulbs(digging, heat);
+
             if (digging)
             {
                 _digSmokeTimer -= Time.deltaTime;
@@ -96,6 +111,25 @@ namespace DeepCore.FreeMovement
             {
                 _heatSmokeTimer = 0f;
                 _sparkTimer = 0f;
+            }
+        }
+
+        void TickStatusBulbs(bool digging, ExcavatorHeatZone heat)
+        {
+            if (_statusBulbs == null || _bulbBaseIntensity == null) return;
+            float t = Time.time;
+            for (int i = 0; i < _statusBulbs.Length; i++)
+            {
+                var light = _statusBulbs[i];
+                if (light == null) continue;
+                float baseI = _bulbBaseIntensity[i];
+                // Slow independent breath — stay subtle
+                float phase = t * (1.1f + i * 0.17f) + i * 1.7f;
+                float breath = 0.82f + 0.18f * Mathf.Sin(phase);
+                if (digging) breath += 0.06f * Mathf.Sin(t * 9f + i);
+                if (heat == ExcavatorHeatZone.Overheated)
+                    breath *= 0.7f + 0.3f * Mathf.Sin(t * 14f + i); // nervous flicker
+                light.intensity = baseI * breath;
             }
         }
 
