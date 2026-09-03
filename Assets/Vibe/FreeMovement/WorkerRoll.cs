@@ -143,6 +143,17 @@ namespace DeepCore.FreeMovement
             return Random.Range(DieMin, DieMax + 1);
         }
 
+        /// <summary>
+        /// Continuous [0,1) for weighted picks (action/response selection). Not a D20 —
+        /// Soul weights decide personality; this only samples the weight distribution.
+        /// </summary>
+        public static float NextUnit()
+        {
+            if (_useSeeded && _seededRng != null)
+                return (float)_seededRng.NextDouble();
+            return Random.value;
+        }
+
         static WorkerRollResult Resolve(
             int d20,
             WorkerStats stats,

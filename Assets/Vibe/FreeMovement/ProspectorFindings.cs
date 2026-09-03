@@ -35,6 +35,9 @@ namespace DeepCore.FreeMovement
         public string AssessmentTitle = "";
         public AssessmentConfidence Confidence = AssessmentConfidence.Low;
         public bool HasConfidence;
+        /// <summary>Worker who generated this event (frozen). 0 = unknown / legacy.</summary>
+        public int WorkerId;
+        public string WorkerDisplayName = "";
         public readonly List<string> EvidenceClues = new(4);
 
         public string ShortLabel => Message;
@@ -63,6 +66,8 @@ namespace DeepCore.FreeMovement
         int _nextId = 1;
         float _lastAnyFindingHours = -999f;
         float _gameHours;
+        int _authorWorkerId;
+        string _authorDisplayName = "";
 
         public IReadOnlyList<ProspectorFinding> All => _all;
         public IReadOnlyCollection<ProspectorFinding> Recent => _recent;
@@ -88,6 +93,19 @@ namespace DeepCore.FreeMovement
 
         public void SetGameHours(float absoluteGameHours) => _gameHours = absoluteGameHours;
 
+        /// <summary>Stamp author on newly appended findings (Stage C attribution).</summary>
+        public void SetAuthor(WorkerRuntime worker)
+        {
+            if (worker == null)
+            {
+                _authorWorkerId = 0;
+                _authorDisplayName = "";
+                return;
+            }
+            _authorWorkerId = worker.WorkerId;
+            _authorDisplayName = worker.DisplayName ?? "";
+        }
+
         public void Clear()
         {
             _all.Clear();
@@ -95,6 +113,8 @@ namespace DeepCore.FreeMovement
             _announce.Clear();
             _nextId = 1;
             _lastAnyFindingHours = -999f;
+            _authorWorkerId = 0;
+            _authorDisplayName = "";
             HighlightAnomalyId = -1;
             HighlightScanId = -1;
             FindingsChanged?.Invoke();
@@ -402,6 +422,11 @@ namespace DeepCore.FreeMovement
 
             f.FindingId = _nextId++;
             f.GameTimestampHours = _gameHours;
+            if (f.WorkerId <= 0 && _authorWorkerId > 0)
+            {
+                f.WorkerId = _authorWorkerId;
+                f.WorkerDisplayName = _authorDisplayName;
+            }
             _all.Add(f);
             while (_all.Count > HistoryCapacity)
                 _all.RemoveAt(0);

@@ -6,9 +6,13 @@ namespace DeepCore.FreeMovement
     /// <summary>
     /// Runs the wash machine: pulls intact ore cells from stockpiles, processes
     /// every socket visually, and splits gold / dirt into output piles.
+    /// Stage E: behaviour host for the wash station; process state lives on <see cref="WashMachine"/>.
+    /// Implements <see cref="IWorkProvider"/> for Refining (provider id = washer.N).
     /// </summary>
-    public sealed class RefinerPerson : MonoBehaviour
+    public sealed class RefinerPerson : MonoBehaviour, IWorkProvider
     {
+        static int _nextProviderSerial = 1;
+
         enum State { Idle, Fetch, CarryToWash, WaitWash, Consulting }
 
         FineTerrainWorld _world;
@@ -35,14 +39,95 @@ namespace DeepCore.FreeMovement
         public Vector2 Position => transform.localPosition;
         public bool IsInConsultation => _consultActive;
         public bool IsDiscussing => _discussing;
+        public WashMachine Washer => _washer;
 
         /// <summary>Fixed meet point by the washer — Prospector walks here instead of chasing.</summary>
         public Vector2 ConsultationMeetPoint => WorkPoint;
 
-        /// <summary>Body / Mind / Soul sheet. Data only — unused by wash logic yet.</summary>
-        public WorkerStats Stats => _stats ??= new WorkerStats();
+        public string ActivityLabel
+        {
+            get
+            {
+                if (_consultActive)
+                    return _discussing ? "CONSULT" : "MEET";
+                if (_washer != null && _washer.IsBusy)
+                    return $"WASH {_washer.CurrentPhase}";
+                return _state switch
+                {
+                    State.Idle => "IDLE",
+                    State.Fetch => "FETCH",
+                    State.CarryToWash => "CARRY",
+                    State.WaitWash => "WAIT WASH",
+                    State.Consulting => "CONSULT",
+                    _ => "IDLE",
+                };
+            }
+        }
+
+        /// <summary>Body / Mind / Soul sheet. Provisional — unused by live wash formulas yet.</summary>
+        public WorkerStats Stats =>
+            _assignedWorker != null ? _assignedWorker.Stats : (_stats ??= new WorkerStats());
+
+        public WorkerRuntime AssignedWorker => _assignedWorker;
+
+        // ——— IWorkProvider (Refining / wash station) ———
+        public string ProviderId { get; private set; } = "washer.0";
+        public JobType JobType => DeepCore.FreeMovement.JobType.Refining;
+        public int AssignedWorkerId { get; private set; } = -1;
+        public bool IsAvailable => true;
+
+        public bool CanAssign(WorkerRuntime worker, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            return true;
+        }
+
+        public void NotifyAssigned(WorkerRuntime worker) =>
+            AssignedWorkerId = worker != null ? worker.WorkerId : -1;
+
+        public void NotifyUnassigned() => AssignedWorkerId = -1;
 
         [SerializeField] WorkerStats _stats = new WorkerStats();
+        WorkerRuntime _assignedWorker;
+
+        public void BindWorker(WorkerRuntime worker)
+        {
+            if (worker == null || worker.Stats == null) return;
+            EnsureProviderId();
+            _assignedWorker = worker;
+            _stats = worker.Stats;
+            _stats.ClampAll();
+            WorkerJobDemand.EnsureStaminaPrimed(worker);
+            NotifyAssigned(worker);
+        }
+
+        public void ClearWorker()
+        {
+            _assignedWorker = null;
+            _stats = WorkerStats.CreateBaseline();
+            AssignedWorkerId = -1;
+        }
+
+        /// <summary>
+        /// Job/station state (held ore, wash progress, consult pause, priority) stays on host/machine.
+        /// </summary>
+        public void YieldForReassignment()
+        {
+            DigHoodLog.Push(
+                $"ASSIGN | Refiner yield | {ActivityLabel} | " +
+                $"holding={_holding} washerBusy={_washer != null && _washer.IsBusy}");
+        }
+
+        void EnsureProviderId()
+        {
+            if (string.IsNullOrEmpty(ProviderId) || ProviderId == "washer.0")
+                ProviderId = $"washer.{_nextProviderSerial++}";
+        }
 
         public event System.Action StartedWash;
         public event System.Action FoundGold;
@@ -88,6 +173,7 @@ namespace DeepCore.FreeMovement
                 falloff: 0.9f);
 
             var r = go.AddComponent<RefinerPerson>();
+            r.EnsureProviderId();
             r._world = world;
             r._yard = yard;
             r._calc = calc;
@@ -146,7 +232,9 @@ namespace DeepCore.FreeMovement
                 _resumeAfterConsult = _state;
                 _state = State.Consulting;
             }
-            DigHoodLog.Push("REFINER | pausing for Prospector consult");
+            DigHoodLog.Push(
+                $"REFINER | pausing for Prospector consult" +
+                (AssignedWorker != null ? $" ({AssignedWorker.DisplayName})" : ""));
         }
 
         public void BeginDiscussion(Vector2 faceToward)
@@ -202,7 +290,21 @@ namespace DeepCore.FreeMovement
         {
             if (_yard == null || _washer == null) return;
 
+            // Automatic mechanical cycle may finish without an operator
             _washer.Tick();
+
+            // F0.5b vacancy: no fetch / carry / consult / new work; washer may still finish
+            if (_assignedWorker == null)
+            {
+                if (_consultActive)
+                    EndConsultation();
+                if (_state == State.WaitWash && !_washer.IsBusy)
+                {
+                    _state = State.Idle;
+                    _idleTimer = 0.05f;
+                }
+                return;
+            }
 
             // Manual drive only when not mid-wash / mid-consult
             bool driving = wasd.sqrMagnitude > 0.01f
@@ -387,6 +489,18 @@ namespace DeepCore.FreeMovement
                 _state = State.Idle;
             _idleTimer = 0.08f;
             BatchDone?.Invoke();
+
+            if (AssignedWorkerId > 0)
+            {
+                bool valuable = gold > 0 || diamond > 0;
+                WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                    AssignedWorkerId,
+                    valuable ? WorkerStateEventType.MajorSuccess : WorkerStateEventType.ProgressSuccess,
+                    valuable ? 4f : 2.5f,
+                    valuable ? "WashValuable" : "WashComplete",
+                    JobType.Refining,
+                    ProviderId));
+            }
         }
 
         void ShowHeld(OreCell cell)

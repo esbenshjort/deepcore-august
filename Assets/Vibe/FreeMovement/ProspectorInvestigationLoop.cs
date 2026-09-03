@@ -116,6 +116,9 @@ namespace DeepCore.FreeMovement
             get
             {
                 var a = ResolveFocusAnomaly();
+                string refinerName = _host.Refiner?.AssignedWorker != null
+                    ? _host.Refiner.AssignedWorker.DisplayName
+                    : "Refiner";
                 return _state switch
                 {
                     ProspectorInvestigationState.WalkingToExcavator => "Walking to excavator",
@@ -124,8 +127,8 @@ namespace DeepCore.FreeMovement
                         a != null && a.CurrentNeed == AnomalyInvestigationNeed.NeedLooseRockInspection
                             ? "Inspecting excavation face"
                             : "Inspecting rock face",
-                    ProspectorInvestigationState.WalkingToRefiner => "Going to Refiner",
-                    ProspectorInvestigationState.ConsultingRefiner => "Consulting Refiner",
+                    ProspectorInvestigationState.WalkingToRefiner => $"Going to {refinerName}",
+                    ProspectorInvestigationState.ConsultingRefiner => $"Consulting {refinerName}",
                     ProspectorInvestigationState.ReturningToAnalysis => "Returning to desk",
                     ProspectorInvestigationState.Analysing when a != null =>
                         ProspectorAnomaly.NeedWorkLabel(a.CurrentNeed),
@@ -541,11 +544,15 @@ namespace DeepCore.FreeMovement
 
             var a = ResolveFocusAnomaly();
             var lines = ProspectorGeoEvidence.RevealRefinerOpinion(a, AnalysisStats());
+            string consultWho = rf != null && rf.AssignedWorker != null
+                ? rf.AssignedWorker.DisplayName
+                : "Refiner";
             ProspectorGeoEvidence.AppendFindings(
-                a, lines, _host.ScanHistory?.Findings, "Refiner consultation");
+                a, lines, _host.ScanHistory?.Findings, $"Refiner consultation ({consultWho})");
             ProspectorInvestigationPlanner.ApplyAfterEvidence(
                 a, AnomalyEvidenceKind.RefinerOpinion, ExcavatorDistanceCells(a));
-            DigHoodLog.Push($"PROSPECTOR | RefinerOpinion recorded (#{_focusAnomalyId:00})");
+            DigHoodLog.Push(
+                $"PROSPECTOR | RefinerOpinion recorded (#{_focusAnomalyId:00}) with {consultWho}");
 
             EndRefinerConsultation();
             _hasTripStand = false;

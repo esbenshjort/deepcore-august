@@ -7,8 +7,10 @@ namespace DeepCore.FreeMovement
     /// Stage 1: place → travel → game-time setup → Ready.
     /// Stage 2: plan cone → Scanning (game-time) → Ready; raw evidence via ScanHistory.
     /// </summary>
-    public sealed class ProspectorScannerEquipment : MonoBehaviour
+    public sealed class ProspectorScannerEquipment : MonoBehaviour, IWorkProvider
     {
+        static int _nextProviderSerial = 1;
+
         FineTerrainWorld _world;
         Transform _facingRoot;
         LineRenderer _coneCore;
@@ -49,6 +51,39 @@ namespace DeepCore.FreeMovement
         public int SetupHeavyLifting { get; private set; }
         public string SetupByName { get; private set; } = "Prospector";
 
+        // ——— IWorkProvider (Prospecting) ———
+        public string ProviderId { get; private set; } = "scanner.0";
+        public JobType JobType => DeepCore.FreeMovement.JobType.Prospecting;
+        public int AssignedWorkerId { get; private set; } = -1;
+        /// <summary>Available when not mid-scan (Ready/Packed/SettingUp can accept ownership transfer).</summary>
+        public bool IsAvailable => State != ProspectorScannerState.Scanning;
+
+        public bool CanAssign(WorkerRuntime worker, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            if (State == ProspectorScannerState.Scanning)
+            {
+                reason = "Scan in progress — finish or cancel first";
+                return false;
+            }
+            return true;
+        }
+
+        public void NotifyAssigned(WorkerRuntime worker)
+        {
+            AssignedWorkerId = worker != null ? worker.WorkerId : -1;
+        }
+
+        public void NotifyUnassigned()
+        {
+            AssignedWorkerId = -1;
+        }
+
         /// <summary>Planned survey cone — always ≤ equipment Spec.</summary>
         public float PlannedRangeCells { get; private set; }
         public float PlannedHalfAngleDeg { get; private set; }
@@ -66,6 +101,7 @@ namespace DeepCore.FreeMovement
             go.transform.SetParent(parent, false);
             go.transform.localPosition = localPos;
             var eq = go.AddComponent<ProspectorScannerEquipment>();
+            eq.ProviderId = $"scanner.{_nextProviderSerial++}";
             eq.Build(world, facing, spec ?? ProspectorScannerEquipmentSpec.Default);
             return eq;
         }
@@ -369,14 +405,15 @@ namespace DeepCore.FreeMovement
             float absoluteGameHours,
             string prospectorId = null,
             WorkerSheetProfile prospectorProfile = WorkerSheetProfile.Baseline,
-            string prospectorProfileLabel = null)
+            string prospectorProfileLabel = null,
+            int workerId = 0)
         {
             if (State != ProspectorScannerState.Ready || _world == null) return false;
             ActiveSession ??= new ProspectorScanSession();
             if (!ActiveSession.TryBegin(
                     _world, history, this, stats, prospectorName,
                     absoluteGameHours, PlannedRangeCells, PlannedHalfAngleDeg,
-                    prospectorId, prospectorProfile, prospectorProfileLabel))
+                    prospectorId, prospectorProfile, prospectorProfileLabel, workerId))
                 return false;
 
             State = ProspectorScannerState.Scanning;

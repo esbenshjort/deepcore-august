@@ -16,9 +16,13 @@ namespace DeepCore.FreeMovement
 
     /// <summary>
     /// Excavator digs a passable tunnel. Supports a queued dig route of pinpoints.
+    /// Stage D: one machine host; assigned <see cref="WorkerRuntime"/> supplies stats + personal conditions.
+    /// Implements <see cref="IWorkProvider"/> for Excavation (manager remains assignment authority).
     /// </summary>
-    public sealed class FreeWorkerController : MonoBehaviour
+    public sealed class FreeWorkerController : MonoBehaviour, IWorkProvider
     {
+        static int _nextProviderSerial = 1;
+
         public const float HeatMin = 0f;
         public const float HeatMax = 100f;
         public const float PassiveCoolPerSecond = 5f;
@@ -50,7 +54,9 @@ namespace DeepCore.FreeMovement
         [SerializeField] float tipReach = 0.48f;
         [SerializeField] int toolPower = MiningDamage.DefaultExcavatorToolPower;
         [SerializeField] WorkerStats _stats = new WorkerStats();
-        [SerializeField] WorkerConditions _conditions = new WorkerConditions();
+        /// <summary>Fallback bag when no operator is bound (Setup / unbound). Prefer WorkerRuntime.State.</summary>
+        [SerializeField] WorkerState _conditions = WorkerState.CreateDefault();
+        WorkerRuntime _assignedWorker;
 
         FineTerrainWorld _world;
         float _radius;
@@ -106,11 +112,89 @@ namespace DeepCore.FreeMovement
         /// <summary>Balance harness only — Injury applied from overheat check fail.</summary>
         public event System.Action BalanceInjuryEvent;
 
-        /// <summary>Body / Mind / Soul sheet. RawPower + Lithology feed dig damage.</summary>
-        public WorkerStats Stats => _stats ??= new WorkerStats();
+        public WorkerStats Stats =>
+            _assignedWorker != null ? _assignedWorker.Stats : (_stats ??= new WorkerStats());
 
-        /// <summary>Dynamic worker conditions (Frustration, …). Separate from Stats and machine Heat.</summary>
-        public WorkerConditions Conditions => _conditions ??= new WorkerConditions();
+        /// <summary>Person currently operating this machine (null if unbound).</summary>
+        public WorkerRuntime AssignedWorker => _assignedWorker;
+
+        // ——— IWorkProvider (Excavation) ———
+        public string ProviderId { get; private set; } = "excavator.0";
+        public JobType JobType => DeepCore.FreeMovement.JobType.Excavation;
+        /// <summary>−1 if none. Mirror of manager ownership.</summary>
+        public int AssignedWorkerId { get; private set; } = -1;
+        /// <summary>Stage D: Excavation always accepts ownership transfer (machine state persists).</summary>
+        public bool IsAvailable => true;
+
+        public bool CanAssign(WorkerRuntime worker, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            return true;
+        }
+
+        public void NotifyAssigned(WorkerRuntime worker)
+        {
+            AssignedWorkerId = worker != null ? worker.WorkerId : -1;
+        }
+
+        public void NotifyUnassigned()
+        {
+            AssignedWorkerId = -1;
+        }
+
+        /// <summary>
+        /// Bind this machine to a person. Stats + personal conditions come from the WorkerRuntime.
+        /// Machine heat / route / cooling are not transferred from the previous operator.
+        /// </summary>
+        public void BindWorker(WorkerRuntime worker)
+        {
+            if (worker == null || worker.Stats == null) return;
+            if (string.IsNullOrEmpty(ProviderId) || ProviderId == "excavator.0")
+                ProviderId = $"excavator.{_nextProviderSerial++}";
+
+            _assignedWorker = worker;
+            _stats = worker.Stats;
+            _stats.ClampAll();
+            EnsurePersonalStaminaPrimed();
+            NotifyAssigned(worker);
+        }
+
+        public void ClearWorker()
+        {
+            _assignedWorker = null;
+            _stats = WorkerStats.CreateBaseline();
+            AssignedWorkerId = -1;
+            // Do not InitStamina on unbound fallback — machine waits for next operator
+        }
+
+        /// <summary>
+        /// Stop this operator's dig engagement. Machine heat, cooling intent, route, and tool power persist.
+        /// Personal conditions stay on the WorkerRuntime (not wiped).
+        /// </summary>
+        public void YieldForReassignment()
+        {
+            IsActivelyDigging = false;
+            _dugThisTick = false;
+            // Safe simulation boundary: abandon in-progress dig cadence wait; next operator starts fresh cadence
+            _digTimer = 0f;
+            DigHoodLog.Push(
+                $"ASSIGN | Excavator yield | Heat {_heat:0.#} | Cooling {_isCooling} | " +
+                $"Route {_route.Count} | Overheat {IsOverheated}");
+        }
+
+        /// <summary>
+        /// Dynamic person state: assigned WorkerRuntime.State, else unbound fallback.
+        /// Frustration / stamina / injury are never machine-owned.
+        /// </summary>
+        public WorkerState Conditions =>
+            _assignedWorker != null
+                ? _assignedWorker.State
+                : (_conditions ??= WorkerState.CreateDefault());
 
         /// <summary>Max stamina pool from WorkerStats.Stamina: 50 + Stamina×5.</summary>
         public float MaxStamina => 50f + Stats.Get(WorkerStatId.Stamina) * 5f;
@@ -212,14 +296,16 @@ namespace DeepCore.FreeMovement
             Conditions.Frustration = 0f;
             Conditions.Injury = 0f;
             Conditions.NeedsCare = false;
+            Conditions.MentalFatigue = WorkerState.DefaultMentalFatigue;
+            Conditions.FocusState = WorkerState.DefaultFocusState;
+            Conditions.Morale = WorkerState.DefaultMorale;
             InitStaminaFromStats();
             DigHoodLog.Push("BALANCE | Conditions reset | Heat 0 | Frust 0 | Injury 0 | Stamina full");
         }
 
         /// <summary>
         /// Overnight / skipped-sleep cool-down: Heat fully cleared, cooling intent reset.
-        /// Machine rests with the crew — not the same as mid-shift passive cooling.
-        /// Does not wipe Frustration (sleep recovery is rate / duration based).
+        /// Machine only — person PhysicalStamina recovers via crew WorkerState sleep recovery.
         /// </summary>
         public void ResetHeatAfterRest()
         {
@@ -228,7 +314,6 @@ namespace DeepCore.FreeMovement
             _dugThisTick = false;
             IsActivelyDigging = false;
             RefreshHeatZone(logOverheat: false);
-            InitStaminaFromStats();
             DigHoodLog.Push("HEAT | Rest cool-down | Total 0/100 | State NORMAL");
         }
 
@@ -248,19 +333,18 @@ namespace DeepCore.FreeMovement
         }
 
 
-        /// <summary>While asleep: Frustration −2 / real second.</summary>
-        public void TickRestFrustrationRelief(float deltaTime) =>
-            ApplyFrustrationReliefRate("Sleep", FrustrationSleepReliefPerSecond, deltaTime);
+        /// <summary>
+        /// Obsolete — sleep recovery is person-level on the crew (V1.2A).
+        /// No-op retained so old call sites compile until removed.
+        /// </summary>
+        [System.Obsolete("V1.2A: use crew WorkerState.ApplySleepRecoveryFraction")]
+        public void TickRestFrustrationRelief(float deltaTime) { }
 
         /// <summary>
-        /// Apply sleep Frustration recovery for a block of real time
-        /// (time-skip remaining night, using elapsed simulation duration).
+        /// Obsolete — sleep recovery is person-level on the crew (V1.2A).
         /// </summary>
-        public void ApplyRestFrustrationForDuration(float realSeconds)
-        {
-            if (realSeconds <= 0f) return;
-            ApplyFrustrationRelief("Sleep", FrustrationSleepReliefPerSecond * realSeconds);
-        }
+        [System.Obsolete("V1.2A: use crew WorkerState.ApplySleepRecoveryFraction")]
+        public void ApplyRestFrustrationForDuration(float realSeconds) { }
 
         public void SetCrewVisible(bool on)
         {
@@ -299,6 +383,8 @@ namespace DeepCore.FreeMovement
             _onDigImpact = onDigImpact;
             _pinSprite = pinSprite;
             _pinsRoot = pinsRoot;
+            if (string.IsNullOrEmpty(ProviderId) || ProviderId == "excavator.0")
+                ProviderId = $"excavator.{_nextProviderSerial++}";
             EnsureRouteLine();
             ClearRoute();
         }
@@ -456,6 +542,14 @@ namespace DeepCore.FreeMovement
         {
             if (_world == null) return;
             _dugThisTick = false;
+
+            // F0.5b vacancy: machine stays; passive heat/cooling only — no dig / route / operator rolls
+            if (_assignedWorker == null)
+            {
+                IsActivelyDigging = false;
+                TickPassiveHeat();
+                return;
+            }
 
             if (wasd.sqrMagnitude > 0.01f)
             {
@@ -819,16 +913,17 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>
-        /// Obstruction-based Frustration: consecutive digs without meaningful progress.
-        /// Meaningful progress = tile destroyed (handled here) or physical advance (Step).
-        /// Every 3 obstructed digs adds Frustration; counter keeps rising until progress.
+        /// Obstruction-based Frustration via person-targeted events (V1.2B).
+        /// Continuous counter stays local; every 3 obstructed digs emits WorkBlocked / RepeatedFailure.
+        /// Determination/Composure applied in <see cref="WorkerStateEventProcessor"/> — do not AddFrustration here.
         /// </summary>
         void ApplyDigFrustration(in TerrainCell target, bool brokeTile)
         {
             if (brokeTile)
             {
                 ResetObstructionCounter("Tile destroyed");
-                ApplyProgressFrustrationRelief("Tile destroyed");
+                EmitOperatorState(WorkerStateEventType.ProgressSuccess,
+                    FrustrationProgressBaseRelief, "TileDestroyed");
                 return;
             }
 
@@ -836,28 +931,28 @@ namespace DeepCore.FreeMovement
             if (_obstructionCounter % 3 != 0)
                 return;
 
-            int determination = Stats.Get(WorkerStatId.Determination);
-            float baseFrustration = 3f;
-            float resistance = determination * 0.10f;
-            float gained = Mathf.Max(0.5f, baseFrustration - resistance);
-
+            float mag = 3f;
             if (target.Material == TerrainMaterial.Bedrock)
-                gained *= 1.5f;
+                mag *= 1.5f;
             if (target.HasWeakPoint)
-                gained *= 0.75f;
+                mag *= 0.75f;
 
-            Conditions.AddFrustration(gained);
+            var type = _obstructionCounter >= 9
+                ? WorkerStateEventType.RepeatedFailure
+                : WorkerStateEventType.WorkBlocked;
 
+            EmitOperatorState(type, mag, "RouteObstruction");
             DigHoodLog.Push(
-                $"FRUSTRATION | Obstruction {_obstructionCounter} digs | Material {target.Material} | " +
-                $"Determination {determination} | Added {gained:0.##} | Total {Conditions.Frustration:0.#}/100");
+                $"STATE EVENT | {type} | Obstruction {_obstructionCounter} digs | Material {target.Material} | " +
+                $"Mag {mag:0.##} | OperatorId {AssignedWorkerId}");
         }
 
         void NotifyExcavatorAdvanced()
         {
             if (_obstructionCounter <= 0) return;
             ResetObstructionCounter("Excavator advanced");
-            ApplyProgressFrustrationRelief("Excavator advanced");
+            EmitOperatorState(WorkerStateEventType.ProgressSuccess,
+                FrustrationProgressBaseRelief, "ExcavatorAdvanced");
         }
 
         void ResetObstructionCounter(string reason)
@@ -866,43 +961,32 @@ namespace DeepCore.FreeMovement
             DigHoodLog.Push($"PROGRESS | {reason} | Obstruction reset");
         }
 
-        /// <summary>
-        /// Meaningful progress relief: Base 2 + Focus×0.05. Does not change gain rules.
-        /// </summary>
+        /// <summary>Legacy direct relief — prefer events. Kept for any non-migrated callers.</summary>
         void ApplyProgressFrustrationRelief(string reason)
         {
-            int focus = Stats.Get(WorkerStatId.Focus);
-            float relief = FrustrationProgressBaseRelief + focus * 0.05f;
-            float reduced = Conditions.ReduceFrustration(relief);
-            if (reduced <= 0f) return;
-            DigHoodLog.Push(
-                $"FRUSTRATION RELIEF | Reason {reason} | Focus {focus} | " +
-                $"Reduced {reduced:0.##} | Total {Conditions.Frustration:0.#}/100");
+            EmitOperatorState(WorkerStateEventType.ProgressSuccess,
+                FrustrationProgressBaseRelief, reason);
         }
 
         void ApplyFrustrationRelief(string reason, float amount)
         {
-            float reduced = Conditions.ReduceFrustration(amount);
-            if (reduced <= 0f) return;
-            DigHoodLog.Push(
-                $"FRUSTRATION RELIEF | Reason {reason} | " +
-                $"Reduced {reduced:0.##} | Total {Conditions.Frustration:0.#}/100");
+            EmitOperatorState(WorkerStateEventType.ProgressSuccess, amount, reason);
         }
 
         void ApplyFrustrationReliefRate(string reason, float perSecond, float deltaTime)
         {
-            if (perSecond <= 0f || deltaTime <= 0f) return;
-            float reduced = Conditions.ReduceFrustration(perSecond * deltaTime);
-            if (reduced <= 0f) return;
+            // Continuous rate relief (sleep/cooling) retired from excavator; no-op.
+        }
 
-            _frustrationReliefLogAcc += reduced;
-            if (_frustrationReliefLogAcc < 1f) return;
-
-            float logged = _frustrationReliefLogAcc;
-            _frustrationReliefLogAcc = 0f;
-            DigHoodLog.Push(
-                $"FRUSTRATION RELIEF | Reason {reason} | " +
-                $"Reduced {logged:0.##} | Total {Conditions.Frustration:0.#}/100");
+        /// <summary>Emit to the operator at this moment — WorkerId frozen on the event.</summary>
+        void EmitOperatorState(WorkerStateEventType type, float magnitude, string source)
+        {
+            int id = AssignedWorkerId;
+            if (id <= 0 && _assignedWorker != null)
+                id = _assignedWorker.WorkerId;
+            if (id <= 0) return;
+            WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                id, type, magnitude, source, JobType.Excavation, ProviderId));
         }
 
 
@@ -1023,7 +1107,7 @@ namespace DeepCore.FreeMovement
                 _heat = Mathf.Max(HeatMin, _heat - PassiveCoolPerSecond * WorkerSimClock.Delta);
                 if (!Mathf.Approximately(before, _heat))
                     RefreshHeatZone(logOverheat: false);
-                ApplyFrustrationReliefRate("Cooling", FrustrationCoolReliefPerSecond, WorkerSimClock.Delta);
+                // V1.2A: machine cooling must not modify person Frustration
                 ExitCoolingIfReady();
                 return;
             }
@@ -1076,6 +1160,7 @@ namespace DeepCore.FreeMovement
                 IsActivelyDigging = false;
                 DigHoodLog.Push("OVERHEAT | Excavator disabled");
                 BalanceOverheatEvent?.Invoke();
+                EmitOperatorState(WorkerStateEventType.EquipmentProblem, 8f, "Overheat");
                 // One injury check per OVERHEAT event (zone edge), not while Heat stays at 100.
                 PerformOverheatInjuryCheck();
             }
@@ -1158,6 +1243,7 @@ namespace DeepCore.FreeMovement
                 if (Conditions.Injury >= InjuryCareThreshold)
                     Conditions.NeedsCare = true;
                 BalanceInjuryEvent?.Invoke();
+                EmitOperatorState(WorkerStateEventType.Injury, InjuryOnFail, "OverheatInjury");
             }
 
             LogInjury();
@@ -1196,6 +1282,31 @@ namespace DeepCore.FreeMovement
             float max = MaxStamina;
             Conditions.SetStamina(max, max);
             Conditions.IsResting = false;
+            Conditions.StaminaPrimed = true;
+            _staminaRecoveryLogAcc = 0f;
+            _lastStaminaStateLog = null;
+            LogStamina();
+        }
+
+        /// <summary>
+        /// Stage D: first bind fills stamina; returning operators keep fatigue / injury / frustration.
+        /// </summary>
+        void EnsurePersonalStaminaPrimed()
+        {
+            float max = MaxStamina;
+            var c = Conditions;
+            if (!c.StaminaPrimed)
+            {
+                c.SetStamina(max, max);
+                c.IsResting = false;
+                c.StaminaPrimed = true;
+            }
+            else
+            {
+                c.SetStamina(Mathf.Min(c.CurrentStamina, max), max);
+                if (c.IsResting && StaminaRatio >= StaminaRestResumeRatio)
+                    c.IsResting = false;
+            }
             _staminaRecoveryLogAcc = 0f;
             _lastStaminaStateLog = null;
             LogStamina();
@@ -1214,9 +1325,11 @@ namespace DeepCore.FreeMovement
         {
             if (Conditions.IsResting) return;
             Conditions.IsResting = true;
+            Conditions.ExhaustionLatched = true;
             IsActivelyDigging = false;
             LogStamina();
             DigHoodLog.Push("STAMINA | Entered RESTING — mining paused, assignment kept");
+            EmitOperatorState(WorkerStateEventType.PhysicalExhaustion, 5f, "StaminaRest");
         }
 
         void ExitStaminaRest()
@@ -1280,8 +1393,9 @@ namespace DeepCore.FreeMovement
             int baseFinesse = Stats.Get(WorkerStatId.Finesse);
             float frustrationPenalty = ComputeTechnicalPenalty(frustration, focus);
             float heatPenalty = ComputeHeatTolerancePenalty(_heatZone, heatTolerance);
+            float focusStatePenalty = WorkerJobDemand.LowFocusFinessePenalty(Conditions);
             int effectiveFinesse = Mathf.Max(1,
-                Mathf.RoundToInt(baseFinesse - frustrationPenalty - heatPenalty));
+                Mathf.RoundToInt(baseFinesse - frustrationPenalty - heatPenalty - focusStatePenalty));
 
             DigHoodLog.Push(
                 $"FOCUS | Frustration {frustration:0.#} | Focus {focus} | BaseFinesse {baseFinesse} | " +

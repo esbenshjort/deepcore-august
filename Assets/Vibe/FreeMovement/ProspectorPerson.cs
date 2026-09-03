@@ -105,9 +105,52 @@ namespace DeepCore.FreeMovement
         public FineTerrainWorld World => _world;
 
         /// <summary>Body / Mind / Soul sheet. Mechanics / HeavyLifting drive Stage-1 scanner setup.</summary>
-        public WorkerStats Stats => _stats ??= new WorkerStats();
+        public WorkerStats Stats =>
+            _assignedWorker != null ? _assignedWorker.Stats : (_stats ??= new WorkerStats());
+
+        /// <summary>Stage A fixed mapping — person identity backing this body.</summary>
+        public WorkerRuntime AssignedWorker => _assignedWorker;
 
         [SerializeField] WorkerStats _stats = new WorkerStats();
+        WorkerRuntime _assignedWorker;
+
+        /// <summary>
+        /// Bind this role body to a person. Stats become the Worker's shared sheet (same reference).
+        /// </summary>
+        public void BindWorker(WorkerRuntime worker)
+        {
+            if (worker == null || worker.Stats == null) return;
+            _assignedWorker = worker;
+            _stats = worker.Stats;
+            _stats.ClampAll();
+            WorkerJobDemand.EnsureStaminaPrimed(worker);
+        }
+
+        /// <summary>Clear person binding (Stage C: worker left this body).</summary>
+        public void ClearWorker()
+        {
+            _assignedWorker = null;
+            // Fresh private sheet — must not keep referencing another person's Stats.
+            _stats = WorkerStats.CreateBaseline();
+        }
+
+        /// <summary>
+        /// Stage C: stop personal Prospecting actions before another worker takes the body.
+        /// Does not delete scan history / findings.
+        /// </summary>
+        public void YieldForReassignment()
+        {
+            CancelScannerAssignment(clearEquipment: false);
+            if (WorkMode == ProspectorWorkMode.Investigate)
+                SetWorkMode(ProspectorWorkMode.Manual);
+            else
+            {
+                _hasWorkGoal = false;
+                _nav?.Invalidate();
+            }
+            _scanning = false;
+            SetRadar(false);
+        }
 
         public int ActiveRows => Distance switch
         {
@@ -320,7 +363,8 @@ namespace DeepCore.FreeMovement
         {
             if (_assignedScanner == null) return;
             float hours = ProspectorScannerSetup.SetupDurationHours(Stats);
-            _assignedScanner.BeginSetup(Stats, "Prospector", hours);
+            string by = AssignedWorker != null ? AssignedWorker.DisplayName : "Prospector";
+            _assignedScanner.BeginSetup(Stats, by, hours);
             _scannerTravelActive = false;
             _scannerSetupActive = true;
             Face(_assignedScanner.Facing);
@@ -436,6 +480,15 @@ namespace DeepCore.FreeMovement
             if (_world == null) return;
             if (_scanCooldown > 0f) _scanCooldown -= Time.deltaTime;
             _pulse += Time.deltaTime;
+
+            // F0.5b vacancy: equipment stays; no setup / investigation / new scans
+            // F1: vacant host must not receive WASD / operator input
+            if (_assignedWorker == null)
+            {
+                if (_hudVisible && RadarOn)
+                    RebuildConeMesh();
+                return;
+            }
 
             // Scanner assignment: travel then wait while Setting Up (game-time driven elsewhere)
             if (_assignedScanner != null && (_scannerTravelActive || _scannerSetupActive))

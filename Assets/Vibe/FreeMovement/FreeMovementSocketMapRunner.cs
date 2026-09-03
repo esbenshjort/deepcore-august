@@ -23,6 +23,46 @@ namespace DeepCore.FreeMovement
         ProspectorPerson _prospector;
         RefinerPerson _refiner;
         EngineerPerson _engineer;
+        /// <summary>Stage A prototype roster — identity + shared WorkerStats. Indexed by WorkerId order.</summary>
+        WorkerRuntime[] _crewWorkers;
+        WorkerRuntime _workerLewis;
+        WorkerRuntime _workerMara;
+        WorkerRuntime _workerKowalski;
+        WorkerRuntime _workerElena;
+        WorkerRuntime _workerViktor;
+        readonly WorkerAssignmentManager _assignments = new();
+        readonly WorkerPresenceRegistry _presence = new();
+        readonly WorkerStateEventService _stateEvents = new();
+        readonly SocialAuraLiveSystem _socialAura = new();
+        readonly SocialAuraPresenter _socialPresenter = new();
+        readonly SocialAuraPlaytestTracker _socialPlaytest = new();
+        readonly RelationshipWorkPlaytestTracker _coopWorkPlaytest = new();
+        readonly ProspectorDrySpellTracker _prospectorDrySpell = new();
+        float _lastSocialGameHoursDelta;
+        bool _socialDevDrawWorld;
+        Vector2 _socialDevScroll;
+        readonly List<SocialAuraLiveSystem.NearbyDebug> _socialNearbyScratch = new(8);
+        readonly List<SocialMemoryEntry> _socialMemoryScratch = new(16);
+        readonly List<SocialMemoryEntry> _coopMemScratch = new(8);
+        /// <summary>DEV-only rolling encounter+presentation stamps (playtest panel).</summary>
+        readonly List<SocialDevEncounterStamp> _socialDevHistory = new(12);
+
+        struct SocialDevEncounterStamp
+        {
+            public SocialEncounterLog Log;
+            public int Day;
+            public float GameHour;
+            public bool Presented;
+            public bool SuppressedDistance;
+            public bool SuppressedSleep;
+            public string InitiatorLine;
+            public string ResponseLine;
+            public int LinesQueued;
+        }
+
+        Transform _avatarRoot;
+        bool _devForceShowHiddenAvatars;
+        int _assignmentDevWorkerIndex;
         bool _engineerWasEnRoute;
         bool _engineerWasRepairing;
         LogisticsTrafficMap _logisticsTraffic;
@@ -62,14 +102,35 @@ namespace DeepCore.FreeMovement
         GasPocketFx _gasFx;
         CampSleepSite _sleepCamp;
         Light2D _globalLight;
-        readonly ExcavatedPathfinder[] _crewNav = new ExcavatedPathfinder[5];
-        readonly float[] _crewBodyR = { 0.22f, 0.12f, 0.14f, 0.12f, 0.12f };
+        readonly ExcavatedPathfinder[] _personNav = new ExcavatedPathfinder[5];
+        /// <summary>Person commute body radius (WorkerAvatar). Not host/machine footprint.</summary>
+        const float AvatarCommuteRadius = 0.12f;
+        /// <summary>
+        /// LEGACY host footprints — excavator dig radius etc. Not used for person commute after F4.
+        /// Index order historically matched ControlWorker, not WorkerRuntime roster.
+        /// </summary>
+        readonly float[] _providerFootprintR = { 0.22f, 0.12f, 0.14f, 0.12f, 0.12f };
         readonly WorkerBanter _banter = new();
+        /// <summary>
+        /// LEGACY enum stub — unused by selection / ST / banter after F5.
+        /// Kept only for obsolete SelectWorker / DrawWorkerCard stubs.
+        /// </summary>
         enum ControlWorker : byte { Prospector = 0, Excavator = 1, Hauler = 2, Refiner = 3, Engineer = 4 }
         ControlWorker _control = ControlWorker.Prospector;
+        /// <summary>F2 canonical selected person (WorkerId). Stable across job reassignment.</summary>
+        int _selectedWorkerId;
 
         // ——— Day / shift cycle (24h clock, shift 08:00–18:00) ———
         enum CrewPhase : byte { OnShift = 0, HeadingHome = 1, Asleep = 2, HeadingOut = 3 }
+        /// <summary>F4: physical presence independent of assignment.</summary>
+        enum WorkerPhysicalState : byte
+        {
+            Operating = 0,
+            Idle = 1,
+            CommutingHome = 2,
+            Sleeping = 3,
+            CommutingToWork = 4,
+        }
         const float ShiftStartHour = 8f;
         const float ShiftEndHour = 18f;
         /// <summary>Real seconds per in-game hour (~shift ≈ 2 min, night ≈ 2.3 min).</summary>
@@ -80,18 +141,28 @@ namespace DeepCore.FreeMovement
         /// <summary>Monotonic game hours for scan metadata (survives day wrap).</summary>
         float _absoluteGameHours = 7.7f;
         CrewPhase _crewPhase = CrewPhase.HeadingOut;
-        Vector2 _workExcavator;
-        Vector2 _workProspector;
-        Vector2 _workHauler;
-        Vector2 _workRefiner;
-        Vector2 _workEngineer;
-        /// <summary>Where the excavator left the dig face at whistle — next shift walks back here.</summary>
+        /// <summary>Provider morning bookmarks (machines/stations) — NOT crew person destinations.</summary>
+        Vector2 _providerPostExcavator;
+        Vector2 _providerPostProspector;
+        Vector2 _providerPostHauler;
+        Vector2 _providerPostRefiner;
+        Vector2 _providerPostEngineer;
+        /// <summary>Where the excavator machine was left at whistle — next shift avatar walks here.</summary>
         Vector2 _excavatorDigResume;
         bool _hasExcavatorDigResume;
-        bool[] _arrived = { false, false, false, false, false };
-        bool[] _crewStranded = { false, false, false, false, false };
-        /// <summary>Subtle per-crew lateral path stagger (world units).</summary>
-        readonly float[] _crewLateral = { -0.035f, 0.04f, -0.02f, 0.03f, 0.015f };
+        /// <summary>Person commute flags — indexed by crew roster order (Lewis…Viktor), not ControlWorker.</summary>
+        bool[] _personArrived = { false, false, false, false, false };
+        bool[] _personStranded = { false, false, false, false, false };
+        /// <summary>Subtle per-person lateral path stagger (world units), roster order.</summary>
+        readonly float[] _personLateral = { -0.035f, 0.04f, -0.02f, 0.03f, 0.015f };
+        static readonly Vector2[] CampDoorOffsets =
+        {
+            new(0.10f, -0.15f),
+            new(-0.20f, 0.05f),
+            new(0.25f, 0.10f),
+            new(-0.05f, -0.25f),
+            new(0.30f, 0.15f),
+        };
         float _commuteTimer;
         const float CommuteTimeoutSec = 10f;
         [SerializeField] bool navDebugDraw;
@@ -117,7 +188,7 @@ namespace DeepCore.FreeMovement
             get
             {
                 Vector2 door = _sleepCamp != null ? _sleepCamp.TentDoor : BasecampPos;
-                return SnapPostToTunnel(door, _crewBodyR[0]);
+                return SnapPostToTunnel(door, AvatarCommuteRadius);
             }
         }
 
@@ -166,7 +237,7 @@ namespace DeepCore.FreeMovement
             _scanHistory.Findings.FindingAdded += OnProspectorFindingAdded;
             _playerTactical = ProspectorTacticalViewOverlay.Attach(_worldRoot, _world, _scanHistory);
             _gasFx = GasPocketFx.Attach(_worldRoot, _world);
-            _gasFx.PocketBreached += () => _banter.TrySay(WorkerBanter.Voice.Excavator,
+            _gasFx.PocketBreached += () => TryAssignedBanter(JobType.Excavation, "GasPocket",
                 "Gas pocket! Purple haze — vent it.",
                 "Hollow chamber. Air's wrong in here.",
                 "Broke into a gas void. Watch the bit.",
@@ -203,75 +274,77 @@ namespace DeepCore.FreeMovement
                 _world.CellCenter(StartX - 6, StartY - 2), _scanView);
             _prospector.BindScanHistory(_scanHistory);
 
-            RefreshWorkPosts();
+            BootstrapPrototypeCrew();
 
-            // First whistle — crew emerges from the tent
+            RefreshProviderWorkPosts();
+
+            // First whistle — avatars emerge from the tent; providers stay at spawn posts
             BeginHeadingOut(announce: false);
             _prospector.BindExcavator(_worker);
             _prospector.BindRefiner(_refiner);
-            _prospector.ScanStarted += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.ScanStarted += () => TryAssignedBanter(JobType.Prospecting, "ScanStarted",
                 "Radar live. Sweeping the dark.",
                 "Listening to the rock…",
                 "Cone up. Let's read the mountain.");
-            _prospector.GoldHintFound += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.GoldHintFound += () => TryAssignedBanter(JobType.Prospecting, "GoldHint",
                 "Soft amber return — possible vein.",
                 "Gold whisper on the scope. Mark it.",
                 "That's not noise. That's money.",
                 "Faint yellow. Don't lose the bearing.");
-            _prospector.BedrockHintFound += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.BedrockHintFound += () => TryAssignedBanter(JobType.Prospecting, "BedrockHint",
                 "Hard mass ahead — route around if you can.",
                 "Bedrock lobe on scan. Plan the cut.",
                 "Solid wall signature. Find the seam.",
                 "Cyan plate. Excavator's going to hate that.");
-            _prospector.GasHintFound += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.GasHintFound += () => TryAssignedBanter(JobType.Prospecting, "GasHint",
                 "Purple void on the scope — sealed pocket.",
                 "Gas signature. Don't punch that blind.",
                 "Hollow return. Air's wrong in there.",
                 "Pressure pocket. Mark it and dig careful.");
-            _prospector.SurveyWhisper += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.SurveyWhisper += () => TryAssignedBanter(JobType.Prospecting, "SurveyWhisper",
                 "Studying the wall… maybe something.",
                 "Could be gold. Could be wishful thinking.",
                 "Grain looks promising. No guarantees.",
                 "Quiet return. Don't bet the trip on it.",
                 "Nothing clean — still poking around.");
-            _prospector.AssistNote += () => _banter.TrySay(WorkerBanter.Voice.Prospector,
+            _prospector.AssistNote += () => TryAssignedBanter(JobType.Prospecting, "AssistNote",
                 "Reading the face for you.",
                 "Seam mapped — dig should bite cleaner.",
                 "Rock grain noted. Don't thank me yet.",
                 "Behind you. Softening the bite.");
             _prospector.InvestigationFinding += () =>
             {
-                _banter.TrySay(WorkerBanter.Voice.Prospector,
+                TryAssignedBanter(JobType.Prospecting, "InvestigationFinding",
                     "Boss. I've got something. Check the Tactical View.",
                     "New findings, boss. Tactical View — look.",
                     "Got something. Worth a look on Tactical.");
             };
 
-            _hauler.PickedGold += () => _banter.TrySay(WorkerBanter.Voice.Hauler,
+            _hauler.PickedGold += () => TryAssignedBanter(JobType.Hauling, "PickedGold",
                 "Gold in the cart. Easy does it.",
                 "Yellow load — this trip pays.",
                 "Careful on the corners. Precious cargo.");
-            _hauler.PickedRock += () => _banter.TrySay(WorkerBanter.Voice.Hauler,
+            _hauler.PickedRock += () => TryAssignedBanter(JobType.Hauling, "PickedRock",
                 "Another rock. Cart's gettin' heavy.",
                 "Fillin' up on stone. Base wants it anyway.");
-            _hauler.Deposited += () => _banter.TrySay(WorkerBanter.Voice.Hauler,
+            _hauler.Deposited += () => TryAssignedBanter(JobType.Hauling, "Deposited",
                 "Dropped at base. Back into the hole.",
                 "Stockpile fed. Round trip done.",
                 "Unload complete. Seekin' the next pile.");
 
-            _refiner.StartedWash += () => _banter.TrySay(WorkerBanter.Voice.Refiner,
+            _refiner.StartedWash += () => TryAssignedBanter(JobType.Refining, "StartedWash",
                 "Cell in the drum. Splitting sockets…",
                 "Washer spinning. Let's see what she holds.",
                 "One cell at a time — no shortcuts.");
-            _refiner.FoundGold += () => _banter.TrySay(WorkerBanter.Voice.Refiner,
+            _refiner.FoundGold += () => TryAssignedBanter(JobType.Refining, "FoundGold",
                 "Yellow in the rinse!",
                 "Socket paid out. Into the clean pile.",
                 "That's a keeper.");
-            _refiner.FoundDiamond += () => _banter.TrySay(WorkerBanter.Voice.Refiner,
+            _refiner.FoundDiamond += () => TryAssignedBanter(JobType.Refining, "FoundDiamond",
                 "Ice! Diamond socket — clean as glass.",
                 "Crystal in the wash. That's the money.",
                 "Hard sparkle. Refined diamond out.");
-            _refiner.BatchDone += () => _banter.TrySay(WorkerBanter.Voice.Refiner,
+            _refiner.BatchDone += () => TryAssignedBanter(JobType.Refining, "BatchDone",
                 "Batch clear. Next cell.",
                 "Dirt one way, precious the other.",
                 "Sockets divided. Machine ready.");
@@ -349,7 +422,7 @@ namespace DeepCore.FreeMovement
             _worker.WeakPointFound += (wx, wy) =>
             {
                 WeakPointFx.Play(_worldRoot, _world, wx, wy);
-                _banter.TrySay(WorkerBanter.Voice.Excavator,
+                TryAssignedBanter(JobType.Excavation, "WeakPoint",
                     "Nailed it.",
                     "Weak Point!",
                     "Got this.",
@@ -359,11 +432,1018 @@ namespace DeepCore.FreeMovement
             _balance.Bind(_worker);
         }
 
+        void BindWorkerStateEventService()
+        {
+            WorkerStateClock.GameHours = _absoluteGameHours;
+            _stateEvents.Bind(FindCrewWorker);
+            WorkerStateEventHub.Service = _stateEvents;
+            _prospectorDrySpell.Reset();
+        }
+
+        /// <summary>V1.2C: apply activity demand / idle recovery from live job FSMs.</summary>
+        void TickProspectorDrySpell(float onShiftHoursDelta)
+        {
+            if (_crewWorkers == null || onShiftHoursDelta <= 0f) return;
+            // Active Prospecting assignment only — unassigned / other jobs do not accrue dry-spell.
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                if (asg == null || asg.JobType != JobType.Prospecting) continue;
+                if (!CanPerformJobActions(wr)) continue;
+                _prospectorDrySpell.Tick(
+                    wr.WorkerId,
+                    onShiftHoursDelta,
+                    asg.ProviderId ?? "");
+                // Only one prospecting seat in prototype roster.
+                break;
+            }
+        }
+
+        void TickJobDemands(float gameHoursDelta)
+        {
+            if (_crewWorkers == null || gameHoursDelta <= 0f) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+
+                if (!CanPerformJobActions(wr))
+                {
+                    WorkerJobDemand.TickIdleOrRest(wr, gameHoursDelta, resting: wr.State.IsResting);
+                    continue;
+                }
+
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                var job = asg != null ? asg.JobType : JobType.Unassigned;
+                if (job == JobType.Unassigned)
+                {
+                    WorkerJobDemand.TickIdleOrRest(wr, gameHoursDelta, resting: false);
+                    continue;
+                }
+
+                JobDemandProfile demand = ResolveDemandFor(wr, job);
+                string providerId = asg != null ? asg.ProviderId : "";
+                if (demand.IsIdle || wr.State.IsResting)
+                    WorkerJobDemand.TickIdleOrRest(wr, gameHoursDelta, resting: wr.State.IsResting);
+                else
+                    WorkerJobDemand.TickActive(wr, demand, gameHoursDelta, job, providerId);
+            }
+        }
+
+        JobDemandProfile ResolveDemandFor(WorkerRuntime wr, JobType job)
+        {
+            switch (job)
+            {
+                case JobType.Excavation:
+                    return ReferenceEquals(_worker?.AssignedWorker, wr)
+                        ? JobDemandCatalog.ForExcavation(_worker)
+                        : JobDemandProfile.Idle;
+                case JobType.Prospecting:
+                    return ReferenceEquals(_prospector?.AssignedWorker, wr)
+                        ? JobDemandCatalog.ForProspecting(_prospector)
+                        : JobDemandProfile.Idle;
+                case JobType.Hauling:
+                    return ReferenceEquals(_hauler?.AssignedWorker, wr)
+                        ? JobDemandCatalog.ForHauling(_hauler)
+                        : JobDemandProfile.Idle;
+                case JobType.Refining:
+                    return ReferenceEquals(_refiner?.AssignedWorker, wr)
+                        ? JobDemandCatalog.ForRefining(_refiner)
+                        : JobDemandProfile.Idle;
+                case JobType.Engineering:
+                    return ReferenceEquals(_engineer?.AssignedWorker, wr)
+                        ? JobDemandCatalog.ForEngineering(_engineer)
+                        : JobDemandProfile.Idle;
+                default:
+                    return JobDemandProfile.Idle;
+            }
+        }
+
+        JobDemandProfile AuditResolveDemand(int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr == null) return JobDemandProfile.Idle;
+            return ResolveDemandFor(wr, AuditJobOf(workerId));
+        }
+
+        /// <summary>
+        /// Stage A: create 5 WorkerRuntime people and bind each role body to their shared stats sheet.
+        /// Fixed 1:1 — no reassignment yet.
+        /// </summary>
+        void BootstrapPrototypeCrew()
+        {
+            _workerLewis = new WorkerRuntime(1, "Lewis");
+            _workerMara = new WorkerRuntime(2, "Mara");
+            _workerKowalski = new WorkerRuntime(3, "Kowalski");
+            _workerElena = new WorkerRuntime(4, "Elena");
+            _workerViktor = new WorkerRuntime(5, "Viktor");
+            _crewWorkers = new[]
+            {
+                _workerLewis,
+                _workerMara,
+                _workerKowalski,
+                _workerElena,
+                _workerViktor,
+            };
+
+            BindWorkerStateEventService();
+
+            _prospector?.BindWorker(_workerLewis);
+            _worker?.BindWorker(_workerMara);
+            _hauler?.BindWorker(_workerKowalski);
+            _refiner?.BindWorker(_workerElena);
+            _engineer?.BindWorker(_workerViktor);
+
+            // Verify: body.Stats == WorkerRuntime.Stats (same ref); workers do not share sheets
+            Debug.Assert(_prospector == null || ReferenceEquals(_prospector.Stats, _workerLewis.Stats));
+            Debug.Assert(_worker == null || ReferenceEquals(_worker.Stats, _workerMara.Stats));
+            Debug.Assert(_hauler == null || ReferenceEquals(_hauler.Stats, _workerKowalski.Stats));
+            Debug.Assert(_refiner == null || ReferenceEquals(_refiner.Stats, _workerElena.Stats));
+            Debug.Assert(_engineer == null || ReferenceEquals(_engineer.Stats, _workerViktor.Stats));
+            Debug.Assert(!ReferenceEquals(_workerLewis.Stats, _workerMara.Stats));
+            Debug.Assert(!ReferenceEquals(_workerMara.Stats, _workerKowalski.Stats));
+            Debug.Assert(!ReferenceEquals(_workerKowalski.Stats, _workerElena.Stats));
+            Debug.Assert(!ReferenceEquals(_workerElena.Stats, _workerViktor.Stats));
+
+            // Balance harness captured excavator sheet before BindWorker — refresh baseline from Mara
+            if (_worker != null)
+                _balance.Bind(_worker);
+
+            for (int i = 1; i < _sheetBaselineByWorkerId.Length; i++)
+            {
+                _sheetBaselineCaptured[i] = false;
+                _sheetProfileByWorkerId[i] = WorkerSheetProfile.Baseline;
+            }
+
+            // Stage B: assignment model bootstrap, then stamp live provider ids
+            _assignments.BootstrapPrototypeDefaults(_crewWorkers, _absoluteGameHours);
+            StampLiveProviderAssignments();
+            _assignments.AssertPrototypeIntegrity(_crewWorkers);
+            AssertStageBBodyJobMapping();
+            _assignmentDevWorkerIndex = 0;
+            SyncProspectingFindingsAuthor();
+            SpawnCrewAvatars();
+            RefreshAllAvatarPresence();
+            CaptureSheetBaselinesForCrew();
+            // F2: person-first selection — Lewis by default (not legacy role slot)
+            _control = ControlWorker.Prospector; // LEGACY unused stub
+            if (_workerLewis != null)
+                SelectPersonById(_workerLewis.WorkerId);
+            else if (_crewWorkers != null && _crewWorkers.Length > 0 && _crewWorkers[0] != null)
+                SelectPersonById(_crewWorkers[0].WorkerId);
+
+            DigHoodLog.Push(
+                "CREW | F0.5–F5 — person commute + person-authored banter");
+
+            _socialAura.Bootstrap(_crewWorkers);
+            _socialPlaytest.Reset(_dayIndex, _socialAura);
+            _coopWorkPlaytest.Reset(_dayIndex);
+            BindExcavatorEngineerCooperation();
+        }
+
+        void BindExcavatorEngineerCooperation()
+        {
+            if (_engineer == null) return;
+            _engineer.BindCooperation(EvaluateExcavatorEngineerCoop);
+            _engineer.OnRepairDispatched = coop =>
+                _coopWorkPlaytest.NotifyDispatch(_dayIndex, coop);
+            _engineer.OnRepairBegun = coop =>
+                _coopWorkPlaytest.NotifyRepairBegin(_dayIndex, coop);
+            _engineer.OnRepairCompleted = c =>
+                _coopWorkPlaytest.NotifyRepairComplete(_dayIndex, c);
+            _engineer.OnRepairInterrupted = () =>
+                _coopWorkPlaytest.NotifyRepairInterrupted(_dayIndex);
+        }
+
+        CooperationAssessment EvaluateExcavatorEngineerCoop()
+        {
+            var excavOp = _worker != null ? _worker.AssignedWorker : null;
+            var engOp = _engineer != null ? _engineer.AssignedWorker : null;
+            if (excavOp == null || engOp == null || !_socialAura.IsBootstrapped)
+                return CooperationAssessment.Inactive();
+            return ExcavatorEngineerCooperation.Evaluate(excavOp, engOp, _socialAura.World);
+        }
+
+        void DevCycleTestRelationship()
+        {
+            if (!_socialAura.IsBootstrapped) return;
+            int mara = _workerMara != null ? _workerMara.WorkerId : RelationshipWorkPlaytestTracker.DefaultExcavId;
+            int viktor = _workerViktor != null ? _workerViktor.WorkerId : RelationshipWorkPlaytestTracker.DefaultEngId;
+            var preset = _coopWorkPlaytest.CycleAndApply(
+                _socialAura.World, _socialAura.Memory, mara, viktor, _absoluteGameHours);
+            DigHoodLog.Push($"DEV | SET TEST RELATIONSHIP → {_coopWorkPlaytest.LastPresetLabel} (Mara↔Viktor)");
+            _ = preset;
+        }
+
+        void SpawnCrewAvatars()
+        {
+            if (_crewWorkers == null || _worldRoot == null) return;
+            _presence.Clear();
+            if (_avatarRoot != null)
+                Destroy(_avatarRoot.gameObject);
+            _avatarRoot = new GameObject("WorkerAvatars").transform;
+            _avatarRoot.SetParent(_worldRoot, false);
+
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                // Seed near default host so first Show (if any) is not origin pile-up
+                Vector2 seed = GetDefaultAvatarSeedPosition(wr);
+                var av = WorkerAvatar.Spawn(_avatarRoot, wr.WorkerId, wr.DisplayName, seed);
+                _presence.Register(av);
+            }
+        }
+
+        Vector2 GetDefaultAvatarSeedPosition(WorkerRuntime wr)
+        {
+            if (wr == null) return Vector2.zero;
+            // Match Stage B default mapping for seed only
+            return wr.WorkerId switch
+            {
+                1 => _prospector != null ? _prospector.Position + new Vector2(-0.35f, 0.2f) : Vector2.zero,
+                2 => _worker != null ? _worker.Position + new Vector2(0.35f, 0.15f) : Vector2.zero,
+                3 => _hauler != null ? _hauler.Position + new Vector2(-0.3f, -0.25f) : Vector2.zero,
+                4 => _refiner != null ? _refiner.Position + new Vector2(0.3f, -0.2f) : Vector2.zero,
+                5 => _engineer != null ? _engineer.Position + new Vector2(0.25f, 0.3f) : Vector2.zero,
+                _ => Vector2.zero,
+            };
+        }
+
+        /// <summary>
+        /// Physical person position for a job: where the operator is while working.
+        /// Uses the behaviour host Transform (person/machine) so presence tracks real motion.
+        /// </summary>
+        Vector2 GetProviderOperatePoint(JobType job)
+        {
+            switch (job)
+            {
+                case JobType.Prospecting:
+                    // Operator body is ProspectorPerson (travels to scanner, investigates, etc.)
+                    return _prospector != null ? _prospector.Position : Vector2.zero;
+                case JobType.Excavation:
+                    return _worker != null ? _worker.Position : Vector2.zero;
+                case JobType.Hauling:
+                    return _hauler != null ? _hauler.Position : Vector2.zero;
+                case JobType.Refining:
+                    return _refiner != null ? _refiner.Position : Vector2.zero;
+                case JobType.Engineering:
+                    return _engineer != null ? _engineer.Position : Vector2.zero;
+                default:
+                    return Vector2.zero;
+            }
+        }
+
+        /// <summary>Exit snap near host when leaving (V1 — no travel automation).</summary>
+        Vector2 GetProviderExitPoint(JobType job)
+        {
+            Vector2 op = GetProviderOperatePoint(job);
+            return op + job switch
+            {
+                JobType.Excavation => new Vector2(0.32f, 0.1f),
+                JobType.Hauling => new Vector2(-0.28f, 0.12f),
+                JobType.Prospecting => new Vector2(0.22f, -0.18f),
+                JobType.Refining => new Vector2(-0.35f, -0.15f),
+                JobType.Engineering => new Vector2(0.3f, -0.2f),
+                _ => Vector2.zero,
+            };
+        }
+
+        void ParkAvatarLeavingJob(WorkerRuntime wr, JobType job)
+        {
+            if (wr == null || job == JobType.Unassigned) return;
+            var av = _presence.Get(wr);
+            if (av == null) return;
+            av.ParkAt(GetProviderExitPoint(job));
+            av.ClearFollowing();
+            av.Show();
+            av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+        }
+
+        /// <summary>
+        /// Sync every avatar Transform to assignment while OnShift:
+        /// assigned → operate point + hide; unassigned → visible.
+        /// Off-shift: commute/sleep owns presence — do not snap to providers.
+        /// </summary>
+        void RefreshAllAvatarPresence()
+        {
+            if (_crewWorkers == null) return;
+            if (_crewPhase != CrewPhase.OnShift)
+                return;
+
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                var av = _presence.Get(wr.WorkerId);
+                if (av == null) continue;
+
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                if (asg == null || asg.JobType == JobType.Unassigned)
+                {
+                    av.ClearFollowing();
+                    if (av.IsVisuallyHidden)
+                        av.Show();
+                    av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                    continue;
+                }
+
+                av.SetPresencePosition(GetProviderOperatePoint(asg.JobType));
+                av.SetFollowing(asg.ProviderId);
+                av.Hide();
+                av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+            }
+        }
+
+        /// <summary>Assigned avatars while OnShift: Transform tracks host (visibility separate).</summary>
+        void SyncMovingAssignedAvatars()
+        {
+            if (_crewPhase != CrewPhase.OnShift) return;
+            if (_crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                if (asg == null || asg.JobType == JobType.Unassigned) continue;
+                var av = _presence.Get(wr.WorkerId);
+                if (av == null) continue;
+                av.SetPresencePosition(GetProviderOperatePoint(asg.JobType));
+                av.SetFollowing(asg.ProviderId);
+            }
+        }
+
+        void StampLiveProviderAssignments()
+        {
+            void Stamp(WorkerRuntime wr, JobType job, string providerId)
+            {
+                if (wr == null || string.IsNullOrEmpty(providerId)) return;
+                _assignments.AssignInternal(wr.WorkerId, job, providerId, _absoluteGameHours);
+            }
+
+            Stamp(_workerLewis, JobType.Prospecting,
+                _fieldScanner != null
+                    ? _fieldScanner.ProviderId
+                    : JobStatPreview.BehaviourKey(JobType.Prospecting));
+            Stamp(_workerMara, JobType.Excavation, _worker != null ? _worker.ProviderId : null);
+            Stamp(_workerKowalski, JobType.Hauling, _hauler != null ? _hauler.ProviderId : null);
+            Stamp(_workerElena, JobType.Refining, _refiner != null ? _refiner.ProviderId : null);
+            Stamp(_workerViktor, JobType.Engineering, _engineer != null ? _engineer.ProviderId : null);
+        }
+
+        void SyncProspectingFindingsAuthor()
+        {
+            var wr = _prospector != null ? _prospector.AssignedWorker : null;
+            _scanHistory?.Findings?.SetAuthor(wr);
+        }
+
+        IWorkProvider GetProvider(JobType job) => job switch
+        {
+            JobType.Prospecting => (IWorkProvider)_fieldScanner
+                ?? null, // scanner may be null — prospecting body still works via BehaviourKey
+            JobType.Excavation => _worker,
+            JobType.Hauling => _hauler,
+            JobType.Refining => _refiner,
+            JobType.Engineering => _engineer,
+            _ => null,
+        };
+
+        string ResolveProviderId(JobType job)
+        {
+            var p = GetProvider(job);
+            if (p != null && !string.IsNullOrEmpty(p.ProviderId))
+                return p.ProviderId;
+            if (job == JobType.Prospecting && _fieldScanner != null)
+                return _fieldScanner.ProviderId;
+            return JobStatPreview.BehaviourKey(job);
+        }
+
+        WorkerRuntime GetBodyAssignedWorker(JobType job) => job switch
+        {
+            JobType.Prospecting => _prospector != null ? _prospector.AssignedWorker : null,
+            JobType.Excavation => _worker != null ? _worker.AssignedWorker : null,
+            JobType.Hauling => _hauler != null ? _hauler.AssignedWorker : null,
+            JobType.Refining => _refiner != null ? _refiner.AssignedWorker : null,
+            JobType.Engineering => _engineer != null ? _engineer.AssignedWorker : null,
+            _ => null,
+        };
+
+        // ——— F1: selected WorkerId + control resolver (gameplay routing) ———
+
+        static JobType LegacySlotToJob(ControlWorker slot) => slot switch
+        {
+            ControlWorker.Prospector => JobType.Prospecting,
+            ControlWorker.Excavator => JobType.Excavation,
+            ControlWorker.Hauler => JobType.Hauling,
+            ControlWorker.Refiner => JobType.Refining,
+            ControlWorker.Engineer => JobType.Engineering,
+            _ => JobType.Unassigned,
+        };
+
+        WorkerRuntime FindCrewWorker(int workerId)
+        {
+            if (workerId <= 0 || _crewWorkers == null) return null;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w != null && w.WorkerId == workerId) return w;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Temporary debug bridge only — NOT used by TAB/roster after F2.
+        /// Legacy UI slot → AssignedWorker on that job → selectedWorkerId.
+        /// </summary>
+        [System.Obsolete("F2/F5: debug-only — TAB/roster use SelectPersonById")]
+        void BridgeSelectedWorkerFromLegacySlot()
+        {
+            var wr = GetBodyAssignedWorker(LegacySlotToJob(_control));
+            _selectedWorkerId = wr != null ? wr.WorkerId : 0;
+        }
+
+        /// <summary>F3 canonical selection. Does not change when assignment changes.</summary>
+        void SelectPersonById(int workerId)
+        {
+            if (workerId <= 0 || FindCrewWorker(workerId) == null)
+            {
+                _selectedWorkerId = 0;
+                return;
+            }
+            _selectedWorkerId = workerId;
+            // F3: open sheet follows newly selected person (does not auto-open)
+            if (_openStatsWorkerId > 0)
+                _openStatsWorkerId = workerId;
+        }
+
+        void SelectPerson(WorkerRuntime wr)
+        {
+            if (wr == null) return;
+            SelectPersonById(wr.WorkerId);
+        }
+
+        void ToggleStatsSheetForWorker(int workerId)
+        {
+            if (FindCrewWorker(workerId) == null) return;
+            if (_openStatsWorkerId == workerId)
+            {
+                _openStatsWorkerId = 0;
+                return;
+            }
+            _openStatsWorkerId = workerId;
+            if (_selectedWorkerId != workerId)
+                SelectPersonById(workerId);
+        }
+
+        void ToggleStatsSheetForSelected()
+        {
+            if (_selectedWorkerId <= 0) return;
+            ToggleStatsSheetForWorker(_selectedWorkerId);
+        }
+
+        // SyncLegacyControlDeferredFromSelection removed in F5 — banter no longer uses _control.
+
+        /// <summary>
+        /// Maps job → legacy profile-recipe slot for <see cref="WorkerStatProfiles.Build"/> only.
+        /// Not used for ST sheet targeting after F3.
+        /// </summary>
+        static int JobToLegacyRoleIndex(JobType job) => job switch
+        {
+            JobType.Prospecting => 0,
+            JobType.Excavation => 1,
+            JobType.Hauling => 2,
+            JobType.Refining => 3,
+            JobType.Engineering => 4,
+            _ => -1,
+        };
+
+        static WorkerBanter.JobContext JobContextFrom(JobType job) => job switch
+        {
+            JobType.Prospecting => WorkerBanter.JobContext.Prospecting,
+            JobType.Excavation => WorkerBanter.JobContext.Excavation,
+            JobType.Hauling => WorkerBanter.JobContext.Hauling,
+            JobType.Refining => WorkerBanter.JobContext.Refining,
+            JobType.Engineering => WorkerBanter.JobContext.Engineering,
+            _ => WorkerBanter.JobContext.Prospecting,
+        };
+
+        /// <summary>
+        /// F5: job-host event → AssignedWorker → WorkerId speech.
+        /// Vacant host or off-shift/commute: no worker speech.
+        /// Authorship freezes inside <see cref="WorkerBanter.TrySay"/>.
+        /// </summary>
+        bool TryAssignedBanter(JobType job, string sourceEvent, params string[] lines)
+        {
+            if (job == JobType.Unassigned) return false;
+            return TryWorkerBanter(GetBodyAssignedWorker(job), job, sourceEvent, lines);
+        }
+
+        bool TryWorkerBanter(WorkerRuntime wr, JobType job, string sourceEvent, params string[] lines)
+        {
+            if (wr == null) return false;
+            if (!CanPerformJobActions(wr)) return false;
+            if (job == JobType.Unassigned) return false;
+            return _banter.TrySay(
+                wr.WorkerId,
+                wr.DisplayName,
+                JobContextFrom(job),
+                sourceEvent,
+                _absoluteGameHours,
+                lines);
+        }
+
+        /// <summary>
+        /// Findings / delayed attribution: use frozen WorkerId from the event, not current assignment.
+        /// Still requires the author to exist in crew; does not require CanPerform (historical).
+        /// </summary>
+        bool TryAuthoredBanter(int workerId, string displayName, JobType jobContext,
+            string sourceEvent, params string[] lines)
+        {
+            if (workerId <= 0) return false;
+            var wr = FindCrewWorker(workerId);
+            string name = wr != null ? wr.DisplayName : displayName;
+            if (string.IsNullOrEmpty(name)) name = $"Worker {workerId}";
+            if (jobContext == JobType.Unassigned) jobContext = JobType.Prospecting;
+            return _banter.TrySay(
+                workerId,
+                name,
+                JobContextFrom(jobContext),
+                sourceEvent,
+                _absoluteGameHours,
+                lines);
+        }
+
+        static Color AccentForWorkerId(int id) => id switch
+        {
+            1 => UiCyan,
+            2 => UiAmber,
+            3 => UiGreen,
+            4 => new Color(0.7f, 0.55f, 1f),
+            5 => new Color(1f, 0.55f, 0.22f),
+            _ => UiDim,
+        };
+
+        string ProviderLabelForAssignment(WorkerAssignment asg)
+        {
+            if (asg == null || string.IsNullOrEmpty(asg.ProviderId)) return "—";
+            if (asg.ProviderId.Contains(".")) return asg.ProviderId;
+            return asg.ProviderDisplayLabel;
+        }
+
+        /// <summary>
+        /// Canonical answer: which person is selected, and which host receives their job input.
+        /// Off-shift / commute: physical target is WorkerAvatar even if assignment persists.
+        /// </summary>
+        WorkerControlTarget ResolveControlTarget()
+        {
+            var wr = FindCrewWorker(_selectedWorkerId);
+            if (wr == null)
+                return WorkerControlTarget.None;
+
+            var asg = _assignments.GetAssignment(wr.WorkerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            string providerId = asg != null ? asg.ProviderId : "";
+            var avatar = _presence.Get(wr.WorkerId);
+            var phys = GetPhysicalState(wr);
+            string host;
+            if (phys != WorkerPhysicalState.Operating && phys != WorkerPhysicalState.Idle)
+            {
+                host = phys switch
+                {
+                    WorkerPhysicalState.CommutingHome => "WorkerAvatar (commuting home)",
+                    WorkerPhysicalState.CommutingToWork => "WorkerAvatar (commuting to work)",
+                    WorkerPhysicalState.Sleeping => "WorkerAvatar (sleeping)",
+                    _ => "WorkerAvatar",
+                };
+            }
+            else
+            {
+                host = job switch
+                {
+                    JobType.Prospecting => "ProspectorPerson",
+                    JobType.Excavation => "FreeWorkerController",
+                    JobType.Hauling => "HaulerPerson",
+                    JobType.Refining => "RefinerPerson",
+                    JobType.Engineering => "EngineerPerson",
+                    _ => "WorkerAvatar (idle)",
+                };
+            }
+            return new WorkerControlTarget(wr, job, providerId, avatar, host);
+        }
+
+        WorkerPhysicalState GetPhysicalState(WorkerRuntime wr)
+        {
+            if (wr == null) return WorkerPhysicalState.Idle;
+            switch (_crewPhase)
+            {
+                case CrewPhase.HeadingHome: return WorkerPhysicalState.CommutingHome;
+                case CrewPhase.Asleep: return WorkerPhysicalState.Sleeping;
+                case CrewPhase.HeadingOut: return WorkerPhysicalState.CommutingToWork;
+                default:
+                {
+                    var asg = _assignments.GetAssignment(wr.WorkerId);
+                    if (asg != null && asg.JobType != JobType.Unassigned)
+                        return WorkerPhysicalState.Operating;
+                    return WorkerPhysicalState.Idle;
+                }
+            }
+        }
+
+        /// <summary>Assignment alone is not enough — person must be OnShift and Operating.</summary>
+        bool CanPerformJobActions(WorkerRuntime wr)
+        {
+            if (wr == null || _crewPhase != CrewPhase.OnShift) return false;
+            return GetPhysicalState(wr) == WorkerPhysicalState.Operating;
+        }
+
+        bool CanPerformSelectedJobActions()
+        {
+            return CanPerformJobActions(FindCrewWorker(_selectedWorkerId));
+        }
+
+        bool SelectedJobIs(JobType job)
+        {
+            if (!CanPerformSelectedJobActions()) return false;
+            var t = ResolveControlTarget();
+            return t.IsAssigned && t.JobType == job;
+        }
+
+        Transform ResolvePhysicalFollowTransform(in WorkerControlTarget t)
+        {
+            if (!t.HasPerson) return null;
+            var phys = GetPhysicalState(t.Worker);
+            // Commute / sleep / idle: camera follows the person avatar, not the leftover provider
+            if (phys != WorkerPhysicalState.Operating)
+                return t.Avatar != null ? t.Avatar.transform : null;
+            return t.JobType switch
+            {
+                JobType.Prospecting => _prospector != null ? _prospector.transform : null,
+                JobType.Excavation => _worker != null ? _worker.transform : null,
+                JobType.Hauling => _hauler != null ? _hauler.transform : null,
+                JobType.Refining => _refiner != null ? _refiner.transform : null,
+                JobType.Engineering => _engineer != null ? _engineer.transform : null,
+                _ => t.Avatar != null ? t.Avatar.transform : null,
+            };
+        }
+
+        /// <summary>Trivial idle WASD for unassigned selected person (no pathfinding).</summary>
+        void TickIdleAvatarMovement(WorkerAvatar avatar, Vector2 wasd)
+        {
+            if (avatar == null || wasd.sqrMagnitude < 0.01f) return;
+            const float speed = 1.1f;
+            Vector2 next = avatar.PresencePosition + wasd.normalized * (speed * Time.deltaTime);
+            avatar.SetPresencePosition(next);
+        }
+
+        /// <summary>
+        /// Stage E transactional assign: can-leave → can-enter → release → bind.
+        /// Never leaves a worker on two providers.
+        /// </summary>
+        bool TryAssignJob(WorkerRuntime worker, JobType job, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            if (job == JobType.Unassigned)
+                return TryUnassignJob(GetAssignmentJob(worker), out reason);
+
+            if (!HostExistsForJob(job))
+            {
+                reason = $"No host for {job}";
+                return false;
+            }
+
+            // 2. Target can accept?
+            if (job == JobType.Prospecting && _fieldScanner != null
+                && !_fieldScanner.CanAssign(worker, out reason))
+                return false;
+            var target = GetProvider(job);
+            if (target != null && !target.CanAssign(worker, out reason))
+                return false;
+            if (job == JobType.Prospecting && _fieldScanner == null && _prospector == null)
+            {
+                reason = "No Prospecting body";
+                return false;
+            }
+
+            // Already here?
+            var existing = _assignments.GetAssignment(worker.WorkerId);
+            if (existing != null && existing.JobType == job
+                && ReferenceEquals(GetBodyAssignedWorker(job), worker))
+            {
+                string pid = ResolveProviderId(job);
+                _assignments.AssignInternal(worker.WorkerId, job, pid, _absoluteGameHours);
+                NotifyProviderAssigned(job, worker);
+                if (job == JobType.Prospecting) SyncProspectingFindingsAuthor();
+                reason = "Already assigned";
+                return true;
+            }
+
+            // 1. Can leave current provider safely?
+            var currentJob = existing != null ? existing.JobType : JobType.Unassigned;
+            if (currentJob != JobType.Unassigned && currentJob != job)
+            {
+                if (!CanReleaseFromJob(currentJob, out reason))
+                    return false;
+            }
+
+            // Evict current occupant of target (they become Unassigned)
+            var occupant = GetBodyAssignedWorker(job);
+            if (occupant != null && !ReferenceEquals(occupant, worker))
+            {
+                YieldHost(job);
+                ParkAvatarLeavingJob(occupant, job);
+                ClearHost(job);
+                _assignments.Unassign(occupant.WorkerId);
+            }
+            else
+            {
+                YieldHost(job);
+            }
+
+            // Release worker from previous job bodies (after leave check passed)
+            if (currentJob != JobType.Unassigned && currentJob != job)
+            {
+                ParkAvatarLeavingJob(worker, currentJob);
+                ReleaseWorkerBody(worker, currentJob);
+            }
+
+            string providerId = ResolveProviderId(job);
+            if (!_assignments.AssignInternal(worker.WorkerId, job, providerId, _absoluteGameHours))
+            {
+                reason = "Assignment manager rejected";
+                return false;
+            }
+
+            SyncBodyBindingsAfterAssign();
+            BindHost(job, worker);
+            NotifyProviderAssigned(job, worker);
+            if (job == JobType.Prospecting)
+            {
+                SyncProspectingFindingsAuthor();
+                if (_fieldScanner != null
+                    && _fieldScanner.State == ProspectorScannerState.Packed
+                    && _crewPhase == CrewPhase.OnShift)
+                    _prospector.AssignScannerSetup(_fieldScanner);
+            }
+
+            RefreshAllAvatarPresence();
+
+            Debug.Assert(_assignments.CountWorkersOnJob(job) == 1);
+            Debug.Assert(!_assignments.HasDuplicateJobViolation(_crewWorkers));
+            DigHoodLog.Push(
+                $"ASSIGN | {job} → {worker.DisplayName} (id {worker.WorkerId}) @ {providerId}");
+            reason = "OK";
+            return true;
+        }
+
+        bool TryUnassignJob(JobType job, out string reason)
+        {
+            reason = "";
+            if (job == JobType.Unassigned)
+            {
+                reason = "Nothing to unassign";
+                return false;
+            }
+            if (!CanReleaseFromJob(job, out reason))
+                return false;
+
+            var wr = GetBodyAssignedWorker(job);
+            YieldHost(job);
+            if (wr != null)
+                ParkAvatarLeavingJob(wr, job);
+            ClearHost(job);
+            if (wr != null)
+                _assignments.Unassign(wr.WorkerId);
+            if (job == JobType.Prospecting)
+                SyncProspectingFindingsAuthor();
+
+            RefreshAllAvatarPresence();
+
+            DigHoodLog.Push($"ASSIGN | {job} → Unassigned");
+            reason = "OK";
+            return true;
+        }
+
+        JobType GetAssignmentJob(WorkerRuntime worker)
+        {
+            var a = worker != null ? _assignments.GetAssignment(worker.WorkerId) : null;
+            return a != null ? a.JobType : JobType.Unassigned;
+        }
+
+        bool HostExistsForJob(JobType job) => job switch
+        {
+            JobType.Prospecting => _prospector != null,
+            JobType.Excavation => _worker != null,
+            JobType.Hauling => _hauler != null,
+            JobType.Refining => _refiner != null,
+            JobType.Engineering => _engineer != null,
+            _ => false,
+        };
+
+        bool CanReleaseFromJob(JobType job, out string reason)
+        {
+            reason = "OK";
+            if (job == JobType.Prospecting
+                && _fieldScanner != null
+                && _fieldScanner.State == ProspectorScannerState.Scanning)
+            {
+                reason = "Scan in progress — finish first";
+                return false;
+            }
+            return true;
+        }
+
+        void YieldHost(JobType job)
+        {
+            switch (job)
+            {
+                case JobType.Prospecting: _prospector?.YieldForReassignment(); break;
+                case JobType.Excavation: _worker?.YieldForReassignment(); break;
+                case JobType.Hauling: _hauler?.YieldForReassignment(); break;
+                case JobType.Refining: _refiner?.YieldForReassignment(); break;
+                case JobType.Engineering: _engineer?.YieldForReassignment(); break;
+            }
+        }
+
+        void ClearHost(JobType job)
+        {
+            switch (job)
+            {
+                case JobType.Prospecting:
+                    _prospector?.ClearWorker();
+                    _fieldScanner?.NotifyUnassigned();
+                    break;
+                case JobType.Excavation:
+                    _worker?.ClearWorker();
+                    _worker?.NotifyUnassigned();
+                    break;
+                case JobType.Hauling:
+                    _hauler?.ClearWorker();
+                    _hauler?.NotifyUnassigned();
+                    break;
+                case JobType.Refining:
+                    _refiner?.ClearWorker();
+                    _refiner?.NotifyUnassigned();
+                    break;
+                case JobType.Engineering:
+                    _engineer?.ClearWorker();
+                    _engineer?.NotifyUnassigned();
+                    break;
+            }
+        }
+
+        void BindHost(JobType job, WorkerRuntime worker)
+        {
+            switch (job)
+            {
+                case JobType.Prospecting: _prospector?.BindWorker(worker); break;
+                case JobType.Excavation: _worker?.BindWorker(worker); break;
+                case JobType.Hauling: _hauler?.BindWorker(worker); break;
+                case JobType.Refining: _refiner?.BindWorker(worker); break;
+                case JobType.Engineering: _engineer?.BindWorker(worker); break;
+            }
+        }
+
+        void NotifyProviderAssigned(JobType job, WorkerRuntime worker)
+        {
+            switch (job)
+            {
+                case JobType.Prospecting: _fieldScanner?.NotifyAssigned(worker); break;
+                case JobType.Excavation: _worker?.NotifyAssigned(worker); break;
+                case JobType.Hauling: _hauler?.NotifyAssigned(worker); break;
+                case JobType.Refining: _refiner?.NotifyAssigned(worker); break;
+                case JobType.Engineering: _engineer?.NotifyAssigned(worker); break;
+            }
+        }
+
+        void ReleaseWorkerBody(WorkerRuntime worker, JobType job)
+        {
+            if (worker == null) return;
+            if (!ReferenceEquals(GetBodyAssignedWorker(job), worker)) return;
+            YieldHost(job);
+            ClearHost(job);
+        }
+
+        /// <summary>
+        /// Clear leftover body binds so assignment manager and hosts agree (no dual ownership).
+        /// </summary>
+        void SyncBodyBindingsAfterAssign()
+        {
+            if (_crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var asg = _assignments.GetAssignment(w.WorkerId);
+                JobType should = asg != null ? asg.JobType : JobType.Unassigned;
+
+                void DetachIfWrong(JobType hostJob, System.Func<WorkerRuntime> get, System.Action clear)
+                {
+                    var bound = get();
+                    if (bound != null && ReferenceEquals(bound, w) && should != hostJob)
+                    {
+                        YieldHost(hostJob);
+                        clear();
+                    }
+                }
+
+                DetachIfWrong(JobType.Prospecting,
+                    () => _prospector != null ? _prospector.AssignedWorker : null,
+                    () =>
+                    {
+                        _prospector?.ClearWorker();
+                        if (_fieldScanner != null && _fieldScanner.AssignedWorkerId == w.WorkerId)
+                            _fieldScanner.NotifyUnassigned();
+                    });
+                DetachIfWrong(JobType.Excavation,
+                    () => _worker != null ? _worker.AssignedWorker : null,
+                    () => { _worker?.ClearWorker(); _worker?.NotifyUnassigned(); });
+                DetachIfWrong(JobType.Hauling,
+                    () => _hauler != null ? _hauler.AssignedWorker : null,
+                    () => { _hauler?.ClearWorker(); _hauler?.NotifyUnassigned(); });
+                DetachIfWrong(JobType.Refining,
+                    () => _refiner != null ? _refiner.AssignedWorker : null,
+                    () => { _refiner?.ClearWorker(); _refiner?.NotifyUnassigned(); });
+                DetachIfWrong(JobType.Engineering,
+                    () => _engineer != null ? _engineer.AssignedWorker : null,
+                    () => { _engineer?.ClearWorker(); _engineer?.NotifyUnassigned(); });
+            }
+        }
+
+        // Thin wrappers — DEV UI / call sites
+        bool TryAssignProspecting(WorkerRuntime w, out string reason) =>
+            TryAssignJob(w, JobType.Prospecting, out reason);
+        bool TryUnassignProspecting(out string reason) =>
+            TryUnassignJob(JobType.Prospecting, out reason);
+        bool TryAssignExcavation(WorkerRuntime w, out string reason) =>
+            TryAssignJob(w, JobType.Excavation, out reason);
+        bool TryUnassignExcavation(out string reason) =>
+            TryUnassignJob(JobType.Excavation, out reason);
+        bool TryAssignHauling(WorkerRuntime w, out string reason) =>
+            TryAssignJob(w, JobType.Hauling, out reason);
+        bool TryUnassignHauling(out string reason) =>
+            TryUnassignJob(JobType.Hauling, out reason);
+        bool TryAssignRefining(WorkerRuntime w, out string reason) =>
+            TryAssignJob(w, JobType.Refining, out reason);
+        bool TryUnassignRefining(out string reason) =>
+            TryUnassignJob(JobType.Refining, out reason);
+        bool TryAssignEngineering(WorkerRuntime w, out string reason) =>
+            TryAssignJob(w, JobType.Engineering, out reason);
+        bool TryUnassignEngineering(out string reason) =>
+            TryUnassignJob(JobType.Engineering, out reason);
+
+        bool IsJobAssignBlocked(WorkerRuntime worker, JobType targetJob, out string reason)
+        {
+            reason = "";
+            if (worker == null) { reason = "No worker"; return true; }
+            if (targetJob == JobType.Prospecting && _fieldScanner != null
+                && !_fieldScanner.CanAssign(worker, out reason))
+                return true;
+            var asg = _assignments.GetAssignment(worker.WorkerId);
+            if (asg != null && asg.JobType != JobType.Unassigned && asg.JobType != targetJob
+                && !CanReleaseFromJob(asg.JobType, out reason))
+                return true;
+            return false;
+        }
+
+        /// <summary>Stage B: assignment JobType matches Stage A body binds (provider may be live id).</summary>
+        void AssertStageBBodyJobMapping()
+        {
+            void Check(WorkerRuntime wr, JobType job, params string[] allowedProviders)
+            {
+                if (wr == null) return;
+                var a = _assignments.GetAssignment(wr.WorkerId);
+                Debug.Assert(a != null && a.JobType == job, $"{wr.WorkerId} job mismatch");
+                bool ok = false;
+                for (int i = 0; i < allowedProviders.Length; i++)
+                {
+                    string allow = allowedProviders[i];
+                    if (a.ProviderId == allow) { ok = true; break; }
+                    if (allow.EndsWith(".*")
+                        && a.ProviderId.StartsWith(allow.Substring(0, allow.Length - 1)))
+                    { ok = true; break; }
+                }
+                Debug.Assert(ok, $"{wr.WorkerId} provider {a.ProviderId} not allowed");
+            }
+
+            Check(_workerLewis, JobType.Prospecting, "body.prospector", "scanner.*");
+            Check(_workerMara, JobType.Excavation, "body.excavator", "excavator.*");
+            Check(_workerKowalski, JobType.Hauling, "body.hauler", "hauler.*");
+            Check(_workerElena, JobType.Refining, "body.refiner", "washer.*");
+            Check(_workerViktor, JobType.Engineering, "body.engineer", "engineer.*");
+        }
+
         void OnDigImpact(TerrainCell before, bool broke)
         {
             if (before.DiamondCount > 0 && broke)
             {
-                _banter.TrySay(WorkerBanter.Voice.Excavator,
+                TryAssignedBanter(JobType.Excavation, "DiamondBroke",
                     "Diamonds! Catch that shimmer — haul it!",
                     "Ice in the rock. Real stones!",
                     "Crystal flash — don't lose that pile.",
@@ -372,7 +1452,7 @@ namespace DeepCore.FreeMovement
             }
             if (before.GoldCount > 0 && broke)
             {
-                _banter.TrySay(WorkerBanter.Voice.Excavator,
+                TryAssignedBanter(JobType.Excavation, "GoldBroke",
                     "Paydirt! That's the real stuff.",
                     "Gold in the teeth of the bit — haul it!",
                     "There she is. Yellow as sin.",
@@ -382,12 +1462,12 @@ namespace DeepCore.FreeMovement
             if (before.BedrockCount >= 2)
             {
                 if (broke)
-                    _banter.TrySay(WorkerBanter.Voice.Excavator,
+                    TryAssignedBanter(JobType.Excavation, "BedrockBroke",
                         "Finally chewed through that plate.",
                         "Bedrock's done. Took its sweet time.",
                         "Hard stuff cracked. Moving on.");
                 else
-                    _banter.TrySay(WorkerBanter.Voice.Excavator,
+                    TryAssignedBanter(JobType.Excavation, "BedrockHit",
                         "Solid plate. This'll eat the morning.",
                         "Bedrock. Bit's complainin' already.",
                         "Hard face — find a seam or grind.",
@@ -453,39 +1533,44 @@ namespace DeepCore.FreeMovement
                 {
                     if (_scannerPlanMode) ExitScannerPlanMode();
                     else if (_scannerPlaceMode) ExitScannerPlacementMode();
-                    else if (_control == ControlWorker.Excavator)
+                    else if (SelectedJobIs(JobType.Excavation))
                         _worker.ClearRoute();
                 }
-                if (kb.backspaceKey.wasPressedThisFrame && _control == ControlWorker.Excavator)
+                if (kb.backspaceKey.wasPressedThisFrame && SelectedJobIs(JobType.Excavation))
                     _worker.UndoLastPin();
-                if (_control == ControlWorker.Excavator &&
+                if (SelectedJobIs(JobType.Excavation) &&
                     (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame))
                     _worker.AddPin(_worker.Position, replaceRoute: false);
                 if (kb.rKey.wasPressedThisFrame) ResetMap();
-                if (kb.bKey.wasPressedThisFrame) _showBalanceHarness = !_showBalanceHarness;
+                if (kb.bKey.wasPressedThisFrame)
+                {
+                    _showBalanceHarness = !_showBalanceHarness;
+                    _hudPopup = _showBalanceHarness ? HudPopupKind.Balance : HudPopupKind.None;
+                }
                 if (kb.lKey.wasPressedThisFrame) TryPlaceLantern();
                 if (kb.tKey.wasPressedThisFrame) _tactical?.Toggle();
-                if (kb.tabKey.wasPressedThisFrame) CycleControl(+1);
+                if (kb.tabKey.wasPressedThisFrame) CycleSelectedPerson(+1);
+                if (kb.iKey.wasPressedThisFrame) ToggleStatsSheetForSelected();
                 if (kb.uKey.wasPressedThisFrame) _playerTactical?.Toggle();
                 if (kb.hKey.wasPressedThisFrame
                     && _playerTactical != null && _playerTactical.Visible)
                     _scanHistoryBrowserOpen = !_scanHistoryBrowserOpen;
                 if (kb.nKey.wasPressedThisFrame) SkipSleep();
-                if (kb.yKey.wasPressedThisFrame && _control == ControlWorker.Prospector)
+                if (kb.yKey.wasPressedThisFrame && SelectedJobIs(JobType.Prospecting))
                 {
                     if (_scannerPlanMode) ExitScannerPlanMode();
                     ToggleScannerPlacementMode();
                 }
-                if (kb.cKey.wasPressedThisFrame && _control == ControlWorker.Prospector)
+                if (kb.cKey.wasPressedThisFrame && SelectedJobIs(JobType.Prospecting))
                     ToggleScannerPlanMode();
-                if (kb.equalsKey.wasPressedThisFrame)
+                if (kb.equalsKey.wasPressedThisFrame && SelectedJobIs(JobType.Prospecting))
                 {
                     if (_fieldScanner != null && _fieldScanner.State == ProspectorScannerState.Scanning)
                         _fieldScanner.DebugForceCompleteScan(_absoluteGameHours);
                     else
                         _prospector?.DebugForceFinishScannerSetup();
                 }
-                if (_prospector != null)
+                if (_prospector != null && SelectedJobIs(JobType.Prospecting))
                 {
                     bool boost = kb.leftAltKey.isPressed || kb.rightAltKey.isPressed;
                     if (_prospector.IsSettingUpScanner)
@@ -495,25 +1580,26 @@ namespace DeepCore.FreeMovement
                     else
                         _prospector.SetDebugScanSpeedMul(1f);
                 }
-                if (kb.digit1Key.wasPressedThisFrame && !_scannerPlaceMode)
+                if (SelectedJobIs(JobType.Prospecting) && kb.digit1Key.wasPressedThisFrame && !_scannerPlaceMode)
                 {
                     _prospector?.SetDistance(ScanDistance.Short);
                     if (_scannerPlanMode) ApplyPlanPresetsFromProspector();
                 }
-                if (kb.digit2Key.wasPressedThisFrame && !_scannerPlaceMode)
+                if (SelectedJobIs(JobType.Prospecting) && kb.digit2Key.wasPressedThisFrame && !_scannerPlaceMode)
                 {
                     _prospector?.SetDistance(ScanDistance.Medium);
                     if (_scannerPlanMode) ApplyPlanPresetsFromProspector();
                 }
-                if (kb.digit3Key.wasPressedThisFrame && !_scannerPlaceMode)
+                if (SelectedJobIs(JobType.Prospecting) && kb.digit3Key.wasPressedThisFrame && !_scannerPlaceMode)
                 {
                     _prospector?.SetDistance(ScanDistance.Long);
                     if (_scannerPlanMode) ApplyPlanPresetsFromProspector();
                 }
                 if (kb.qKey.wasPressedThisFrame)
                 {
-                    if (_scannerPlaceMode) RotateScannerPlacement(-15f);
-                    else
+                    if (_scannerPlaceMode && SelectedJobIs(JobType.Prospecting))
+                        RotateScannerPlacement(-15f);
+                    else if (SelectedJobIs(JobType.Prospecting))
                     {
                         _prospector?.SetWidth(ScanWidth.Narrow);
                         if (_scannerPlanMode) ApplyPlanPresetsFromProspector();
@@ -521,70 +1607,51 @@ namespace DeepCore.FreeMovement
                 }
                 if (kb.eKey.wasPressedThisFrame)
                 {
-                    if (_scannerPlaceMode) RotateScannerPlacement(+15f);
-                    else
+                    if (_scannerPlaceMode && SelectedJobIs(JobType.Prospecting))
+                        RotateScannerPlacement(+15f);
+                    else if (SelectedJobIs(JobType.Prospecting))
                     {
                         _prospector?.SetWidth(ScanWidth.Wide);
                         if (_scannerPlanMode) ApplyPlanPresetsFromProspector();
                     }
                 }
                 if ((kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame)
-                    && _scannerPlanMode && _control == ControlWorker.Prospector)
+                    && _scannerPlanMode && SelectedJobIs(JobType.Prospecting))
                     ConfirmScannerPlan();
-                if (_control == ControlWorker.Prospector && _prospector != null && _crewPhase == CrewPhase.OnShift
+                if (SelectedJobIs(JobType.Prospecting) && _prospector != null && _crewPhase == CrewPhase.OnShift
                     && !_scannerPlaceMode && !_scannerPlanMode)
                 {
                     if (kb.leftShiftKey.wasPressedThisFrame || kb.rightShiftKey.wasPressedThisFrame)
                         _prospector.SetRadar(false);
                     else if (kb.spaceKey.wasPressedThisFrame && !_prospector.HasScannerAssignment)
                     {
-                        // Radar cone preview only — legacy SPACE sweep scan removed
                         if (!_prospector.RadarOn)
                             _prospector.SetRadar(true);
                     }
                 }
-                if (kb.gKey.wasPressedThisFrame && _control == ControlWorker.Hauler)
+                if (kb.gKey.wasPressedThisFrame && SelectedJobIs(JobType.Hauling))
                     _hauler?.TogglePreferGold();
-                if (kb.gKey.wasPressedThisFrame && _control == ControlWorker.Refiner)
+                if (kb.gKey.wasPressedThisFrame && SelectedJobIs(JobType.Refining))
                     _refiner?.TogglePriority();
             }
 
-            // Only run normal worker AI while on shift
+            // F1: tick all hosts; WASD / player job input only to selected person's current job
             if (_crewPhase == CrewPhase.OnShift)
             {
-                switch (_control)
-                {
-                    case ControlWorker.Prospector:
-                        _worker.Tick(Vector2.zero);
-                        _prospector?.SetHudVisible(true);
-                        _prospector?.Tick(wasd, scanPulse);
-                        _refiner?.Tick(Vector2.zero);
-                        break;
-                    case ControlWorker.Excavator:
-                        _prospector?.SetHudVisible(false);
-                        _worker.Tick(wasd);
-                        _prospector?.Tick(Vector2.zero, false);
-                        _refiner?.Tick(Vector2.zero);
-                        break;
-                    case ControlWorker.Hauler:
-                        _worker.Tick(Vector2.zero);
-                        _prospector?.SetHudVisible(false);
-                        _prospector?.Tick(Vector2.zero, false);
-                        _refiner?.Tick(Vector2.zero);
-                        break;
-                    case ControlWorker.Refiner:
-                        _worker.Tick(Vector2.zero);
-                        _prospector?.SetHudVisible(false);
-                        _prospector?.Tick(Vector2.zero, false);
-                        _refiner?.Tick(wasd);
-                        break;
-                    case ControlWorker.Engineer:
-                        _worker.Tick(Vector2.zero);
-                        _prospector?.SetHudVisible(false);
-                        _prospector?.Tick(Vector2.zero, false);
-                        _refiner?.Tick(Vector2.zero);
-                        break;
-                }
+                var ctl = ResolveControlTarget();
+                Vector2 digWasd = ctl.JobType == JobType.Excavation ? wasd : Vector2.zero;
+                Vector2 prosWasd = ctl.JobType == JobType.Prospecting ? wasd : Vector2.zero;
+                Vector2 refWasd = ctl.JobType == JobType.Refining ? wasd : Vector2.zero;
+                bool prosPulse = ctl.JobType == JobType.Prospecting && scanPulse;
+
+                _prospector?.SetHudVisible(ctl.JobType == JobType.Prospecting);
+                _worker.Tick(digWasd);
+                _prospector?.Tick(prosWasd, prosPulse);
+                _refiner?.Tick(refWasd);
+
+                if (ctl.IsIdlePerson && GetPhysicalState(ctl.Worker) == WorkerPhysicalState.Idle)
+                    TickIdleAvatarMovement(ctl.Avatar, wasd);
+
                 _hauler?.Tick();
                 float hoursNow = Time.deltaTime / SecondsPerGameHour;
                 _hauler?.SetGameHours(_absoluteGameHours);
@@ -592,12 +1659,12 @@ namespace DeepCore.FreeMovement
                 if (_engineer != null)
                 {
                     if (_engineer.IsEnRoute && !_engineerWasEnRoute)
-                        _banter.TrySay(WorkerBanter.Voice.Engineer,
+                        TryAssignedBanter(JobType.Engineering, "EngineerEnRoute",
                             "She's redlined. I'm moving.",
                             "Heat spike — engineer en route.",
                             "Don't touch the bit. I've got it.");
                     if (_engineer.IsRepairing && !_engineerWasRepairing)
-                        _banter.TrySay(WorkerBanter.Voice.Engineer,
+                        TryAssignedBanter(JobType.Engineering, "EngineerRepairing",
                             "Bit's glowing. Hang on — I'll clear the jam.",
                             "Overheat lock. Coolant and wrench, coming in.",
                             "Stand by. I'm on the drill.");
@@ -616,6 +1683,12 @@ namespace DeepCore.FreeMovement
             UpdateStockpileHover();
             SyncRoutePinsToScanView();
             _balance.Tick(Time.deltaTime);
+            // F1: leave scanner modes if selected person is no longer Prospecting
+            if ((_scannerPlaceMode || _scannerPlanMode) && !SelectedJobIs(JobType.Prospecting))
+            {
+                ExitScannerPlanMode();
+                ExitScannerPlacementMode();
+            }
             UpdateScannerPlacementGhost();
             FollowCamera();
         }
@@ -624,14 +1697,26 @@ namespace DeepCore.FreeMovement
         {
             float prev = _gameHour;
             float hoursDelta = Time.deltaTime / SecondsPerGameHour;
+            _lastSocialGameHoursDelta = hoursDelta;
             _gameHour += hoursDelta;
             _absoluteGameHours += hoursDelta;
+            WorkerStateClock.GameHours = _absoluteGameHours;
             if (_gameHour >= 24f)
             {
                 _gameHour -= 24f;
                 _dayIndex++;
+                _coopWorkPlaytest.EnsureDay(_dayIndex);
             }
             ApplyDayNightLight();
+
+            // V1.2B: conservative daytime meter drift while OnShift (not job demand)
+            if (_crewPhase == CrewPhase.OnShift && _crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                    WorkerStateDaytimeRecovery.Tick(_crewWorkers[i], hoursDelta);
+                TickJobDemands(hoursDelta);
+                TickProspectorDrySpell(hoursDelta);
+            }
 
             _scanHistory?.Findings.SetGameHours(_absoluteGameHours);
 
@@ -639,20 +1724,22 @@ namespace DeepCore.FreeMovement
             _logisticsTraffic?.TickDecay(hoursDelta);
             _hauler?.SetGameHours(_absoluteGameHours);
 
-            // Prospector scanner setup advances on game time (not a separate real-time timer)
-            _prospector?.TickScannerGameTime(hoursDelta);
-            _prospector?.TickInvestigationGameTime(hoursDelta, _absoluteGameHours);
+            // Worker-required prospector labour only while OnShift (assignment may persist overnight)
+            if (_crewPhase == CrewPhase.OnShift)
+            {
+                _prospector?.TickScannerGameTime(hoursDelta);
+                _prospector?.TickInvestigationGameTime(hoursDelta, _absoluteGameHours);
+            }
 
-            // Stage-2 heavy scan: game-time progression (local Alt multiplier does not change clock)
+            // Equipment scan may finish overnight (like washer) — no new worker setup
             if (_fieldScanner != null && _fieldScanner.State == ProspectorScannerState.Scanning)
             {
                 float mul = _prospector != null ? _prospector.DebugScanSpeedMul : 1f;
                 _fieldScanner.TickScanGameHours(hoursDelta * mul, _absoluteGameHours);
             }
 
-            // Stage-4 timed analysis — 1× game clock by default.
-            // Pauses while Prospector is away on field/refiner trips (desk work only).
-            // Alt only: optional debug accel (does not apply scan's 12× always-on mul).
+            // Desk analysis requires OnShift presence
+            if (_crewPhase == CrewPhase.OnShift)
             {
                 bool deskActive = _prospector == null
                     || _prospector.WorkMode != ProspectorWorkMode.Investigate
@@ -676,11 +1763,15 @@ namespace DeepCore.FreeMovement
             if (_crewPhase == CrewPhase.OnShift && prev < ShiftEndHour && _gameHour >= ShiftEndHour)
                 BeginHeadingHome();
             if (_crewPhase == CrewPhase.Asleep && prev < ShiftStartHour && _gameHour >= ShiftStartHour)
+            {
+                ApplyCrewSleepRecoveryFraction(Mathf.Max(0f, 1f - _sleepRecoveryApplied01));
+                _sleepRecoveryApplied01 = 1f;
                 BeginHeadingOut(announce: true);
+            }
 
-            // Sleep recovery: Frustration −2 / real second while crew is asleep
+            // Sleep recovery: person-level for entire crew (not Excavator host)
             if (_crewPhase == CrewPhase.Asleep)
-                _worker?.TickRestFrustrationRelief(Time.deltaTime);
+                TickCrewSleepRecovery(Time.deltaTime);
         }
 
         void ToggleScannerPlacementMode()
@@ -792,13 +1883,20 @@ namespace DeepCore.FreeMovement
                 _scanHistory.Findings.FindingAdded -= OnProspectorFindingAdded;
                 _scanHistory.Findings.FindingAdded += OnProspectorFindingAdded;
             }
+            SyncProspectingFindingsAuthor();
+            var wr = _prospector.AssignedWorker;
+            var profile = wr != null
+                ? GetSheetProfile(wr.WorkerId)
+                : WorkerSheetProfile.Baseline;
             if (!_fieldScanner.TryBeginScan(
-                    _scanHistory, _prospector.Stats, "Prospector", _absoluteGameHours,
-                    prospectorId: "prospector",
-                    prospectorProfile: _sheetProfile[(int)ControlWorker.Prospector],
+                    _scanHistory, _prospector.Stats,
+                    prospectorName: wr != null ? wr.DisplayName : "Prospector",
+                    absoluteGameHours: _absoluteGameHours,
+                    prospectorId: wr != null ? wr.WorkerId.ToString() : "0",
+                    prospectorProfile: profile,
                     prospectorProfileLabel: WorkerStatProfiles.Label(
-                        (byte)ControlWorker.Prospector,
-                        _sheetProfile[(int)ControlWorker.Prospector])))
+                        (byte)0, profile),
+                    workerId: wr != null ? wr.WorkerId : 0))
             {
                 DigHoodLog.Push("SCAN | Confirm failed — empty area or busy");
                 return;
@@ -865,31 +1963,45 @@ namespace DeepCore.FreeMovement
             _fieldScanner = ProspectorScannerEquipment.Spawn(
                 _worldRoot, _world, pos, facing);
             _fieldScanner.SetPreviewVisible(false);
+
+            // Link scanner as Prospecting provider for whoever currently holds the job
+            var wr = _prospector.AssignedWorker;
+            if (wr != null)
+            {
+                _assignments.AssignInternal(
+                    wr.WorkerId, JobType.Prospecting, _fieldScanner.ProviderId, _absoluteGameHours);
+                _fieldScanner.NotifyAssigned(wr);
+            }
             _prospector.AssignScannerSetup(_fieldScanner);
             DigHoodLog.Push(
-                $"SCANNER | PLACED PACKED | pos {pos.x:0.00},{pos.y:0.00} | facing {facing.x:0.00},{facing.y:0.00}");
+                $"SCANNER | PLACED {_fieldScanner.ProviderId} | by {(wr != null ? wr.DisplayName : "?")} | " +
+                $"pos {pos.x:0.00},{pos.y:0.00}");
             Debug.Log($"[SCANNER] Placed PACKED at ({pos.x:0.00},{pos.y:0.00}) — Prospector traveling to set up");
         }
 
         void TickCrewPhase()
         {
             if (_sleepCamp == null || _world == null) return;
-            EnsureCrewNav();
+            EnsurePersonNav();
             if (_crewPhase == CrewPhase.HeadingHome)
             {
                 _commuteTimer += Time.deltaTime;
                 Vector2 door = CampNavDestination;
-                // Walk radii only — excavator dig footprint is too fat for corridors
                 bool all = true;
-                all &= StepCrewHomeOrOut(0, _worker != null ? _worker.transform : null, door, _crewBodyR[0]);
-                all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, door + new Vector2(-0.15f, 0.12f), _crewBodyR[1]);
-                all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, door + new Vector2(0.2f, -0.1f), _crewBodyR[2]);
-                all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, door + new Vector2(-0.05f, -0.2f), _crewBodyR[3]);
-                all &= StepCrewHomeOrOut(4, _engineer != null ? _engineer.transform : null, door + new Vector2(0.15f, 0.2f), _crewBodyR[4]);
+                if (_crewWorkers != null)
+                {
+                    for (int i = 0; i < _crewWorkers.Length; i++)
+                    {
+                        var wr = _crewWorkers[i];
+                        if (wr == null) { _personArrived[i] = true; continue; }
+                        var av = _presence.Get(wr.WorkerId);
+                        Vector2 target = door + CampDoorOffsets[i % CampDoorOffsets.Length];
+                        all &= StepPersonCommute(i, av, target);
+                    }
+                }
                 bool anyStranded = false;
-                for (int i = 0; i < _crewStranded.Length; i++)
-                    if (_crewStranded[i]) anyStranded = true;
-                // Never teleport stranded workers through rock; timeout only sleeps if everyone can arrive.
+                for (int i = 0; i < _personStranded.Length; i++)
+                    if (_personStranded[i]) anyStranded = true;
                 if (all) EnterSleep();
                 else if (_commuteTimer >= CommuteTimeoutSec && !anyStranded) EnterSleep();
             }
@@ -897,11 +2009,17 @@ namespace DeepCore.FreeMovement
             {
                 _commuteTimer += Time.deltaTime;
                 bool all = true;
-                all &= StepCrewHomeOrOut(0, _worker != null ? _worker.transform : null, _workExcavator, _crewBodyR[0]);
-                all &= StepCrewHomeOrOut(1, _prospector != null ? _prospector.transform : null, _workProspector, _crewBodyR[1]);
-                all &= StepCrewHomeOrOut(2, _hauler != null ? _hauler.transform : null, _workHauler, _crewBodyR[2]);
-                all &= StepCrewHomeOrOut(3, _refiner != null ? _refiner.transform : null, _workRefiner, _crewBodyR[3]);
-                all &= StepCrewHomeOrOut(4, _engineer != null ? _engineer.transform : null, _workEngineer, _crewBodyR[4]);
+                if (_crewWorkers != null)
+                {
+                    for (int i = 0; i < _crewWorkers.Length; i++)
+                    {
+                        var wr = _crewWorkers[i];
+                        if (wr == null) { _personArrived[i] = true; continue; }
+                        var av = _presence.Get(wr.WorkerId);
+                        Vector2 target = GetMorningPersonDestination(wr, i);
+                        all &= StepPersonCommute(i, av, target);
+                    }
+                }
                 if (all || _commuteTimer >= CommuteTimeoutSec) EnterOnShift();
             }
         }
@@ -915,103 +2033,135 @@ namespace DeepCore.FreeMovement
             return TrySnapToNearestTunnel(ref p, bodyR) ? p : pos;
         }
 
-        void RefreshWorkPosts()
+        /// <summary>
+        /// Refresh provider location bookmarks (machines/stations stay put).
+        /// Person morning destinations resolve via assignment → provider, not these alone.
+        /// </summary>
+        void RefreshProviderWorkPosts()
         {
-            // Excavator returns to last dig face when one was saved; otherwise camp start pad.
             if (_hasExcavatorDigResume)
-                _workExcavator = SnapPostToTunnel(_excavatorDigResume, _crewBodyR[0]);
+                _providerPostExcavator = SnapPostToTunnel(_excavatorDigResume, _providerFootprintR[0]);
             else
-                _workExcavator = SnapPostToTunnel(_world.CellCenter(StartX, StartY), _crewBodyR[0]);
+                _providerPostExcavator = SnapPostToTunnel(_world.CellCenter(StartX, StartY), _providerFootprintR[0]);
 
-            // Prospector: resume investigation desk / trip stand if still investigating
             if (_prospector != null && _prospector.WorkMode == ProspectorWorkMode.Investigate)
             {
-                _workProspector = SnapPostToTunnel(
-                    _prospector.Investigation.ResumeWorldPosition, _crewBodyR[1]);
+                _providerPostProspector = SnapPostToTunnel(
+                    _prospector.Investigation.ResumeWorldPosition, AvatarCommuteRadius);
             }
             else
-                _workProspector = SnapPostToTunnel(_world.CellCenter(StartX - 4, StartY - 1), _crewBodyR[1]);
+                _providerPostProspector = SnapPostToTunnel(_world.CellCenter(StartX - 4, StartY - 1), AvatarCommuteRadius);
 
-            _workHauler = SnapPostToTunnel(_yard != null ? _yard.DropPoint : BasecampPos, _crewBodyR[2]);
-            _workRefiner = SnapPostToTunnel(_refiner != null ? _refiner.WorkPoint : BasecampPos, _crewBodyR[3]);
-            _workEngineer = SnapPostToTunnel(_yard != null ? _yard.DropPoint + new Vector2(0.55f, 0.35f) : BasecampPos, _crewBodyR[4]);
+            _providerPostHauler = SnapPostToTunnel(_yard != null ? _yard.DropPoint : BasecampPos, AvatarCommuteRadius);
+            _providerPostRefiner = SnapPostToTunnel(_refiner != null ? _refiner.WorkPoint : BasecampPos, AvatarCommuteRadius);
+            _providerPostEngineer = SnapPostToTunnel(
+                _yard != null ? _yard.DropPoint + new Vector2(0.55f, 0.35f) : BasecampPos, AvatarCommuteRadius);
         }
 
-        void EnsureCrewNav()
+        /// <summary>
+        /// Morning destination: WorkerId → assignment → provider operate point.
+        /// Unassigned → camp idle pad. Temporary bridge: walk/snap to provider then hide avatar.
+        /// </summary>
+        Vector2 GetMorningPersonDestination(WorkerRuntime wr, int rosterIndex)
+        {
+            if (wr == null) return CampNavDestination;
+            var asg = _assignments.GetAssignment(wr.WorkerId);
+            if (asg == null || asg.JobType == JobType.Unassigned)
+            {
+                Vector2 idle = CampNavDestination + CampDoorOffsets[rosterIndex % CampDoorOffsets.Length]
+                    + new Vector2(0.4f, -0.35f);
+                return SnapPostToTunnel(idle, AvatarCommuteRadius);
+            }
+
+            if (asg.JobType == JobType.Excavation && _hasExcavatorDigResume)
+                return SnapPostToTunnel(_excavatorDigResume, AvatarCommuteRadius);
+
+            Vector2 live = GetProviderOperatePoint(asg.JobType);
+            if (live.sqrMagnitude > 0.0001f)
+                return SnapPostToTunnel(live, AvatarCommuteRadius);
+
+            return asg.JobType switch
+            {
+                JobType.Prospecting => _providerPostProspector,
+                JobType.Excavation => _providerPostExcavator,
+                JobType.Hauling => _providerPostHauler,
+                JobType.Refining => _providerPostRefiner,
+                JobType.Engineering => _providerPostEngineer,
+                _ => CampNavDestination,
+            };
+        }
+
+        void EnsurePersonNav()
         {
             TunnelNavGrid.DebugLog = navDebugLog;
             TunnelPathfinder.DebugLog = navDebugLog;
             TunnelPathfinder.DebugDraw = navDebugDraw;
-            for (int i = 0; i < _crewNav.Length; i++)
+            for (int i = 0; i < _personNav.Length; i++)
             {
-                if (_crewNav[i] == null)
+                if (_personNav[i] == null)
                 {
-                    _crewNav[i] = new ExcavatedPathfinder(_world, _crewBodyR[i]);
-                    _crewNav[i].LateralOffset = _crewLateral[i];
+                    _personNav[i] = new ExcavatedPathfinder(_world, AvatarCommuteRadius);
+                    _personNav[i].LateralOffset = _personLateral[i];
                 }
-                _crewNav[i].SetAgentRadius(_crewBodyR[i]);
+                _personNav[i].SetAgentRadius(AvatarCommuteRadius);
             }
         }
 
-        bool StepCrewHomeOrOut(int idx, Transform t, Vector2 target, float bodyR)
+        bool StepPersonCommute(int rosterIndex, WorkerAvatar avatar, Vector2 target)
         {
-            if (t == null) { _arrived[idx] = true; return true; }
-            if (_arrived[idx]) return true;
-            if (_crewStranded[idx]) return false;
+            if (avatar == null) { _personArrived[rosterIndex] = true; return true; }
+            if (_personArrived[rosterIndex]) return true;
+            if (_personStranded[rosterIndex]) return false;
 
-            Vector2 p = t.localPosition;
-            float arrive = Mathf.Max(0.1f, bodyR * 0.85f);
+            Vector2 p = avatar.PresencePosition;
+            float arrive = Mathf.Max(0.1f, AvatarCommuteRadius * 0.85f);
             if ((target - p).sqrMagnitude <= arrive * arrive)
             {
-                t.localPosition = target;
-                _arrived[idx] = true;
-                _crewNav[idx]?.Invalidate();
+                avatar.SetPresencePosition(target);
+                _personArrived[rosterIndex] = true;
+                _personNav[rosterIndex]?.Invalidate();
                 return true;
             }
 
-            // Snap onto nearest open tunnel if somehow stuck in rock
             var cell = _world.WorldToCell(p);
             if (!_world.IsTunnelOpen(cell.x, cell.y))
             {
-                if (TrySnapToNearestTunnel(ref p, bodyR))
-                    t.localPosition = p;
+                if (TrySnapToNearestTunnel(ref p, AvatarCommuteRadius))
+                    avatar.SetPresencePosition(p);
             }
 
-            float speed = TravelSpeed * LoosePile.SpeedMulAt(p, bodyR);
-            bool done = _crewNav[idx].Follow(
+            float speed = TravelSpeed * LoosePile.SpeedMulAt(p, AvatarCommuteRadius);
+            bool done = _personNav[rosterIndex].Follow(
                 p,
                 target,
                 speed,
-                bodyR,
-                face: dir =>
-                {
-                    if (t == _worker?.transform && dir.sqrMagnitude > 0.0001f)
-                        t.up = dir;
-                },
-                tryStep: (dir, step) => CrewTryStep(t, dir, step, bodyR));
+                AvatarCommuteRadius,
+                face: _ => { },
+                tryStep: (dir, step) => PersonAvatarTryStep(avatar, dir, step));
 
-            if (_crewNav[idx] != null && _crewNav[idx].Stranded)
+            if (_personNav[rosterIndex] != null && _personNav[rosterIndex].Stranded)
             {
-                _crewStranded[idx] = true;
-                DigHoodLog.Push($"CREW {idx} | STRANDED — no path to destination");
+                _personStranded[rosterIndex] = true;
+                DigHoodLog.Push(
+                    $"CREW {avatar.DisplayName} | STRANDED — no path to destination");
                 return false;
             }
 
             if (done)
             {
-                t.localPosition = target;
-                _arrived[idx] = true;
-                _crewNav[idx]?.Invalidate();
+                avatar.SetPresencePosition(target);
+                _personArrived[rosterIndex] = true;
+                _personNav[rosterIndex]?.Invalidate();
             }
-            return _arrived[idx];
+            return _personArrived[rosterIndex];
         }
 
-        bool CrewTryStep(Transform t, Vector2 dir, float step, float bodyR)
+        bool PersonAvatarTryStep(WorkerAvatar avatar, Vector2 dir, float step)
         {
-            if (t == null || dir.sqrMagnitude < 0.00001f) return false;
-            Vector2 next = (Vector2)t.localPosition + dir.normalized * step;
-            if (_world.CircleHitsSolid(next, bodyR * 0.85f)) return false;
-            t.localPosition = next;
+            if (avatar == null || dir.sqrMagnitude < 0.00001f) return false;
+            Vector2 next = avatar.PresencePosition + dir.normalized * step;
+            if (_world.CircleHitsSolid(next, AvatarCommuteRadius * 0.85f)) return false;
+            avatar.SetPresencePosition(next);
             return true;
         }
 
@@ -1039,136 +2189,202 @@ namespace DeepCore.FreeMovement
         {
             _crewPhase = CrewPhase.HeadingHome;
             _commuteTimer = 0f;
-            for (int i = 0; i < _arrived.Length; i++)
+            for (int i = 0; i < _personArrived.Length; i++)
             {
-                _arrived[i] = false;
-                _crewStranded[i] = false;
+                _personArrived[i] = false;
+                _personStranded[i] = false;
             }
-            EnsureCrewNav();
-            for (int i = 0; i < _crewNav.Length; i++)
+            EnsurePersonNav();
+            for (int i = 0; i < _personNav.Length; i++)
             {
-                if (_crewNav[i] == null) continue;
-                _crewNav[i].CampReturnMode = true;
-                _crewNav[i].Invalidate();
+                if (_personNav[i] == null) continue;
+                _personNav[i].CampReturnMode = true;
+                _personNav[i].Invalidate();
             }
-            SetAllCrewVisible(true);
-            // Remember dig face + keep route pins overnight (do not ClearRoute).
+
+            // Remember dig face for machine bookmark — excavator stays put
             if (_worker != null)
             {
                 _excavatorDigResume = SnapPostToTunnel(
-                    _worker.CaptureShiftBreakBookmark(), _crewBodyR[0]);
+                    _worker.CaptureShiftBreakBookmark(), _providerFootprintR[0]);
                 _hasExcavatorDigResume = true;
                 DigHoodLog.Push(
-                    $"SHIFT BREAK | Resume @ {_excavatorDigResume.x:0.0},{_excavatorDigResume.y:0.0}");
+                    $"SHIFT BREAK | Excavator stays @ {_excavatorDigResume.x:0.0},{_excavatorDigResume.y:0.0}");
             }
+
+            // Reveal WorkerAvatars at provider / idle positions — hosts do not walk home
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av == null) continue;
+                    var asg = _assignments.GetAssignment(wr.WorkerId);
+                    if (asg != null && asg.JobType != JobType.Unassigned)
+                        av.SetPresencePosition(GetProviderOperatePoint(asg.JobType));
+                    av.ClearFollowing();
+                    av.Show();
+                    av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                }
+            }
+
             _prospector?.SetRadar(false);
-            _banter.TrySay(WorkerBanter.Voice.Excavator,
-                "Whistle's blown. Back to the tent.",
-                "Shift's done. Firepit's calling.",
-                "Knock off — see you at 08.");
-            _banter.TrySay(WorkerBanter.Voice.Hauler,
-                "Cart parked. Heading to camp.",
-                "That's a wrap. Boots off soon.");
+            DigHoodLog.Push("SHIFT END | People commute home — providers stay");
+            // F5: no commute/off-shift job banter yet
         }
 
         void EnterSleep()
         {
             _crewPhase = CrewPhase.Asleep;
-            SetAllCrewVisible(false);
-            if (_sleepCamp != null)
+            _sleepRecoveryApplied01 = 0f;
+            // Park/hide avatars at tent — do NOT teleport providers
+            if (_crewWorkers != null)
             {
-                _worker?.TeleportTo(_sleepCamp.TentDoor);
-                _prospector?.TeleportTo(_sleepCamp.TentDoor);
-                _hauler?.TeleportTo(_sleepCamp.TentDoor);
-                _refiner?.TeleportTo(_sleepCamp.TentDoor);
-                _engineer?.TeleportTo(_sleepCamp.TentDoor);
+                Vector2 door = CampNavDestination;
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av == null) continue;
+                    av.SetPresencePosition(door + CampDoorOffsets[i % CampDoorOffsets.Length]);
+                    av.ClearFollowing();
+                    av.Hide(); // prototype: hidden at tent while asleep
+                    av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                }
             }
-            // Overnight rest fully cools the excavator machine.
+            // Overnight rest fully cools the excavator machine (stays at dig face).
             _worker?.ResetHeatAfterRest();
-            _banter.TrySay(WorkerBanter.Voice.Prospector,
-                "Lights out. Dreaming of veins.",
-                "Tent's warm. See you at dawn.");
         }
 
         void BeginHeadingOut(bool announce)
         {
             _crewPhase = CrewPhase.HeadingOut;
             _commuteTimer = 0f;
-            RefreshWorkPosts();
-            for (int i = 0; i < _arrived.Length; i++)
+            RefreshProviderWorkPosts();
+            for (int i = 0; i < _personArrived.Length; i++)
             {
-                _arrived[i] = false;
-                _crewStranded[i] = false;
+                _personArrived[i] = false;
+                _personStranded[i] = false;
             }
-            EnsureCrewNav();
-            for (int i = 0; i < _crewNav.Length; i++)
+            EnsurePersonNav();
+            for (int i = 0; i < _personNav.Length; i++)
             {
-                if (_crewNav[i] == null) continue;
-                _crewNav[i].CampReturnMode = false;
-                _crewNav[i].Invalidate();
+                if (_personNav[i] == null) continue;
+                _personNav[i].CampReturnMode = false;
+                _personNav[i].Invalidate();
             }
-            Vector2 door = _sleepCamp != null ? _sleepCamp.TentDoor : BasecampPos;
-            // Door may sit near pad edge — snap onto open floor before walking
-            door = SnapPostToTunnel(door, _crewBodyR[1]);
-            // Stagger slightly outside the flap
-            _worker?.TeleportTo(door + new Vector2(0.1f, -0.15f));
-            _prospector?.TeleportTo(door + new Vector2(-0.2f, 0.05f));
-            _hauler?.TeleportTo(door + new Vector2(0.25f, 0.1f));
-            _refiner?.TeleportTo(door + new Vector2(-0.05f, -0.25f));
-            _engineer?.TeleportTo(door + new Vector2(0.3f, 0.15f));
-            SetAllCrewVisible(true);
+
+            // Avatars emerge from camp — providers stay where they overnighted
+            Vector2 door = CampNavDestination;
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av == null) continue;
+                    av.SetPresencePosition(door + CampDoorOffsets[i % CampDoorOffsets.Length]);
+                    av.ClearFollowing();
+                    av.Show();
+                    av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                }
+            }
+
             if (announce)
-            {
-                _banter.TrySay(WorkerBanter.Voice.Excavator,
-                    "08:00. Bits warm — let's dig.",
-                    "Morning whistle. Out of the tent.",
-                    "New shift. Mountain's waiting.");
-            }
+                DigHoodLog.Push("SHIFT START | Avatars heading to work");
         }
 
         void EnterOnShift()
         {
             _crewPhase = CrewPhase.OnShift;
             _commuteTimer = 0f;
-            RefreshWorkPosts();
-            SetAllCrewVisible(true);
-            // Snap exactly onto posts (excavator → saved dig face when available)
-            _worker?.TeleportTo(_workExcavator);
-            _prospector?.TeleportTo(_workProspector);
-            _hauler?.TeleportTo(_workHauler);
-            _refiner?.TeleportTo(_workRefiner);
-            _engineer?.TeleportTo(_workEngineer);
+            RefreshProviderWorkPosts();
+
+            // Temporary morning bridge: snap avatars to assignment→provider, then hide if operating
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av == null) continue;
+                    av.SetPresencePosition(GetMorningPersonDestination(wr, i));
+                }
+            }
+            RefreshAllAvatarPresence();
+
             if (_hasExcavatorDigResume && _worker != null && _worker.RouteCount > 0)
                 DigHoodLog.Push(
-                    $"SHIFT START | Back at dig face | Route {_worker.RouteCount} pin{(_worker.RouteCount == 1 ? "" : "s")}");
+                    $"SHIFT START | Excavator still at dig face | Route {_worker.RouteCount} pin{(_worker.RouteCount == 1 ? "" : "s")}");
             if (_prospector != null && _prospector.WorkMode == ProspectorWorkMode.Investigate)
                 DigHoodLog.Push($"SHIFT START | Prospector resumes {_prospector.Investigation.PlayerWorkLabel}");
             if (_refiner != null && _refiner.IsInConsultation)
                 DigHoodLog.Push("SHIFT START | Refiner resumes consult");
             if (_engineer != null && _engineer.IsInfrastructureWork)
                 DigHoodLog.Push($"SHIFT START | Engineer resumes {_engineer.WorkLabel}");
+
+            _socialAura.NotifyShiftStart(_crewWorkers);
         }
 
-        /// <summary>Fast-forward night — jump to next 08:00 and walk out (or skip walk).</summary>
+        /// <summary>Fast-forward night — jump to next 08:00 and walk out (avatars only).</summary>
         public void SkipSleep()
         {
             if (_crewPhase == CrewPhase.OnShift || _crewPhase == CrewPhase.HeadingOut)
                 return;
 
-            // Remaining night as real seconds → Frustration sleep recovery (does not wipe instantly).
             float hoursLeft = HoursUntilMorning(_gameHour);
-            _worker?.ApplyRestFrustrationForDuration(hoursLeft * SecondsPerGameHour);
+            float nightFrac = Mathf.Clamp01(hoursLeft / WorkerSleepRecovery.TypicalNightGameHours);
+            // If already asleep with partial recovery, only apply the remainder
+            float remaining = Mathf.Max(0f, nightFrac - _sleepRecoveryApplied01);
+            if (_crewPhase != CrewPhase.Asleep)
+            {
+                // HeadingHome skip: full remaining night from current hour
+                remaining = nightFrac;
+                _sleepRecoveryApplied01 = 0f;
+            }
+            ApplyCrewSleepRecoveryFraction(remaining);
+            _sleepRecoveryApplied01 = 1f;
 
             if (_gameHour >= ShiftStartHour)
+            {
                 _dayIndex++;
+                _coopWorkPlaytest.EnsureDay(_dayIndex);
+            }
             _gameHour = ShiftStartHour;
-            // Skipped night still counts as a full rest for machine heat.
             _worker?.ResetHeatAfterRest();
             BeginHeadingOut(announce: true);
-            _banter.TrySay(WorkerBanter.Voice.Hauler,
-                "Skipped the snore. Coffee and cart.",
-                "Fast-forward. Boots back on.");
             ApplyDayNightLight();
+        }
+
+        float _sleepRecoveryApplied01;
+
+        /// <summary>Real-time sleep tick while Asleep — prorates one full night of recovery.</summary>
+        void TickCrewSleepRecovery(float deltaTime)
+        {
+            float nightRealSec = WorkerSleepRecovery.TypicalNightGameHours * SecondsPerGameHour;
+            if (nightRealSec <= 0.001f) return;
+            float add = deltaTime / nightRealSec;
+            float room = Mathf.Max(0f, 1f - _sleepRecoveryApplied01);
+            add = Mathf.Min(add, room);
+            if (add <= 0f) return;
+            ApplyCrewSleepRecoveryFraction(add);
+            _sleepRecoveryApplied01 += add;
+        }
+
+        void ApplyCrewSleepRecoveryFraction(float nightFraction01)
+        {
+            if (nightFraction01 <= 0f || _crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                wr.State.ApplySleepRecoveryFraction(nightFraction01, wr.PhysicalStaminaMax);
+            }
         }
 
         /// <summary>Game hours from <paramref name="hour"/> until next shift start (08:00).</summary>
@@ -1179,13 +2395,22 @@ namespace DeepCore.FreeMovement
             return (24f - hour) + ShiftStartHour;
         }
 
-        void SetAllCrewVisible(bool on)
+        void DiscoverGasNearCrew()
         {
-            _worker?.SetCrewVisible(on);
-            _prospector?.SetCrewVisible(on);
-            _hauler?.SetCrewVisible(on);
-            _refiner?.SetCrewVisible(on);
-            _engineer?.SetCrewVisible(on);
+            if (_world == null) return;
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av != null)
+                        _world.DiscoverGasAround(av.PresencePosition);
+                }
+            }
+            if (_crewPhase == CrewPhase.OnShift && _worker != null)
+                _world.DiscoverGasAround(_worker.Position);
         }
 
         void ApplyDayNightLight()
@@ -1201,38 +2426,173 @@ namespace DeepCore.FreeMovement
             _globalLight.color = Color.Lerp(_globalLight.color, col, Time.deltaTime * 1.2f);
         }
 
-        void DiscoverGasNearCrew()
-        {
-            if (_world == null) return;
-            if (_worker != null) _world.DiscoverGasAround(_worker.Position);
-            if (_prospector != null) _world.DiscoverGasAround(_prospector.Position);
-            if (_hauler != null) _world.DiscoverGasAround(_hauler.Position);
-            if (_refiner != null) _world.DiscoverGasAround(_refiner.Position);
-        }
-
         void SyncRoutePinsToScanView()
         {
             // Dig route no longer gated on retired Scan View
-            _worker?.SetRouteVisible(_control == ControlWorker.Excavator);
+            _worker?.SetRouteVisible(SelectedJobIs(JobType.Excavation));
         }
 
         void LateUpdate()
         {
             // After OnGUI so HUD clicks never become dig goals
             HandleMouse();
+            // F0.5/F4: presence follows hosts only while OnShift operating
+            SyncMovingAssignedAvatars();
+            // Stage 1: social proximity after canonical avatar positions are current
+            TickSocialAura();
         }
 
-        void CycleControl(int delta)
+        SocialPresenceKind MapSocialPresence(WorkerRuntime wr)
         {
-            int n = ((int)_control + delta) % 5;
-            if (n < 0) n += 5;
-            SelectWorker((ControlWorker)n);
+            switch (GetPhysicalState(wr))
+            {
+                case WorkerPhysicalState.Operating: return SocialPresenceKind.Operating;
+                case WorkerPhysicalState.Idle: return SocialPresenceKind.Idle;
+                case WorkerPhysicalState.CommutingHome: return SocialPresenceKind.CommutingHome;
+                case WorkerPhysicalState.Sleeping: return SocialPresenceKind.Sleeping;
+                case WorkerPhysicalState.CommutingToWork: return SocialPresenceKind.CommutingToWork;
+                default: return SocialPresenceKind.Idle;
+            }
         }
 
-        void SelectWorker(ControlWorker w)
+        void TickSocialAura()
         {
-            // Keep excavator dig goal / pinpoint when switching workers
-            _control = w;
+            if (_crewWorkers == null || !_socialAura.IsBootstrapped) return;
+            float dt = _lastSocialGameHoursDelta;
+            if (dt <= 0f) dt = Time.deltaTime / SecondsPerGameHour;
+            int encBefore = _socialAura.TotalEncounters;
+            _socialAura.Tick(
+                _crewWorkers,
+                _presence,
+                dt,
+                MapSocialPresence,
+                id =>
+                {
+                    var asg = _assignments.GetAssignment(id);
+                    return asg != null ? asg.JobType : JobType.Unassigned;
+                },
+                isAsleep: _crewPhase == CrewPhase.Asleep,
+                campCenter: CampNavDestination,
+                campRadius: 2.4f);
+
+            // Stage 2: present newly resolved encounter (math already applied).
+            if (_socialAura.TotalEncounters > encBefore && _socialAura.LastEncounter != null)
+                TryPresentSocialEncounter(_socialAura.LastEncounter);
+
+            _socialPlaytest.ObserveTick(
+                _dayIndex,
+                _socialAura,
+                _crewWorkers,
+                _presence,
+                MapSocialPresence,
+                dt,
+                encBefore);
+
+            TickSocialPresentation();
+        }
+
+        void TryPresentSocialEncounter(SocialEncounterLog log)
+        {
+            if (log == null) return;
+            var init = FindCrewWorker(log.InitiatorId);
+            var target = FindCrewWorker(log.TargetId);
+            if (init == null || target == null) return;
+
+            JobType initJob = _assignments.GetAssignment(log.InitiatorId)?.JobType ?? JobType.Unassigned;
+            JobType targetJob = _assignments.GetAssignment(log.TargetId)?.JobType ?? JobType.Unassigned;
+            Vector2 initPos = _presence.Get(log.InitiatorId)?.PresencePosition ?? Vector2.zero;
+            Vector2 targetPos = _presence.Get(log.TargetId)?.PresencePosition ?? Vector2.zero;
+
+            _socialPresenter.TryEnqueue(
+                log,
+                init,
+                target,
+                initPos,
+                targetPos,
+                MapSocialPresence(init),
+                MapSocialPresence(target),
+                initJob,
+                targetJob,
+                Time.unscaledTime);
+
+            // DEV playtest history only — does not affect social math.
+            var pres = _socialPresenter.LastPresentation;
+            _socialDevHistory.Add(new SocialDevEncounterStamp
+            {
+                Log = log,
+                Day = _dayIndex,
+                GameHour = _gameHour,
+                Presented = pres.Presented,
+                SuppressedDistance = pres.SuppressedDistance,
+                SuppressedSleep = pres.SuppressedSleep,
+                InitiatorLine = pres.InitiatorLine,
+                ResponseLine = pres.ResponseLine,
+                LinesQueued = pres.LinesQueued,
+            });
+            while (_socialDevHistory.Count > 10)
+                _socialDevHistory.RemoveAt(0);
+
+            _socialPlaytest.ObservePresentation(_dayIndex, _socialAura, pres.Presented);
+        }
+
+        void TickSocialPresentation()
+        {
+            _socialPresenter.Tick(Time.unscaledTime, line =>
+                TryAuthoredSocialBanter(
+                    line.WorkerId,
+                    line.DisplayName,
+                    line.JobContext,
+                    line.Role,
+                    line.Text));
+        }
+
+        /// <summary>Social Aura speech — WorkerId-authored, priority over ambient banter.</summary>
+        bool TryAuthoredSocialBanter(
+            int workerId,
+            string displayName,
+            JobType jobContext,
+            string role,
+            string line)
+        {
+            if (workerId <= 0 || string.IsNullOrEmpty(line)) return false;
+            var wr = FindCrewWorker(workerId);
+            string name = wr != null ? wr.DisplayName : displayName;
+            if (string.IsNullOrEmpty(name)) name = $"Worker {workerId}";
+            if (jobContext == JobType.Unassigned) jobContext = JobType.Prospecting;
+            return _banter.TrySaySocial(
+                workerId,
+                name,
+                JobContextFrom(jobContext),
+                $"SocialAura/{role}",
+                _absoluteGameHours,
+                line);
+        }
+
+        void CycleSelectedPerson(int delta)
+        {
+            if (_crewWorkers == null || _crewWorkers.Length == 0) return;
+            int n = _crewWorkers.Length;
+            int idx = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (_crewWorkers[i] != null && _crewWorkers[i].WorkerId == _selectedWorkerId)
+                {
+                    idx = i;
+                    break;
+                }
+            }
+            idx = (idx + delta) % n;
+            if (idx < 0) idx += n;
+            // Skip nulls
+            for (int k = 0; k < n; k++)
+            {
+                int j = (idx + k) % n;
+                if (_crewWorkers[j] != null)
+                {
+                    SelectPersonById(_crewWorkers[j].WorkerId);
+                    return;
+                }
+            }
         }
 
         void UpdateStockpileHover()
@@ -1266,6 +2626,7 @@ namespace DeepCore.FreeMovement
 
             if (_scannerPlaceMode)
             {
+                if (!SelectedJobIs(JobType.Prospecting)) return;
                 if (mouse.leftButton.wasPressedThisFrame)
                     ConfirmScannerPlacement();
                 return;
@@ -1273,19 +2634,20 @@ namespace DeepCore.FreeMovement
 
             if (_scannerPlanMode)
             {
+                if (!SelectedJobIs(JobType.Prospecting)) return;
                 if (mouse.leftButton.wasPressedThisFrame)
                     ConfirmScannerPlan();
                 return;
             }
 
-            if (_control == ControlWorker.Prospector && _prospector != null)
+            if (SelectedJobIs(JobType.Prospecting) && _prospector != null)
             {
                 if (mouse.leftButton.wasPressedThisFrame)
                     _prospector.FaceToward(world);
                 return;
             }
 
-            if (_control != ControlWorker.Excavator || _worker == null) return;
+            if (!SelectedJobIs(JobType.Excavation) || _worker == null) return;
 
             // RMB / Backspace: undo last pin
             if (mouse.rightButton.wasPressedThisFrame)
@@ -1318,14 +2680,9 @@ namespace DeepCore.FreeMovement
                 t = new Vector3(_sleepCamp.FirePos.x, _sleepCamp.FirePos.y, -10f);
             else
             {
-                Transform follow = _control switch
-                {
-                    ControlWorker.Prospector => _prospector != null ? _prospector.transform : null,
-                    ControlWorker.Hauler => _hauler != null ? _hauler.transform : null,
-                    ControlWorker.Refiner => _refiner != null ? _refiner.transform : null,
-                    ControlWorker.Engineer => _engineer != null ? _engineer.transform : null,
-                    _ => _worker != null ? _worker.transform : null,
-                };
+                // F2: camera follows selected person (host if assigned, avatar if idle)
+                var ctl = ResolveControlTarget();
+                Transform follow = ResolvePhysicalFollowTransform(in ctl);
                 if (follow == null) return;
                 t = follow.position;
                 t.z = -10f;
@@ -1365,8 +2722,9 @@ namespace DeepCore.FreeMovement
             _playerTactical?.MarkDirty();
             _gasFx?.Rescan();
             _banter.Clear();
+            _socialPresenter.ClearQueue();
             _hoverPile = null;
-            RefreshWorkPosts();
+            RefreshProviderWorkPosts();
             _dayIndex = 1;
             _gameHour = 7.7f;
             _absoluteGameHours = 7.7f;
@@ -1446,12 +2804,36 @@ namespace DeepCore.FreeMovement
         bool _showBalanceHarness;
         readonly ExcavatorBalanceHarness _balance = new();
 
-        /// <summary>Which crew sheet is open (−1 = none).</summary>
-        int _openStatsSheet = -1;
-        readonly WorkerStats[] _sheetBaseline = { new(), new(), new(), new(), new() };
-        readonly bool[] _sheetBaselineCaptured = new bool[5];
-        readonly WorkerSheetProfile[] _sheetProfile =
+        /// <summary>Non-essential HUD panels — one pop-up at a time (tool strip under Tactical/Truth).</summary>
+        enum HudPopupKind : byte
         {
+            None = 0,
+            Comms,
+            Keys,
+            Assign,
+            Control,
+            Sheet,
+            Banter,
+            Presence,
+            Runtime,
+            Activity,
+            Balance,
+            Social,
+        }
+
+        HudPopupKind _hudPopup;
+
+        /// <summary>F3: open sheet target WorkerId (0 = closed). Person-owned, not role-index.</summary>
+        int _openStatsWorkerId;
+        /// <summary>Baseline snapshots keyed by WorkerId (index 0 unused). Crew ids 1–5.</summary>
+        readonly WorkerStats[] _sheetBaselineByWorkerId =
+        {
+            null, new(), new(), new(), new(), new(),
+        };
+        readonly bool[] _sheetBaselineCaptured = new bool[6];
+        readonly WorkerSheetProfile[] _sheetProfileByWorkerId =
+        {
+            WorkerSheetProfile.Baseline,
             WorkerSheetProfile.Baseline,
             WorkerSheetProfile.Baseline,
             WorkerSheetProfile.Baseline,
@@ -1461,10 +2843,56 @@ namespace DeepCore.FreeMovement
 
         void OnDrawGizmos()
         {
-            if (!navDebugDraw || _world == null) return;
-            for (int i = 0; i < _crewNav.Length; i++)
+            if (_socialDevDrawWorld && _crewWorkers != null && _socialAura.IsBootstrapped)
             {
-                var eng = _crewNav[i]?.Engine;
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    var av = _presence.Get(wr.WorkerId);
+                    if (av == null) continue;
+                    var actor = _socialAura.World.Get(wr.WorkerId);
+                    if (actor == null) continue;
+                    actor.RefreshExpression();
+                    float r = SocialAuraLiveTuning.EffectiveReach(actor.Expression);
+                    Vector3 p = new Vector3(av.PresencePosition.x, av.PresencePosition.y, 0f);
+                    Gizmos.color = new Color(0.3f, 0.9f, 1f, 0.18f);
+                    Gizmos.DrawWireSphere(p, r);
+                }
+
+                // Exposed pair lines
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                for (int j = i + 1; j < _crewWorkers.Length; j++)
+                {
+                    var a = _crewWorkers[i];
+                    var b = _crewWorkers[j];
+                    if (a == null || b == null) continue;
+                    var avA = _presence.Get(a.WorkerId);
+                    var avB = _presence.Get(b.WorkerId);
+                    if (avA == null || avB == null) continue;
+                    var actA = _socialAura.World.Get(a.WorkerId);
+                    var actB = _socialAura.World.Get(b.WorkerId);
+                    if (actA == null || actB == null) continue;
+                    actA.RefreshExpression();
+                    actB.RefreshExpression();
+                    float dist = Vector2.Distance(avA.PresencePosition, avB.PresencePosition);
+                    float falloff = SocialAuraLiveTuning.DistanceFalloff(
+                        dist,
+                        SocialAuraLiveTuning.EffectiveReach(actA.Expression),
+                        SocialAuraLiveTuning.EffectiveReach(actB.Expression));
+                    if (falloff <= 0.001f) continue;
+                    var pair = _socialAura.Pair(a.WorkerId, b.WorkerId);
+                    Gizmos.color = new Color(1f, 0.7f, 0.2f, 0.25f + 0.55f * Mathf.Clamp01(pair.InteractionPressure));
+                    Gizmos.DrawLine(
+                        new Vector3(avA.PresencePosition.x, avA.PresencePosition.y, 0f),
+                        new Vector3(avB.PresencePosition.x, avB.PresencePosition.y, 0f));
+                }
+            }
+
+            if (!navDebugDraw || _world == null) return;
+            for (int i = 0; i < _personNav.Length; i++)
+            {
+                var eng = _personNav[i]?.Engine;
                 if (eng == null) continue;
                 var raw = eng.LastRawPath;
                 var smooth = eng.LastSmoothPath;
@@ -1565,7 +2993,7 @@ namespace DeepCore.FreeMovement
             }
 
             // Heavy scanner status — under top bar
-            bool showScannerHud = _prospector != null && _control == ControlWorker.Prospector;
+            bool showScannerHud = _prospector != null && SelectedJobIs(JobType.Prospecting);
             bool scannerExpanded = showScannerHud && (_scannerPlanMode
                 || (_fieldScanner != null && _fieldScanner.State == ProspectorScannerState.Scanning));
             float scannerPanelH = !showScannerHud ? 0f
@@ -1577,68 +3005,55 @@ namespace DeepCore.FreeMovement
             if (showScannerHud)
                 DrawHeavyScannerHud(10f, leftColY, Mathf.Min(400f, barW), scannerPanelH);
 
-            // ——— Left worker roster ———
-            float cardW = 168f, cardH = 70f, cardGap = 6f;
+            // ——— Left crew roster (F2: person-primary) ———
+            float faceW = WorkerFaceMonitor.DefaultWidth;
+            float faceGap = 5f;
+            float cardW = 168f, cardH = 80f, cardGap = 5f;
             float leftStackH = showScannerHud ? scannerPanelH : 0f;
-            float cx = 10f, cy = leftColY + leftStackH + (showScannerHud ? 8f : 0f);
+            float faceX = 10f;
+            float cx = faceX + faceW + faceGap;
+            float cy = leftColY + leftStackH + (showScannerHud ? 8f : 0f);
             const float statsBtnW = 36f;
             float sheetDockX = cx + cardW + statsBtnW + 14f;
-            bool sheetOpen = _openStatsSheet >= 0;
+            bool sheetOpen = _openStatsWorkerId > 0;
             float banterX = sheetOpen ? sheetDockX + 300f : cx + cardW + statsBtnW + 14f;
+            _rosterMeterTooltip = null;
 
-            string prosSub = _prospector == null
-                ? "SCAN · RADAR"
-                : _prospector.WorkMode == ProspectorWorkMode.Investigate
-                    ? ShortInvestigationSub(_prospector)
-                    : "SCAN · RADAR";
-            DrawWorkerCard(new Rect(cx, cy, cardW, cardH), ControlWorker.Prospector,
-                "PROSPECTOR", prosSub, cardTitle, cardSub);
-            DrawRosterStatsButton(cx + cardW + 6f, cy, cardH, (int)ControlWorker.Prospector, UiCyan);
-            DrawBanterBubble(banterX, cy, WorkerBanter.Voice.Prospector);
-
-            string digSub = _worker != null && _worker.RouteCount > 0
-                    ? $"ROUTE · {_worker.RouteCount} PIN{(_worker.RouteCount == 1 ? "" : "S")}"
-                    : "LMB PIN · SHIFT GO";
-            DrawWorkerCard(new Rect(cx, cy + cardH + cardGap, cardW, cardH), ControlWorker.Excavator,
-                "EXCAVATOR", digSub, cardTitle, cardSub);
-            DrawRosterStatsButton(cx + cardW + 6f, cy + cardH + cardGap, cardH, (int)ControlWorker.Excavator, UiAmber);
-            DrawBanterBubble(banterX, cy + cardH + cardGap, WorkerBanter.Voice.Excavator);
-
-            DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 2, cardW, cardH), ControlWorker.Hauler,
-                "HAULER",
-                _hauler != null && _hauler.PreferGold ? "PRIORITY // PRECIOUS" : "PRIORITY // MIXED",
-                cardTitle, cardSub);
-            DrawRosterStatsButton(cx + cardW + 6f, cy + (cardH + cardGap) * 2, cardH,
-                (int)ControlWorker.Hauler, UiGreen);
-            DrawBanterBubble(banterX, cy + (cardH + cardGap) * 2, WorkerBanter.Voice.Hauler);
-
-            string refSub = _refiner == null ? "WASHER"
-                : _refiner.IsInConsultation
-                    ? (_refiner.IsDiscussing ? "CONSULT // TALKING" : "CONSULT // MEETING")
-                : _refiner.Priority == RefinerPriority.DiamondOre ? "WASH // ORE DIA"
-                : _refiner.Priority == RefinerPriority.GoldOre ? "WASH // ORE GOLD"
-                : "WASH // ORE ROCK";
-            Color refAccent = new(0.7f, 0.55f, 1f);
-            DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 3, cardW, cardH), ControlWorker.Refiner,
-                "REFINER", refSub, cardTitle, cardSub);
-            DrawRosterStatsButton(cx + cardW + 6f, cy + (cardH + cardGap) * 3, cardH,
-                (int)ControlWorker.Refiner, refAccent);
-            DrawBanterBubble(banterX, cy + (cardH + cardGap) * 3, WorkerBanter.Voice.Refiner);
-
-            string engSub = _engineer == null ? "STANDBY" : _engineer.WorkLabel;
-            Color engAccent = new(1f, 0.55f, 0.22f);
-            DrawWorkerCard(new Rect(cx, cy + (cardH + cardGap) * 4, cardW, cardH), ControlWorker.Engineer,
-                "ENGINEER", engSub, cardTitle, cardSub);
-            DrawRosterStatsButton(cx + cardW + 6f, cy + (cardH + cardGap) * 4, cardH,
-                (int)ControlWorker.Engineer, engAccent);
-            DrawBanterBubble(banterX, cy + (cardH + cardGap) * 4, WorkerBanter.Voice.Engineer);
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    float rowY = cy + (cardH + cardGap) * i;
+                    var asg = _assignments.GetAssignment(wr.WorkerId);
+                    var job = asg != null ? asg.JobType : JobType.Unassigned;
+                    string jobLine = JobStatPreview.DisplayName(job);
+                    string provLine = job == JobType.Unassigned
+                        ? "none"
+                        : ProviderLabelForAssignment(asg);
+                    Color accent = AccentForWorkerId(wr.WorkerId);
+                    var faceR = new Rect(faceX, rowY, faceW, cardH);
+                    Block(faceR);
+                    bool faceSel = wr.WorkerId == _selectedWorkerId;
+                    WorkerFaceMonitor.Draw(faceR, wr, accent, _uiPulse, faceSel);
+                    if (GUI.Button(faceR, GUIContent.none, GUIStyle.none))
+                        SelectPersonById(wr.WorkerId);
+                    DrawPersonRosterCard(
+                        new Rect(cx, rowY, cardW, cardH),
+                        wr, jobLine, provLine, accent, cardTitle, cardSub);
+                    DrawRosterStatsButton(cx + cardW + 6f, rowY, cardH, wr.WorkerId, accent);
+                    if (job != JobType.Unassigned || _banter.GetForWorker(wr.WorkerId) != null)
+                        DrawBanterBubble(banterX, rowY, wr);
+                }
+            }
 
             if (sheetOpen)
-                DrawWorkerStatsSheet(sheetDockX, cy, _openStatsSheet);
+                DrawWorkerStatsSheet(sheetDockX, cy, _openStatsWorkerId);
 
             float rosterExtraY = cy + (cardH + cardGap) * 5 + 4f;
 
-            if (_control == ControlWorker.Hauler && _hauler != null)
+            if (SelectedJobIs(JobType.Hauling) && _hauler != null)
             {
                 var goldBtn = new Rect(cx, rosterExtraY, cardW, 28f);
                 Block(goldBtn);
@@ -1651,12 +3066,28 @@ namespace DeepCore.FreeMovement
                     LabelStyle(9, UiDim));
             }
 
-            if (_control == ControlWorker.Engineer && _engineer != null)
+            if (SelectedJobIs(JobType.Engineering) && _engineer != null)
             {
                 GUI.Label(new Rect(cx, rosterExtraY, cardW, 18f),
                     _engineer.DebugStatus,
                     LabelStyle(11, UiAmber));
                 rosterExtraY += 18f;
+                var coopNow = EvaluateExcavatorEngineerCoop();
+                if (coopNow.Active)
+                {
+                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 40f, 14f),
+                        $"COOP Q {coopNow.Quality:0.00}  spd×{coopNow.DispatchSpeedMul:0.00}  dur×{coopNow.RepairDurationMul:0.00}",
+                        LabelStyle(9, UiCyan));
+                    rosterExtraY += 14f;
+                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
+                        TruncateDev(coopNow.Factors ?? "", 52),
+                        LabelStyle(8, UiDim));
+                    rosterExtraY += 14f;
+                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
+                        $"LAST  {ExcavatorEngineerCooperation.LastConsequence}  {TruncateDev(ExcavatorEngineerCooperation.LastConsequenceDetail, 40)}",
+                        LabelStyle(8, UiMute));
+                    rosterExtraY += 14f;
+                }
                 if (_engineer.HasDebugTarget)
                 {
                     var tc = _engineer.DebugTargetCell;
@@ -1699,7 +3130,7 @@ namespace DeepCore.FreeMovement
                 rosterExtraY += 32f;
             }
 
-            if (_control == ControlWorker.Refiner && _refiner != null)
+            if (SelectedJobIs(JobType.Refining) && _refiner != null)
             {
                 var rockBtn = new Rect(cx, rosterExtraY, cardW, 28f);
                 var goldBtn = new Rect(cx, rosterExtraY + 32f, cardW, 28f);
@@ -1717,7 +3148,7 @@ namespace DeepCore.FreeMovement
             }
 
             // Excavator sheet docks beside the roster (not world-anchored)
-            // (drawn above via DrawWorkerStatsSheet when _openStatsSheet is set)
+            // (drawn above via DrawWorkerStatsSheet when _openStatsWorkerId is set)
 
             if (_hoverPile != null)
             {
@@ -1773,17 +3204,74 @@ namespace DeepCore.FreeMovement
             if (DrawCyberButton(rTac, tacOn ? "TRUTH VIEW // ON" : "TRUTH VIEW", selected: tacOn, accent: UiAmber))
                 _tactical?.Toggle();
 
+            // Compact tool strip — non-essentials open as exclusive pop-ups
+            by = rTac.yMax + 10f;
+            DrawHudPopupToolStrip(bx, by, bw, 22f);
+
             DrawScanHistoryBrowser();
             DrawHistoricalTacticalBanner();
             DrawScanHistoryDevReadout();
-            DrawKeybindingsPanel();
-            DrawDigHoodLog();
+
+            if (_hudPopup == HudPopupKind.Runtime) DrawWorkerRuntimeDevPanel();
+            if (_hudPopup == HudPopupKind.Assign) DrawWorkerAssignmentDevPanel();
+            if (_hudPopup == HudPopupKind.Presence) DrawWorkerPresenceDevPanel();
+            if (_hudPopup == HudPopupKind.Social) DrawSocialAuraDevPanel();
+            if (_hudPopup == HudPopupKind.Control) DrawWorkerControlDevPanel();
+            if (_hudPopup == HudPopupKind.Sheet) DrawWorkerSheetDevPanel();
+            if (_hudPopup == HudPopupKind.Banter) DrawBanterDevPanel();
+            if (_hudPopup == HudPopupKind.Keys) DrawKeybindingsPanel();
+            if (_hudPopup == HudPopupKind.Comms) DrawDigHoodLog();
+            if (_hudPopup == HudPopupKind.Activity) DrawProspectorDevActivityBox();
+            if (_hudPopup == HudPopupKind.Balance || _showBalanceHarness) DrawBalanceHarnessPanel();
+
             DrawFindingToast();
             DrawProspectorThinkingPanel();
-            DrawProspectorDevActivityBox();
-            DrawBalanceHarnessPanel();
+            DrawRosterMeterTooltip();
             DrawAnomalyHoverTooltip();
         }
+
+        void ToggleHudPopup(HudPopupKind kind)
+        {
+            if (_hudPopup == kind)
+            {
+                _hudPopup = HudPopupKind.None;
+                if (kind == HudPopupKind.Balance) _showBalanceHarness = false;
+                return;
+            }
+
+            _hudPopup = kind;
+            _showBalanceHarness = kind == HudPopupKind.Balance;
+        }
+
+        void DrawHudPopupToolStrip(float x, float y, float w, float h)
+        {
+            GUI.Label(new Rect(x, y, w, 12f), "PANELS", LabelStyle(8, UiMute, bold: true));
+            y += 14f;
+
+            void StripBtn(string label, HudPopupKind kind, Color accent)
+            {
+                var r = new Rect(x, y, w, h);
+                Block(r);
+                if (DrawCyberButton(r, label, selected: _hudPopup == kind, accent: accent))
+                    ToggleHudPopup(kind);
+                y += h + 4f;
+            }
+
+            StripBtn("COMMS", HudPopupKind.Comms, UiCyan);
+            StripBtn("KEYS", HudPopupKind.Keys, UiDim);
+            StripBtn("ASSIGN", HudPopupKind.Assign, UiGreen);
+            StripBtn("CTRL", HudPopupKind.Control, UiGreen);
+            StripBtn("SHEET", HudPopupKind.Sheet, UiAmber);
+            StripBtn("BANTER", HudPopupKind.Banter, new Color(0.7f, 0.55f, 1f));
+            StripBtn("PRESENCE", HudPopupKind.Presence, UiCyan);
+            StripBtn("SOCIAL", HudPopupKind.Social, new Color(0.45f, 0.85f, 1f));
+            StripBtn("RUNTIME", HudPopupKind.Runtime, UiDim);
+            StripBtn("ACTIVITY", HudPopupKind.Activity, UiAmber);
+            StripBtn("BALANCE", HudPopupKind.Balance, UiAmber);
+        }
+
+        /// <summary>Right margin reserved for the always-visible panel tool strip.</summary>
+        const float HudToolStripReserve = 152f;
 
         void DrawBalanceHarnessPanel()
         {
@@ -1794,7 +3282,8 @@ namespace DeepCore.FreeMovement
             float top = 96f;
             float maxH = Mathf.Max(280f, Screen.height - top - 14f);
             float useH = Mathf.Min(panelH, maxH);
-            var panel = new Rect(Screen.width - panelW - 12f, top, panelW, useH);
+            // Dock left of the right-edge panel tool strip
+            var panel = new Rect(Screen.width - panelW - 12f - HudToolStripReserve, top, panelW, useH);
             DrawCyberPanel(panel, lit: true, accentOverride: UiAmber);
             Block(panel);
 
@@ -1883,82 +3372,252 @@ namespace DeepCore.FreeMovement
 
             var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
             if (DrawCyberButton(close, "×", selected: false, accent: UiAmber))
+            {
                 _showBalanceHarness = false;
+                if (_hudPopup == HudPopupKind.Balance) _hudPopup = HudPopupKind.None;
+            }
         }
 
-        void DrawRosterStatsButton(float x, float y, float cardH, int roleIndex, Color accent)
+        void DrawRosterStatsButton(float x, float y, float cardH, int workerId, Color accent)
         {
+            // F3: ST targets WorkerId — works for assigned and Unassigned.
             var r = new Rect(x, y + (cardH - 28f) * 0.5f, 36f, 28f);
             Block(r);
-            bool on = _openStatsSheet == roleIndex;
+            bool on = _openStatsWorkerId == workerId;
             if (DrawCyberButton(r, "ST", selected: on, accent: accent))
-                _openStatsSheet = on ? -1 : roleIndex;
+                ToggleStatsSheetForWorker(workerId);
         }
 
-        WorkerStats GetWorkerStats(int roleIndex) => roleIndex switch
+        void DrawPersonRosterCard(
+            Rect r,
+            WorkerRuntime wr,
+            string jobLine,
+            string providerLine,
+            Color accent,
+            GUIStyle titleStyle,
+            GUIStyle subStyle)
         {
-            0 => _prospector != null ? _prospector.Stats : null,
-            1 => _worker != null ? _worker.Stats : null,
-            2 => _hauler != null ? _hauler.Stats : null,
-            3 => _refiner != null ? _refiner.Stats : null,
-            4 => _engineer != null ? _engineer.Stats : null,
-            _ => null,
-        };
+            bool on = wr != null && wr.WorkerId == _selectedWorkerId;
+            Block(r);
 
-        void EnsureSheetBaseline(int roleIndex)
-        {
-            if ((uint)roleIndex >= 5) return;
-            if (_sheetBaselineCaptured[roleIndex]) return;
-            var live = GetWorkerStats(roleIndex);
-            if (live == null) return;
-            _sheetBaseline[roleIndex].CopyFrom(live);
-            _sheetBaselineCaptured[roleIndex] = true;
+            DrawCyberPanel(r, lit: on, accentOverride: on ? accent : default);
+            var prev = GUI.color;
+            GUI.color = on
+                ? new Color(accent.r, accent.g, accent.b, 0.55f + 0.35f * _uiPulse)
+                : new Color(accent.r, accent.g, accent.b, 0.2f);
+            GUI.DrawTexture(new Rect(r.x + 6, r.y + 8, 2f, r.height - 16), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            var tStyle = new GUIStyle(titleStyle) { normal = { textColor = on ? accent : UiDim } };
+            GUI.Label(new Rect(r.x + 14, r.y + 5, r.width - 20, 16),
+                wr.DisplayName.ToUpperInvariant(), tStyle);
+            GUI.Label(new Rect(r.x + 14, r.y + 22, r.width - 20, 13), jobLine, subStyle);
+            GUI.Label(new Rect(r.x + 14, r.y + 35, r.width - 20, 12), providerLine,
+                LabelStyle(8, UiMute));
+            if (on)
+                GUI.Label(new Rect(r.x + 14, r.y + 47, r.width - 20, 10), "// SELECTED",
+                    LabelStyle(7, new Color(accent.r, accent.g, accent.b, 0.65f)));
+
+            DrawRosterStateBars(r, wr);
+
+            if (GUI.Button(r, GUIContent.none, GUIStyle.none))
+                SelectPersonById(wr.WorkerId);
         }
 
-        void ApplySheetProfile(int roleIndex, WorkerSheetProfile profile)
-        {
-            if ((uint)roleIndex >= 5) return;
-            EnsureSheetBaseline(roleIndex);
-            _sheetProfile[roleIndex] = profile;
+        // Stamina green · Focus cyan · Frustration amber · Morale teal
+        static readonly Color RosterStaminaCol = new(0.32f, 0.92f, 0.48f, 1f);
+        static readonly Color RosterFocusCol = new(0.25f, 0.88f, 1f, 1f);
+        static readonly Color RosterFrustrationCol = new(1f, 0.62f, 0.18f, 1f);
+        static readonly Color RosterMoraleCol = new(0.45f, 0.95f, 0.78f, 1f);
 
-            if (roleIndex == 1 && _worker != null)
+        string _rosterMeterTooltip;
+        Vector2 _rosterMeterTooltipGui;
+
+        void DrawRosterStateBars(Rect card, WorkerRuntime wr)
+        {
+            if (wr?.State == null) return;
+            var st = wr.State;
+            float stamMax = Mathf.Max(1f, wr.PhysicalStaminaMax);
+            float stam = Mathf.Clamp(st.PhysicalStamina, 0f, stamMax);
+
+            const float barH = 2.2f;
+            const float gap = 1.4f;
+            float stackH = barH * 4f + gap * 3f;
+            float x = card.x + 12f;
+            float w = card.width - 20f;
+            float y = card.yMax - stackH - 5f;
+
+            DrawRosterMeterBar(new Rect(x, y, w, barH), stam / stamMax, RosterStaminaCol,
+                "STAMINA", $"{stam:0}/{stamMax:0}", "Physical reserve.");
+            y += barH + gap;
+            DrawRosterMeterBar(new Rect(x, y, w, barH), st.FocusState / 100f, RosterFocusCol,
+                "FOCUS", $"{st.FocusState:0}", "Current concentration.");
+            y += barH + gap;
+            DrawRosterMeterBar(new Rect(x, y, w, barH), st.Frustration / 100f, RosterFrustrationCol,
+                "FRUSTRATION", $"{st.Frustration:0}", "Pressure and irritation.");
+            y += barH + gap;
+            DrawRosterMeterBar(new Rect(x, y, w, barH), st.Morale / 100f, RosterMoraleCol,
+                "MORALE", $"{st.Morale:0}", "Broader outlook.");
+        }
+
+        void DrawRosterMeterBar(Rect r, float fill01, Color accent, string name, string value, string desc)
+        {
+            fill01 = Mathf.Clamp01(fill01);
+            var prev = GUI.color;
+            GUI.color = new Color(0.04f, 0.06f, 0.08f, 0.55f);
+            GUI.DrawTexture(r, Texture2D.whiteTexture);
+            float fill = fill01 * r.width;
+            if (fill > 0.4f)
+            {
+                GUI.color = new Color(accent.r, accent.g, accent.b, 0.82f);
+                GUI.DrawTexture(new Rect(r.x, r.y, fill, r.height), Texture2D.whiteTexture);
+            }
+            GUI.color = new Color(accent.r, accent.g, accent.b, 0.28f);
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1f), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            // Invisible hit — set tooltip without stealing the card click (checked before card button)
+            var e = Event.current;
+            if (e != null && e.type == EventType.Repaint && r.Contains(e.mousePosition))
+            {
+                _rosterMeterTooltip = $"{name}  {value}\n{desc}";
+                _rosterMeterTooltipGui = e.mousePosition;
+            }
+        }
+
+        void DrawRosterMeterTooltip()
+        {
+            if (string.IsNullOrEmpty(_rosterMeterTooltip)) return;
+            var mouse = Mouse.current;
+            Vector2 gui = _rosterMeterTooltipGui;
+            if (mouse != null)
+            {
+                Vector2 screen = mouse.position.ReadValue();
+                gui = new Vector2(screen.x, Screen.height - screen.y);
+            }
+
+            const float tw = 168f;
+            const float th = 34f;
+            float tx = Mathf.Clamp(gui.x + 12f, 8f, Screen.width - tw - 8f);
+            float ty = Mathf.Clamp(gui.y + 14f, 8f, Screen.height - th - 8f);
+            var panel = new Rect(tx, ty, tw, th);
+            DrawCyberPanel(panel, lit: true, accentOverride: UiCyan);
+            Block(panel);
+
+            int nl = _rosterMeterTooltip.IndexOf('\n');
+            string head = nl >= 0 ? _rosterMeterTooltip.Substring(0, nl) : _rosterMeterTooltip;
+            string body = nl >= 0 ? _rosterMeterTooltip.Substring(nl + 1) : "";
+            GUI.Label(new Rect(panel.x + 8f, panel.y + 5f, tw - 16f, 12f),
+                head, LabelStyle(9, UiWhite, bold: true));
+            GUI.Label(new Rect(panel.x + 8f, panel.y + 17f, tw - 16f, 12f),
+                body, LabelStyle(8, UiMute));
+        }
+
+        WorkerSheetProfile GetSheetProfile(int workerId)
+        {
+            if ((uint)workerId >= (uint)_sheetProfileByWorkerId.Length)
+                return WorkerSheetProfile.Baseline;
+            return _sheetProfileByWorkerId[workerId];
+        }
+
+        void CaptureSheetBaselinesForCrew()
+        {
+            if (_crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                EnsureSheetBaseline(wr.WorkerId);
+            }
+        }
+
+        void EnsureSheetBaseline(int workerId)
+        {
+            if ((uint)workerId >= (uint)_sheetBaselineByWorkerId.Length) return;
+            if (_sheetBaselineCaptured[workerId]) return;
+            var wr = FindCrewWorker(workerId);
+            if (wr?.Stats == null) return;
+            if (_sheetBaselineByWorkerId[workerId] == null)
+                _sheetBaselineByWorkerId[workerId] = new WorkerStats();
+            _sheetBaselineByWorkerId[workerId].CopyFrom(wr.Stats);
+            _sheetBaselineCaptured[workerId] = true;
+        }
+
+        /// <summary>
+        /// Apply a debug profile to a person's WorkerRuntime.Stats.
+        /// Excavation ACE/BRUTE/… routes through balance harness when that person is excavating.
+        /// Specialty ArchA/B/C use the current job's recipe (or are hidden in UI when Unassigned).
+        /// </summary>
+        void ApplySheetProfile(int workerId, WorkerSheetProfile profile)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr?.Stats == null) return;
+            EnsureSheetBaseline(workerId);
+            _sheetProfileByWorkerId[workerId] = profile;
+
+            var job = GetAssignmentJob(wr);
+
+            // Excavation benchmark tooling — only when this person is the excavator operator
+            if (job == JobType.Excavation
+                && _worker != null
+                && ReferenceEquals(_worker.AssignedWorker, wr))
             {
                 _balance.ApplyProfile(WorkerStatProfiles.ToExcavator(profile));
                 return;
             }
 
-            var live = GetWorkerStats(roleIndex);
-            if (live == null) return;
             if (profile == WorkerSheetProfile.Baseline)
-                live.CopyFrom(_sheetBaseline[roleIndex]);
+            {
+                wr.Stats.CopyFrom(_sheetBaselineByWorkerId[workerId]);
+                return;
+            }
+
+            int recipeRole = JobToLegacyRoleIndex(job);
+            if (recipeRole >= 0)
+            {
+                wr.Stats.CopyFrom(WorkerStatProfiles.Build((byte)recipeRole, profile));
+                return;
+            }
+
+            // Unassigned: Ace / Green as generic person presets (no job recipe)
+            if (profile == WorkerSheetProfile.Ace)
+                wr.Stats.CopyFrom(BuildGenericPersonPreset(19));
+            else if (profile == WorkerSheetProfile.Green)
+                wr.Stats.CopyFrom(BuildGenericPersonPreset(3));
             else
-                live.CopyFrom(WorkerStatProfiles.Build((byte)roleIndex, profile));
+                wr.Stats.CopyFrom(_sheetBaselineByWorkerId[workerId]);
         }
 
-        void DrawWorkerStatsSheet(float px, float py, int roleIndex)
+        static WorkerStats BuildGenericPersonPreset(int value)
         {
-            var stats = GetWorkerStats(roleIndex);
-            if (stats == null) return;
-            EnsureSheetBaseline(roleIndex);
+            var s = WorkerStats.CreateBaseline();
+            for (int i = 0; i < WorkerStats.StatCount; i++)
+                s.Set((WorkerStatId)i, value);
+            return s;
+        }
 
-            // Keep excavator sheet profile in sync with balance harness when open
-            if (roleIndex == 1)
-                _sheetProfile[roleIndex] = WorkerStatProfiles.FromExcavator(_balance.Profile);
+        void DrawWorkerStatsSheet(float px, float py, int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr?.Stats == null) return;
+            var stats = wr.Stats;
+            EnsureSheetBaseline(workerId);
 
-            Color accent = roleIndex switch
-            {
-                0 => UiCyan,
-                1 => UiAmber,
-                2 => UiGreen,
-                3 => new Color(0.7f, 0.55f, 1f),
-                4 => new Color(1f, 0.55f, 0.22f),
-                _ => UiCyan,
-            };
+            var asg = _assignments.GetAssignment(workerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            var jobDef = JobStatPreview.Get(job);
+            Color accent = AccentForWorkerId(workerId);
+
+            // Keep excavator sheet profile in sync with balance harness when this person is excavating
+            if (job == JobType.Excavation
+                && _worker != null
+                && ReferenceEquals(_worker.AssignedWorker, wr))
+                _sheetProfileByWorkerId[workerId] = WorkerStatProfiles.FromExcavator(_balance.Profile);
 
             const float panelW = 300f;
             float maxBottom = Screen.height - 12f;
             float digHoodTop = Screen.height - 160f;
-            float panelH = Mathf.Clamp(digHoodTop - py - 8f, 440f, 680f);
+            float panelH = Mathf.Clamp(digHoodTop - py - 8f, 440f, 720f);
             if (py + panelH > maxBottom)
                 panelH = Mathf.Max(360f, maxBottom - py);
 
@@ -1966,7 +3625,7 @@ namespace DeepCore.FreeMovement
             DrawCyberPanel(panel, lit: true, accentOverride: accent);
             Block(panel);
 
-            var hdr = LabelStyle(10, accent, bold: true);
+            var hdr = LabelStyle(11, accent, bold: true);
             var dim = LabelStyle(9, UiDim);
             var val = LabelStyle(11, UiWhite, bold: true);
             var pillar = LabelStyle(9, UiCyan, bold: true);
@@ -1977,128 +3636,361 @@ namespace DeepCore.FreeMovement
             float y = panel.y + 8f;
             float innerW = panelW - 24f;
 
-            GUI.Label(new Rect(x0, y, innerW - 48f, 14f),
-                $"{WorkerStatProfiles.RoleTitle((byte)roleIndex)} // STATS", hdr);
-            y += 18f;
+            // ——— Person identity (not role title) ———
+            GUI.Label(new Rect(x0, y, innerW - 48f, 16f),
+                wr.DisplayName.ToUpperInvariant(), hdr);
+            y += 16f;
+            GUI.Label(new Rect(x0, y, innerW, 12f),
+                $"id {wr.WorkerId}  ·  {wr.StatsRefLabel}",
+                LabelStyle(8, UiMute));
+            y += 13f;
+            GUI.Label(new Rect(x0, y, innerW, 12f),
+                $"Current Job: {JobStatPreview.DisplayName(job)}",
+                LabelStyle(9, UiCyan));
+            y += 13f;
+            if (job != JobType.Unassigned)
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f),
+                    $"Provider: {ProviderLabelForAssignment(asg)}",
+                    LabelStyle(8, UiAmber));
+                y += 13f;
+            }
             DrawHLine(x0, y, innerW, new Color(accent.r, accent.g, accent.b, 0.28f));
             y += 8f;
 
-            // ——— Profile picker ———
-            GUI.Label(new Rect(x0, y, innerW, 12f), "PROFILE", sec);
+            // ——— Person profiles (always) ———
+            GUI.Label(new Rect(x0, y, innerW, 12f), "PERSON PROFILE", sec);
             y += 14f;
             float btnW = (innerW - 10f) / 3f;
             float btnH = 22f;
-            for (int i = 0; i < WorkerStatProfiles.ProfileCount; i++)
+            WorkerSheetProfile[] personProfiles =
             {
-                var p = (WorkerSheetProfile)i;
-                int col = i % 3;
-                int row = i / 3;
-                var br = new Rect(x0 + col * (btnW + 5f), y + row * (btnH + 4f), btnW, btnH);
+                WorkerSheetProfile.Baseline,
+                WorkerSheetProfile.Ace,
+                WorkerSheetProfile.Green,
+            };
+            for (int i = 0; i < personProfiles.Length; i++)
+            {
+                var p = personProfiles[i];
+                var br = new Rect(x0 + i * (btnW + 5f), y, btnW, btnH);
                 Block(br);
-                bool sel = _sheetProfile[roleIndex] == p;
-                if (DrawCyberButton(br, WorkerStatProfiles.Label((byte)roleIndex, p),
-                        selected: sel, accent: WorkerStatProfiles.Accent(p)))
-                    ApplySheetProfile(roleIndex, p);
+                bool sel = GetSheetProfile(workerId) == p;
+                string lab = p == WorkerSheetProfile.Baseline ? "BASE"
+                    : p == WorkerSheetProfile.Ace ? "ACE" : "GREEN";
+                if (DrawCyberButton(br, lab, selected: sel, accent: WorkerStatProfiles.Accent(p)))
+                    ApplySheetProfile(workerId, p);
             }
-            y += (btnH + 4f) * 2f + 6f;
+            y += btnH + 6f;
+
+            // ——— Job-specific test presets (contextual) ———
+            y = DrawJobTestPresetRow(ref y, x0, innerW, btnW, btnH, job, workerId);
 
             DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
             y += 8f;
 
-            // Excavator-only live machine / condition block
-            if (roleIndex == 1 && _worker != null)
+            // ——— Personal conditions (always person-owned) ———
+            y = DrawPersonalConditionsBlock(ref y, x0, innerW, wr, mute, sec);
+
+            // ——— Machine context (Excavation only) ———
+            if (job == JobType.Excavation && _worker != null
+                && ReferenceEquals(_worker.AssignedWorker, wr))
             {
-                GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE", sec);
+                y = DrawExcavatorMachineBlock(ref y, x0, innerW, mute, sec);
+            }
+
+            // ——— Prospecting context (optional) ———
+            if (job == JobType.Prospecting && _prospector != null
+                && ReferenceEquals(_prospector.AssignedWorker, wr))
+            {
+                y = DrawProspectingContextBlock(ref y, x0, innerW, sec);
+            }
+
+            // ——— Relevant-stat hint ———
+            HashSet<WorkerStatId> relevant = null;
+            if (job != JobType.Unassigned && jobDef.RelevantStats.Count > 0)
+            {
+                relevant = new HashSet<WorkerStatId>(jobDef.RelevantStats);
+                string relTitle = jobDef.RelevantStatsAreProvisional
+                    ? "RELEVANT STATS — PROVISIONAL"
+                    : "JOB-RELEVANT (highlighted)";
+                GUI.Label(new Rect(x0, y, innerW, 12f), relTitle,
+                    LabelStyle(8, jobDef.RelevantStatsAreProvisional ? UiAmber : UiMute, bold: true));
                 y += 14f;
+            }
 
-                Color heatCol = _worker.HeatZone switch
-                {
-                    ExcavatorHeatZone.Optimal => UiGreen,
-                    ExcavatorHeatZone.Danger => UiAmber,
-                    ExcavatorHeatZone.Extreme => new Color(1f, 0.45f, 0.2f, 1f),
-                    ExcavatorHeatZone.Overheated => new Color(1f, 0.25f, 0.28f, 1f),
-                    _ => UiCyan,
-                };
-                string zoneLabel = _worker.HeatZone switch
-                {
-                    ExcavatorHeatZone.Optimal => "OPTIMAL",
-                    ExcavatorHeatZone.Danger => "DANGER",
-                    ExcavatorHeatZone.Extreme => "EXTREME",
-                    ExcavatorHeatZone.Overheated => "OVERHEATED",
-                    _ => "NORMAL",
-                };
-                DrawConditionRow(ref y, x0, innerW, "HEAT",
-                    $"{_worker.Heat:0.#}/100", zoneLabel, _worker.Heat / 100f, heatCol, mute);
+            DrawStatPillar(ref y, x0, innerW, "BODY", WorkerStatId.RawPower, 10, stats,
+                pillar, dim, val, relevant);
+            y += 4f;
+            DrawStatPillar(ref y, x0, innerW, "MIND", WorkerStatId.Calibration, 10, stats,
+                pillar, dim, val, relevant);
+            y += 4f;
+            DrawStatPillar(ref y, x0, innerW, "SOUL", WorkerStatId.Composure, 10, stats,
+                pillar, dim, val, relevant);
 
-                string activity = _worker.MachineActivityLabel;
-                Color actCol = activity switch
-                {
-                    "OVERHEATED" => new Color(1f, 0.25f, 0.28f, 1f),
-                    "COOLING" => UiCyan,
-                    "MINING" => UiGreen,
-                    _ => UiDim,
-                };
-                GUI.Label(new Rect(x0, y, 58f, 14f), "ZONE", mute);
-                GUI.Label(new Rect(x0 + 58f, y, 88f, 14f), zoneLabel, LabelStyle(10, UiWhite, bold: true));
-                GUI.Label(new Rect(x0 + 148f, y, innerW - 148f, 14f), activity,
-                    LabelStyle(9, actCol, bold: true));
-                y += 16f;
+            var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
+            if (DrawCyberButton(close, "×", selected: false, accent: accent))
+                _openStatsWorkerId = 0;
+        }
 
-                DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
-                y += 8f;
+        float DrawJobTestPresetRow(ref float y, float x0, float innerW, float btnW, float btnH,
+            JobType job, int workerId)
+        {
+            int recipeRole = JobToLegacyRoleIndex(job);
+            if (recipeRole < 0) return y;
 
-                GUI.Label(new Rect(x0, y, innerW, 12f), "WORKER CONDITIONS", sec);
-                y += 14f;
+            string section = job switch
+            {
+                JobType.Prospecting => "PROSPECTING TEST PRESET",
+                JobType.Excavation => "EXCAVATION BENCHMARK",
+                JobType.Hauling => "HAULING TEST (PROVISIONAL)",
+                JobType.Refining => "REFINING TEST (PROVISIONAL)",
+                JobType.Engineering => "ENGINEERING TEST (PROVISIONAL)",
+                _ => "JOB TEST PRESET",
+            };
+            GUI.Label(new Rect(x0, y, innerW, 12f), section, LabelStyle(8, UiAmber, bold: true));
+            y += 14f;
 
-                float stamMax = Mathf.Max(1f, _worker.MaxStamina);
-                float stam = _worker.CurrentStamina;
-                string stamState = _worker.StaminaStateLabel;
-                Color stamCol = stamState switch
-                {
-                    "RESTING" => UiCyan,
-                    "EXHAUSTED" => new Color(1f, 0.3f, 0.28f, 1f),
-                    "TIRED" => UiAmber,
-                    _ => UiGreen,
-                };
-                DrawConditionRow(ref y, x0, innerW, "STAMINA",
-                    $"{stam:0.#}/{stamMax:0.#}", stamState, stam / stamMax, stamCol, mute);
+            WorkerSheetProfile[] arches =
+            {
+                WorkerSheetProfile.ArchA,
+                WorkerSheetProfile.ArchB,
+                WorkerSheetProfile.ArchC,
+            };
+            for (int i = 0; i < arches.Length; i++)
+            {
+                var p = arches[i];
+                var br = new Rect(x0 + i * (btnW + 5f), y, btnW, btnH);
+                Block(br);
+                bool sel = GetSheetProfile(workerId) == p;
+                string lab = WorkerStatProfiles.Label((byte)recipeRole, p);
+                if (DrawCyberButton(br, lab, selected: sel, accent: WorkerStatProfiles.Accent(p)))
+                    ApplySheetProfile(workerId, p);
+            }
+            y += btnH + 6f;
+            return y;
+        }
 
-                float fr = _worker.Conditions.Frustration;
-                Color frCol = fr >= 70f ? new Color(1f, 0.35f, 0.3f, 1f)
-                    : fr >= 40f ? UiAmber
+        float DrawPersonalConditionsBlock(ref float y, float x0, float innerW,
+            WorkerRuntime wr, GUIStyle mute, GUIStyle sec)
+        {
+            GUI.Label(new Rect(x0, y, innerW, 12f), "PERSON STATE · V1.2C", sec);
+            y += 14f;
+
+            var st = wr.State;
+            var asg = _assignments.GetAssignment(wr.WorkerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            var demand = ResolveDemandFor(wr, job);
+            GUI.Label(new Rect(x0, y, innerW, 11f),
+                $"ACTIVITY  {demand.ActivityLabel}",
+                LabelStyle(8, UiCyan, bold: true));
+            y += 12f;
+            GUI.Label(new Rect(x0, y, innerW, 11f),
+                $"DEMAND  P {demand.Physical:0.00}  M {demand.Mental:0.00}  A {demand.Attention:0.00}",
+                mute);
+            y += 13f;
+
+            // Debug condition tags
+            string tags = "";
+            if (st.IsResting) tags += "RESTING ";
+            if (WorkerJobDemand.StaminaRatio(wr) <= JobDemandTuning.ExhaustionEnterRatio
+                && st.StaminaPrimed)
+                tags += "EXHAUSTED ";
+            if (st.MentalFatigue >= JobDemandTuning.HighMentalFatigue) tags += "HIGH MENTAL FATIGUE ";
+            if (st.FocusState < JobDemandTuning.LowFocusState) tags += "LOW FOCUS ";
+            if (!string.IsNullOrEmpty(tags))
+            {
+                GUI.Label(new Rect(x0, y, innerW, 11f), tags.Trim(),
+                    LabelStyle(8, UiAmber, bold: true));
+                y += 12f;
+            }
+
+            float stamMax = wr.PhysicalStaminaMax;
+            float stam = st.PhysicalStamina;
+            if (!st.StaminaPrimed && stam <= 0f)
+                stam = stamMax; // display full until first excavator prime
+            string stamState = PersonalStaminaStateLabel(st, stam, stamMax);
+            Color stamCol = stamState switch
+            {
+                "RESTING" => UiCyan,
+                "EXHAUSTED" => new Color(1f, 0.3f, 0.28f, 1f),
+                "TIRED" => UiAmber,
+                _ => UiGreen,
+            };
+            DrawConditionRow(ref y, x0, innerW, "PHYS STAM",
+                $"{stam:0.#}/{stamMax:0.#}", stamState, stam / Mathf.Max(1f, stamMax), stamCol, mute);
+
+            DrawMeterRow(ref y, x0, innerW, "MENTAL FAT", st.MentalFatigue, mute,
+                st.MentalFatigue >= 70f ? new Color(1f, 0.35f, 0.3f) :
+                st.MentalFatigue >= 40f ? UiAmber : UiDim);
+            DrawMeterRow(ref y, x0, innerW, "FOCUS ST", st.FocusState, mute,
+                st.FocusState >= 70f ? UiGreen :
+                st.FocusState >= 40f ? UiCyan : UiAmber);
+            DrawMeterRow(ref y, x0, innerW, "FRUST.", st.Frustration, mute,
+                st.Frustration >= 70f ? new Color(1f, 0.35f, 0.3f) :
+                st.Frustration >= 40f ? UiAmber : UiDim);
+            DrawMeterRow(ref y, x0, innerW, "MORALE", st.Morale, mute,
+                st.Morale >= 65f ? UiGreen :
+                st.Morale >= 40f ? UiCyan : UiAmber);
+
+            float inj = st.Injury;
+            Color injCol = inj >= FreeWorkerController.InjuryCareThreshold
+                ? new Color(1f, 0.28f, 0.28f, 1f)
+                : inj >= FreeWorkerController.InjurySlowThreshold
+                    ? UiAmber
                     : UiDim;
-                DrawConditionRow(ref y, x0, innerW, "FRUST.",
-                    $"{fr:0.#}/100", fr >= 70f ? "HIGH" : fr >= 40f ? "RISING" : "LOW",
-                    fr / 100f, frCol, mute);
-
-                float inj = _worker.Conditions.Injury;
-                Color injCol = inj >= FreeWorkerController.InjuryCareThreshold
-                    ? new Color(1f, 0.28f, 0.28f, 1f)
-                    : inj >= FreeWorkerController.InjurySlowThreshold
-                        ? UiAmber
-                        : UiDim;
-                string injState = inj >= FreeWorkerController.InjuryCareThreshold
+            string injState = st.NeedsCare
+                ? "NEEDS CARE"
+                : inj >= FreeWorkerController.InjuryCareThreshold
                     ? "NEEDS CARE"
                     : inj >= FreeWorkerController.InjurySlowThreshold
                         ? "HURT"
                         : "OK";
-                DrawConditionRow(ref y, x0, innerW, "INJURY",
-                    $"{inj:0.#}/100", injState, inj / 100f, injCol, mute);
+            DrawConditionRow(ref y, x0, innerW, "INJURY",
+                $"{inj:0.#}/100", injState, inj / 100f, injCol, mute);
 
-                y += 4f;
-                DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
-                y += 8f;
+            y += 4f;
+            GUI.Label(new Rect(x0, y, innerW, 11f),
+                $"Traits  Stam {wr.Stats.Get(WorkerStatId.Stamina)}  Rec {wr.Stats.Get(WorkerStatId.Recovery)}  " +
+                $"Foc {wr.Stats.Get(WorkerStatId.Focus)}  Comp {wr.Stats.Get(WorkerStatId.Composure)}  " +
+                $"Det {wr.Stats.Get(WorkerStatId.Determination)}  Tol {wr.Stats.Get(WorkerStatId.Tolerance)}",
+                mute);
+            y += 14f;
+            GUI.Label(new Rect(x0, y, innerW, 10f),
+                $"StateRef {wr.StateRefLabel}", mute);
+            y += 12f;
+
+            y = DrawRecentStateEventsBlock(ref y, x0, innerW, wr, mute, sec);
+
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+            return y;
+        }
+
+        float DrawRecentStateEventsBlock(ref float y, float x0, float innerW,
+            WorkerRuntime wr, GUIStyle mute, GUIStyle sec)
+        {
+            GUI.Label(new Rect(x0, y, innerW, 12f), "RECENT STATE EVENTS · V1.2B", sec);
+            y += 14f;
+            var hist = wr.EventHistory;
+            if (hist == null || hist.Items.Count == 0)
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f), "(none)", mute);
+                y += 14f;
+                return y;
             }
 
-            DrawStatPillar(ref y, x0, innerW, "BODY", WorkerStatId.RawPower, 10, stats, pillar, dim, val);
-            y += 4f;
-            DrawStatPillar(ref y, x0, innerW, "MIND", WorkerStatId.Calibration, 10, stats, pillar, dim, val);
-            y += 4f;
-            DrawStatPillar(ref y, x0, innerW, "SOUL", WorkerStatId.Composure, 10, stats, pillar, dim, val);
+            int start = Mathf.Max(0, hist.Items.Count - 8);
+            for (int i = hist.Items.Count - 1; i >= start; i--)
+            {
+                var r = hist.Items[i];
+                if (r?.Event == null) continue;
+                var e = r.Event;
+                GUI.Label(new Rect(x0, y, innerW, 11f),
+                    $"[{e.GameHours:0.0}h] {e.EventType}",
+                    LabelStyle(8, UiCyan, bold: true));
+                y += 11f;
+                GUI.Label(new Rect(x0, y, innerW, 10f),
+                    $"{e.Source} · {e.JobType}",
+                    mute);
+                y += 10f;
+                string deltas = $"Frust {Signed(r.DeltaFrustration)}  Morale {Signed(r.DeltaMorale)}";
+                if (Mathf.Abs(r.DeltaMentalFatigue) > 0.05f)
+                    deltas += $"  MF {Signed(r.DeltaMentalFatigue)}";
+                if (Mathf.Abs(r.DeltaFocusState) > 0.05f)
+                    deltas += $"  FS {Signed(r.DeltaFocusState)}";
+                GUI.Label(new Rect(x0, y, innerW, 10f), deltas, LabelStyle(8, UiWhite));
+                y += 12f;
+            }
+            return y;
+        }
 
-            var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
-            if (DrawCyberButton(close, "×", selected: false, accent: accent))
-                _openStatsSheet = -1;
+        static string Signed(float v) =>
+            v >= 0f ? $"+{v:0.#}" : $"{v:0.#}";
+
+        void DrawMeterRow(ref float y, float x0, float innerW, string label, float value01to100,
+            GUIStyle mute, Color col)
+        {
+            DrawConditionRow(ref y, x0, innerW, label,
+                $"{value01to100:0.#}/100", "", value01to100 / 100f, col, mute);
+        }
+
+        static string PersonalStaminaStateLabel(WorkerState st, float stam, float stamMax)
+        {
+            if (st.IsResting) return "RESTING";
+            float r = stam / Mathf.Max(1f, stamMax);
+            if (r <= FreeWorkerController.StaminaExhaustedRatio) return "EXHAUSTED";
+            if (r <= FreeWorkerController.StaminaTiredRatio) return "TIRED";
+            return "OK";
+        }
+
+        float DrawExcavatorMachineBlock(ref float y, float x0, float innerW,
+            GUIStyle mute, GUIStyle sec)
+        {
+            GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE CONTEXT", sec);
+            y += 14f;
+
+            Color heatCol = _worker.HeatZone switch
+            {
+                ExcavatorHeatZone.Optimal => UiGreen,
+                ExcavatorHeatZone.Danger => UiAmber,
+                ExcavatorHeatZone.Extreme => new Color(1f, 0.45f, 0.2f, 1f),
+                ExcavatorHeatZone.Overheated => new Color(1f, 0.25f, 0.28f, 1f),
+                _ => UiCyan,
+            };
+            string zoneLabel = _worker.HeatZone switch
+            {
+                ExcavatorHeatZone.Optimal => "OPTIMAL",
+                ExcavatorHeatZone.Danger => "DANGER",
+                ExcavatorHeatZone.Extreme => "EXTREME",
+                ExcavatorHeatZone.Overheated => "OVERHEATED",
+                _ => "NORMAL",
+            };
+            DrawConditionRow(ref y, x0, innerW, "HEAT",
+                $"{_worker.Heat:0.#}/100", zoneLabel, _worker.Heat / 100f, heatCol, mute);
+
+            string activity = _worker.MachineActivityLabel;
+            Color actCol = activity switch
+            {
+                "OVERHEATED" => new Color(1f, 0.25f, 0.28f, 1f),
+                "COOLING" => UiCyan,
+                "MINING" => UiGreen,
+                _ => UiDim,
+            };
+            GUI.Label(new Rect(x0, y, 58f, 14f), "ZONE", mute);
+            GUI.Label(new Rect(x0 + 58f, y, 88f, 14f), zoneLabel, LabelStyle(10, UiWhite, bold: true));
+            GUI.Label(new Rect(x0 + 148f, y, innerW - 148f, 14f), activity,
+                LabelStyle(9, actCol, bold: true));
+            y += 16f;
+
+            GUI.Label(new Rect(x0, y, innerW, 12f),
+                $"Route {_worker.RouteCount}  ·  Tool {_worker.ToolPower}  ·  {_worker.ProviderId}",
+                LabelStyle(8, UiDim));
+            y += 14f;
+
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+            return y;
+        }
+
+        float DrawProspectingContextBlock(ref float y, float x0, float innerW, GUIStyle sec)
+        {
+            GUI.Label(new Rect(x0, y, innerW, 12f), "PROSPECTING CONTEXT", sec);
+            y += 14f;
+            string scan = _fieldScanner != null ? _fieldScanner.StateLabel : "no kit";
+            GUI.Label(new Rect(x0, y, innerW, 12f),
+                $"Scanner  {scan}",
+                LabelStyle(8, UiCyan));
+            y += 12f;
+            if (_prospector != null)
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f),
+                    $"Mode  {_prospector.WorkMode}  ·  {_prospector.Investigation.PlayerWorkLabel}",
+                    LabelStyle(8, UiDim));
+                y += 12f;
+            }
+            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+            y += 8f;
+            return y;
         }
 
         void DrawConditionRow(ref float y, float x, float w, string label, string value,
@@ -2110,7 +4002,6 @@ namespace DeepCore.FreeMovement
                 LabelStyle(9, accent, bold: true));
             y += 14f;
 
-            // Thin technical bar
             float barW = w;
             float barH = 4f;
             var prev = GUI.color;
@@ -2128,9 +4019,10 @@ namespace DeepCore.FreeMovement
             y += 8f;
         }
 
-static void DrawStatPillar(ref float y, float x, float w, string title,
+        static void DrawStatPillar(ref float y, float x, float w, string title,
             WorkerStatId start, int count, WorkerStats stats,
-            GUIStyle pillar, GUIStyle dim, GUIStyle val)
+            GUIStyle pillar, GUIStyle dim, GUIStyle val,
+            HashSet<WorkerStatId> relevant = null)
         {
             GUI.Label(new Rect(x, y, w, 13f), title, pillar);
             y += 15f;
@@ -2143,10 +4035,14 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 if (left && i > 0) rowY += 15f;
                 float cx = left ? x : x + colW;
 
+                bool hi = relevant != null && relevant.Contains(id);
                 string name = StatShortName(id);
+                if (hi) name = "· " + name;
                 int v = stats.Get(id);
-                GUI.Label(new Rect(cx, rowY, colW - 36f, 14f), name, dim);
-                GUI.Label(new Rect(cx + colW - 34f, rowY, 30f, 14f), v.ToString(), val);
+                GUI.Label(new Rect(cx, rowY, colW - 36f, 14f), name,
+                    hi ? new GUIStyle(dim) { normal = { textColor = new Color(0.25f, 0.92f, 1f, 1f) } } : dim);
+                GUI.Label(new Rect(cx + colW - 34f, rowY, 30f, 14f), v.ToString(),
+                    hi ? val : new GUIStyle(val) { normal = { textColor = new Color(0.55f, 0.62f, 0.68f, 1f) } });
             }
             y = rowY + 18f;
         }
@@ -2175,7 +4071,9 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             float findingsBlock = findingN > 0 ? 18f + findingN * lineH + 6f : 0f;
             float digBlock = 18f + Mathf.Max(1, digShow) * lineH;
             float panelH = 28f + findingsBlock + digBlock + 10f;
-            var r = new Rect(10f, Screen.height - panelH - 12f, panelW, panelH);
+            // Center-bottom — clear of left roster (+ face monitors)
+            var r = new Rect(Mathf.Max(290f, (Screen.width - panelW) * 0.5f - 40f),
+                Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
             Block(r);
 
@@ -2239,8 +4137,9 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
         void DrawKeybindingsPanel()
         {
             const float panelW = 248f;
-            const float panelH = 458f;
-            var r = new Rect(Screen.width - panelW - 12f, Screen.height - panelH - 12f, panelW, panelH);
+            const float panelH = 474f;
+            // Left of right-edge tool strip
+            var r = new Rect(Screen.width - panelW - 12f - HudToolStripReserve, Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
             Block(r);
 
@@ -2253,6 +4152,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             (string k, string d)[] rows =
             {
                 ("TAB", "Cycle worker (5)"),
+                ("I", "ST sheet (selected)"),
                 ("WASD", "Move / drive"),
                 ("LMB", "Aim · add dig pin"),
                 ("Shift+LMB", "Replace dig route"),
@@ -2286,10 +4186,13 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             }
         }
 
-        static GUIStyle LabelStyle(int size, Color color, bool bold = false) =>
-            new(GUI.skin.label)
+        static GUIStyle LabelStyle(int size, Color color, bool bold = false)
+        {
+            // Floor tiny DEV/body sizes so IMGUI stays readable without redesign.
+            int s = size < 9 ? 9 : size;
+            return new GUIStyle(GUI.skin.label)
             {
-                fontSize = size,
+                fontSize = s,
                 fontStyle = bold ? FontStyle.Bold : FontStyle.Normal,
                 normal = { textColor = color },
                 richText = false,
@@ -2298,6 +4201,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 wordWrap = false,
                 padding = new RectOffset(0, 0, 0, 2),
             };
+        }
 
         void DrawHeavyScannerHud(float x, float y, float width, float height)
         {
@@ -2439,14 +4343,34 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 return;
 
             string spoken = ProspectorAnomaly.SpokenId(f.AnomalyId);
+            string author = !string.IsNullOrEmpty(f.WorkerDisplayName)
+                ? f.WorkerDisplayName
+                : (f.WorkerId > 0 ? $"Worker {f.WorkerId}" : "Prospector");
             ShowFindingToast(string.IsNullOrEmpty(f.Message)
-                ? $"PROSPECTOR: Boss, I've got something on {spoken}. Check Tactical."
+                ? $"{author}: Boss, I've got something on {spoken}. Check Tactical."
                 : f.Message);
 
-            _banter.TrySay(WorkerBanter.Voice.Prospector,
+            // Frozen author from finding — not whoever is currently Prospecting
+            TryAuthoredBanter(
+                f.WorkerId,
+                f.WorkerDisplayName,
+                JobType.Prospecting,
+                "FindingCompleted",
                 $"Boss, I've got something on {spoken}. Check Tactical.",
                 $"Finding on {spoken}. Open Tactical.",
                 $"Conclusion ready on {spoken} — look at Tactical.");
+
+            if (f.WorkerId > 0)
+            {
+                WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                    f.WorkerId,
+                    WorkerStateEventType.Discovery,
+                    5f,
+                    $"FindingAssessed#{f.AnomalyId:00}",
+                    JobType.Prospecting,
+                    _fieldScanner != null ? _fieldScanner.ProviderId : "body.prospector"));
+                _prospectorDrySpell.NotifyDiscovery();
+            }
         }
 
         void ShowFindingToast(string message)
@@ -2473,7 +4397,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             DrawCyberPanel(r, lit: true, accentOverride: UiAmber);
             Block(r);
             GUI.Label(new Rect(r.x + 14, r.y + 10, tw - 28, 14),
-                "PROSPECTOR // FINDING", LabelStyle(10, UiAmber, bold: true));
+                "FINDING // PERSON", LabelStyle(10, UiAmber, bold: true));
             GUI.Label(new Rect(r.x + 14, r.y + 30, tw - 28, 22),
                 _findingToast, LabelStyle(13, UiWhite, bold: true));
         }
@@ -2552,7 +4476,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 || (_scanHistory != null && _scanHistory.IsHistoricalMode))
                 return;
             if (_prospector.WorkMode != ProspectorWorkMode.Investigate
-                && _control != ControlWorker.Prospector)
+                && !SelectedJobIs(JobType.Prospecting))
                 return;
 
             var loop = _prospector.Investigation;
@@ -2625,7 +4549,7 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             const float tw = 420f;
             float th = 168f + evidenceLines * 13f + (cur != null && cur.RemainingNeeds.Count > 0 ? 28f : 14f);
             if (cur != null) th += 52f;
-            float px = Screen.width - tw - 12f;
+            float px = Screen.width - tw - 12f - HudToolStripReserve;
             float py = 100f;
             var r = new Rect(px, py, tw, th);
             DrawCyberPanel(r, lit: true);
@@ -2754,15 +4678,1212 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             return false;
         }
 
+        void DrawWorkerControlDevPanel()
+        {
+            const float pw = 258f;
+            float ph = 190f;
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 96f;
+            var r = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(r, lit: true, accentOverride: UiGreen);
+            Block(r);
+
+            float x = r.x + 8f;
+            float y = r.y + 6f;
+            float inner = pw - 16f;
+
+            GUI.Label(new Rect(x, y, inner, 11f), "DEV // CONTROL · F2/F4 PERSON-FIRST",
+                LabelStyle(8, UiMute, bold: true));
+            y += 13f;
+
+            // TAB order = fixed crew roster WorkerIds (Lewis→…→Viktor)
+            string tabOrder = "TAB ORDER =";
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    if (_crewWorkers[i] == null) continue;
+                    tabOrder += $" {_crewWorkers[i].WorkerId}";
+                }
+            }
+            GUI.Label(new Rect(x, y, inner, 10f), tabOrder, LabelStyle(6, UiDim));
+            y += 12f;
+
+            var ctl = ResolveControlTarget();
+            if (!ctl.HasPerson)
+            {
+                GUI.Label(new Rect(x, y, inner, 12f), "SELECTED PERSON  (none)",
+                    LabelStyle(8, UiAmber, bold: true));
+                return;
+            }
+
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"SELECTED PERSON  {ctl.Worker.DisplayName} [{ctl.WorkerId}]",
+                LabelStyle(8, UiWhite, bold: true));
+            y += 13f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"CURRENT JOB  {JobStatPreview.DisplayName(ctl.JobType)}",
+                LabelStyle(8, UiCyan));
+            y += 12f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"PROVIDER  {(string.IsNullOrEmpty(ctl.ProviderId) ? "none" : ctl.ProviderId)}",
+                LabelStyle(7, UiAmber));
+            y += 12f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"CAMERA TARGET  {ctl.HostLabel}",
+                LabelStyle(7, UiGreen));
+            y += 12f;
+            if (ctl.Avatar != null)
+            {
+                var p = ctl.Avatar.PresencePosition;
+                string vis = ctl.Avatar.IsVisuallyHidden ? "false" : "true";
+                GUI.Label(new Rect(x, y, inner, 11f),
+                    $"PHYSICAL PERSON  @{p.x:0.00},{p.y:0.00}  Visible:{vis}",
+                    LabelStyle(7, UiDim));
+                y += 12f;
+            }
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"LEGACY CONTROL  {_control} [UNUSED STUB]",
+                LabelStyle(7, UiMute));
+            y += 12f;
+            var phys = GetPhysicalState(ctl.Worker);
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"PHYSICAL STATE  {phys}",
+                LabelStyle(7, UiAmber));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"CanPerformJobActions  {CanPerformJobActions(ctl.Worker).ToString().ToLowerInvariant()}",
+                LabelStyle(7, UiDim));
+        }
+
+        void DrawBanterDevPanel()
+        {
+            const float pw = 258f;
+            float ph = 118f;
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 96f;
+            var r = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(r, lit: true, accentOverride: new Color(0.7f, 0.55f, 1f));
+            Block(r);
+
+            float x = r.x + 8f;
+            float y = r.y + 6f;
+            float inner = pw - 16f;
+
+            GUI.Label(new Rect(x, y, inner, 11f), "DEV // BANTER · F5 PERSON AUTHOR",
+                LabelStyle(8, UiMute, bold: true));
+            y += 13f;
+
+            var last = _banter.LastSpeech;
+            if (last == null || string.IsNullOrEmpty(last.Text))
+            {
+                GUI.Label(new Rect(x, y, inner, 12f), "LAST SPEECH  (none)",
+                    LabelStyle(8, UiDim));
+                return;
+            }
+
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"Speaker  {last.DisplayName} [{last.WorkerId}]",
+                LabelStyle(8, UiWhite, bold: true));
+            y += 12f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Job Context  {WorkerBanter.ContextLabel(last.Context)}",
+                LabelStyle(7, UiCyan));
+            y += 11f;
+            var wr = FindCrewWorker(last.WorkerId);
+            var asg = wr != null ? _assignments.GetAssignment(wr.WorkerId) : null;
+            string prov = asg != null && !string.IsNullOrEmpty(asg.ProviderId) ? asg.ProviderId : "none";
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Provider  {prov}",
+                LabelStyle(7, UiAmber));
+            y += 11f;
+            string phys = wr != null ? GetPhysicalState(wr).ToString() : "?";
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Physical State  {phys}",
+                LabelStyle(7, UiDim));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Source Event  {last.SourceEvent}",
+                LabelStyle(7, UiGreen));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Authored @  {last.AuthoredGameHours:0.00}h",
+                LabelStyle(6, UiMute));
+            y += 11f;
+            var tip = LabelStyle(7, UiWhite);
+            tip.wordWrap = true;
+            GUI.Label(new Rect(x, y, inner, 28f), $"\"{last.Text}\"", tip);
+        }
+
+        void DrawWorkerSheetDevPanel()
+        {
+            const float pw = 258f;
+            float ph = 128f;
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 96f;
+            var r = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(r, lit: true, accentOverride: UiAmber);
+            Block(r);
+
+            float x = r.x + 8f;
+            float y = r.y + 6f;
+            float inner = pw - 16f;
+
+            GUI.Label(new Rect(x, y, inner, 11f), "DEV // ST SHEET · F3 PERSON-OWNED",
+                LabelStyle(8, UiMute, bold: true));
+            y += 13f;
+
+            if (_openStatsWorkerId <= 0)
+            {
+                GUI.Label(new Rect(x, y, inner, 12f), "ST SHEET TARGET  (closed)",
+                    LabelStyle(8, UiDim));
+                return;
+            }
+
+            var wr = FindCrewWorker(_openStatsWorkerId);
+            if (wr == null)
+            {
+                GUI.Label(new Rect(x, y, inner, 12f), "ST SHEET TARGET  (missing)",
+                    LabelStyle(8, UiAmber));
+                return;
+            }
+
+            var asg = _assignments.GetAssignment(wr.WorkerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            var def = JobStatPreview.Get(job);
+
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"ST SHEET TARGET  {wr.DisplayName} [WorkerId {wr.WorkerId}]",
+                LabelStyle(8, UiWhite, bold: true));
+            y += 13f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Stats Ref  {wr.StatsRefLabel}",
+                LabelStyle(7, UiCyan));
+            y += 12f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Current Job  {JobStatPreview.DisplayName(job)}",
+                LabelStyle(7, UiGreen));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Provider  {(job == JobType.Unassigned ? "none" : ProviderLabelForAssignment(asg))}",
+                LabelStyle(7, UiAmber));
+            y += 11f;
+            string src = job == JobType.Unassigned
+                ? "(none — Unassigned)"
+                : $"JobDefinition.{job}";
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Relevant Stats Source  {src}",
+                LabelStyle(7, UiDim));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Provisional  {(job == JobType.Unassigned ? "n/a" : def.RelevantStatsAreProvisional.ToString().ToLowerInvariant())}",
+                LabelStyle(7, def.RelevantStatsAreProvisional ? UiAmber : UiMute));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"Baseline Owner  WorkerId {wr.WorkerId}" +
+                (_sheetBaselineCaptured[wr.WorkerId] ? "  ✓" : "  (pending)"),
+                LabelStyle(7, UiMute));
+        }
+
+        void DrawWorkerPresenceDevPanel()
+        {
+            if (_crewWorkers == null || _crewWorkers.Length == 0) return;
+
+            const float pw = 248f;
+            float ph = 28f + _crewWorkers.Length * 78f + 28f;
+            // Right-docked pop-up (was left — overlapped roster)
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 96f;
+            var r = new Rect(bx, by, pw, Mathf.Min(ph, Screen.height - by - 8f));
+            DrawCyberPanel(r, lit: true, accentOverride: UiCyan);
+            Block(r);
+
+            float x = r.x + 8f;
+            float y = r.y + 6f;
+            float inner = pw - 16f;
+
+            GUI.Label(new Rect(x, y, inner, 12f), "DEV // PRESENCE · F4 SHIFT",
+                LabelStyle(8, UiMute, bold: true));
+            y += 14f;
+
+            var tog = new Rect(x, y, inner, 18f);
+            Block(tog);
+            if (DrawCyberButton(tog,
+                    _devForceShowHiddenAvatars ? "GHOST HIDDEN · ON" : "GHOST HIDDEN · OFF",
+                    selected: _devForceShowHiddenAvatars, accent: UiAmber))
+            {
+                _devForceShowHiddenAvatars = !_devForceShowHiddenAvatars;
+                if (_crewPhase == CrewPhase.OnShift)
+                    RefreshAllAvatarPresence();
+                else if (_crewWorkers != null)
+                {
+                    for (int i = 0; i < _crewWorkers.Length; i++)
+                    {
+                        var w = _crewWorkers[i];
+                        if (w == null) continue;
+                        _presence.Get(w.WorkerId)?.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                    }
+                }
+            }
+            y += 22f;
+
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                var job = asg != null ? asg.JobType : JobType.Unassigned;
+                var av = _presence.Get(wr.WorkerId);
+                var phys = GetPhysicalState(wr);
+                bool canAct = CanPerformJobActions(wr);
+                string vis = av == null ? "?" : (av.IsVisuallyHidden ? "no" : "yes");
+                Vector2 aPos = av != null ? av.PresencePosition : Vector2.zero;
+                string prov = job == JobType.Unassigned
+                    ? "none"
+                    : (asg != null ? asg.ProviderId : "—");
+                Vector2 pPos = job != JobType.Unassigned
+                    ? GetProviderOperatePoint(job)
+                    : Vector2.zero;
+
+                GUI.Label(new Rect(x, y, inner, 11f),
+                    $"{wr.DisplayName.ToUpperInvariant()} [{wr.WorkerId}]",
+                    LabelStyle(8, UiWhite, bold: true));
+                y += 11f;
+                GUI.Label(new Rect(x, y, inner, 10f),
+                    $"Assignment: {JobStatPreview.DisplayName(job)}",
+                    LabelStyle(7, UiCyan));
+                y += 10f;
+                GUI.Label(new Rect(x, y, inner, 10f),
+                    $"Physical: {phys}",
+                    LabelStyle(7, UiAmber));
+                y += 10f;
+                GUI.Label(new Rect(x, y, inner, 10f),
+                    $"Avatar Visible: {vis}  @{aPos.x:0.00},{aPos.y:0.00}",
+                    LabelStyle(6, UiDim));
+                y += 10f;
+                GUI.Label(new Rect(x, y, inner, 10f),
+                    job == JobType.Unassigned
+                        ? "Provider: none"
+                        : $"Provider: {prov}  @{pPos.x:0.00},{pPos.y:0.00}",
+                    LabelStyle(6, UiGreen));
+                y += 10f;
+                GUI.Label(new Rect(x, y, inner, 10f),
+                    $"CanPerformJobActions: {canAct.ToString().ToLowerInvariant()}",
+                    LabelStyle(6, canAct ? UiGreen : UiMute));
+                y += 14f;
+            }
+        }
+
+        void DrawSocialAuraDevPanel()
+        {
+            if (_crewWorkers == null || _crewWorkers.Length == 0) return;
+
+            const float pw = 340f;
+            float ph = Mathf.Min(560f, Screen.height - 104f);
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 96f;
+            var r = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(r, lit: true, accentOverride: new Color(0.45f, 0.85f, 1f));
+            Block(r);
+
+            float pad = 8f;
+            float x = r.x + pad;
+            float y = r.y + 6f;
+            float inner = pw - pad * 2f;
+
+            GUI.Label(new Rect(x, y, inner, 12f), "DEV // SOCIAL AURA · PLAYTEST",
+                LabelStyle(8, UiMute, bold: true));
+            y += 14f;
+
+            var wr = FindCrewWorker(_selectedWorkerId) ?? _crewWorkers[0];
+            if (wr == null) return;
+            var st = wr.State;
+            var kind = MapSocialPresence(wr);
+            bool elig = SocialAuraEligibility.IsEligible(wr, kind);
+            var actor = _socialAura.World.Get(wr.WorkerId);
+            actor?.RefreshExpression();
+
+            GUI.Label(new Rect(x, y, inner, 11f),
+                $"{wr.DisplayName.ToUpperInvariant()} [{wr.WorkerId}]  {kind}  elig={(elig ? "Y" : "N")}",
+                LabelStyle(8, UiWhite, bold: true));
+            y += 13f;
+
+            var tog = new Rect(x, y, inner, 18f);
+            Block(tog);
+            if (DrawCyberButton(tog,
+                    _socialDevDrawWorld ? "WORLD DEBUG · ON" : "WORLD DEBUG · OFF",
+                    selected: _socialDevDrawWorld, accent: UiAmber))
+                _socialDevDrawWorld = !_socialDevDrawWorld;
+            y += 22f;
+
+            // DEV frustration injectors — direct State write, no gameplay events.
+            float frBtnW = (inner - 6f) * 0.5f;
+            var frAdd = new Rect(x, y, frBtnW, 18f);
+            var frReset = new Rect(x + frBtnW + 6f, y, frBtnW, 18f);
+            Block(frAdd);
+            Block(frReset);
+            if (DrawCyberButton(frAdd, "DEV +25 FRUST", selected: false, accent: UiAmber))
+                DevAddFrustrationAll(25f);
+            if (DrawCyberButton(frReset, "DEV RESET FRUST", selected: false, accent: UiDim))
+                DevResetFrustrationAll();
+            y += 22f;
+
+            float viewH = r.yMax - y - 6f;
+            var view = new Rect(x, y, inner, viewH);
+            float contentW = inner - 14f;
+            // Approximate content height for scroll
+            float contentH = 1180f + _socialNearbyScratch.Count * 36f + _socialDevHistory.Count * 12f
+                + (_crewWorkers != null ? _crewWorkers.Length * 48f : 0f);
+            _socialDevScroll = GUI.BeginScrollView(view, _socialDevScroll,
+                new Rect(0f, 0f, contentW, contentH), false, true);
+            float sx = 0f;
+            float sy = 0f;
+            float sw = contentW;
+
+            // ——— MOOD ———
+            GUI.Label(new Rect(sx, sy, sw, 10f), "MOOD", LabelStyle(7, UiMute, bold: true));
+            sy += 11f;
+            if (st != null)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"Morale {st.Morale:0.0}   Frustration {st.Frustration:0.0}   FocusState {st.FocusState:0.0}",
+                    LabelStyle(7, UiWhite));
+                sy += 11f;
+            }
+            float pos = actor != null ? actor.Expression.Positive : 0f;
+            float neg = actor != null ? actor.Expression.Negative : 0f;
+            float reachW = actor != null ? SocialAuraLiveTuning.EffectiveReach(actor.Expression) : 0f;
+            float cell = _world != null && _world.CellSize > 0.001f ? _world.CellSize : 1f;
+            float reachTiles = reachW / cell;
+            GUI.Label(new Rect(sx, sy, sw, 10f),
+                $"PosExpr {pos:0.00}   NegExpr {neg:0.00}   class {(actor != null ? actor.Expression.Class.ToString() : "—")}",
+                LabelStyle(7, UiCyan));
+            sy += 11f;
+            GUI.Label(new Rect(sx, sy, sw, 10f),
+                $"Aura reach  {reachW:0.00} wu  /  {reachTiles:0.00} tiles   I={(actor != null ? actor.Expression.Intensity : 0f):0.00}",
+                LabelStyle(7, UiAmber));
+            sy += 13f;
+
+            GUI.Label(new Rect(sx, sy, sw, 10f),
+                $"Crew enc {_socialAura.TotalEncounters}  (work {_socialAura.WorkAreaEncounters}  " +
+                $"camp {_socialAura.CampEncounters}  commute {_socialAura.CommuteEncounters})  " +
+                $"cdSup {_socialAura.CooldownSuppressions}",
+                LabelStyle(6, UiDim));
+            sy += 13f;
+
+            // ——— NEARBY ———
+            _socialAura.FillNearbyDebug(
+                wr.WorkerId, _crewWorkers, _presence, MapSocialPresence,
+                id =>
+                {
+                    var asg = _assignments.GetAssignment(id);
+                    return asg != null ? asg.JobType : JobType.Unassigned;
+                },
+                _socialNearbyScratch);
+
+            GUI.Label(new Rect(sx, sy, sw, 10f),
+                $"NEARBY WORKERS  ·  P trigger {SocialAuraTuning.PressureTrigger:0.00}",
+                LabelStyle(7, UiMute, bold: true));
+            sy += 12f;
+
+            if (_socialNearbyScratch.Count == 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 10f), "(no other avatars)", LabelStyle(6, UiDim));
+                sy += 12f;
+            }
+
+            for (int i = 0; i < _socialNearbyScratch.Count; i++)
+            {
+                var n = _socialNearbyScratch[i];
+                float dTiles = n.Distance / cell;
+                Color rowCol = n.InsideReach ? (n.Exposed ? UiAmber : UiCyan) : UiDim;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"{n.OtherName}  d={n.Distance:0.00}wu/{dTiles:0.00}t  reach={(n.InsideReach ? "YES" : "NO")}  elig={(n.Eligible ? "Y" : "N")}",
+                    LabelStyle(9, rowCol));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"  P {n.Pressure:0.00}/{SocialAuraTuning.PressureTrigger:0.00}  CD {n.Cooldown:0.00}  ctx {n.Context}",
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"  Rel T={n.Trust:0.0}  W={n.Warmth:0.0}  H={n.Hostility:0.0}  R={n.Respect:0.0}   theirReach {n.Reach:0.00}",
+                    LabelStyle(9, UiCyan));
+                sy += 14f;
+            }
+
+            // ——— LAST ENCOUNTER ———
+            GUI.Label(new Rect(sx, sy, sw, 10f), "LAST ENCOUNTER", LabelStyle(7, UiMute, bold: true));
+            sy += 11f;
+
+            SocialDevEncounterStamp? lastStamp = null;
+            if (_socialDevHistory.Count > 0)
+                lastStamp = _socialDevHistory[_socialDevHistory.Count - 1];
+            var last = lastStamp.HasValue ? lastStamp.Value.Log : _socialAura.LastEncounter;
+
+            if (last == null)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 10f), "(none yet)", LabelStyle(6, UiDim));
+                sy += 12f;
+            }
+            else
+            {
+                string when = lastStamp.HasValue
+                    ? $"D{lastStamp.Value.Day} {FormatHourClock(lastStamp.Value.GameHour)}"
+                    : $"shift#{last.ShiftIndex} t={last.TimeInShift:0.00}";
+                string initName = FindCrewWorker(last.InitiatorId)?.DisplayName ?? $"#{last.InitiatorId}";
+                string tgtName = FindCrewWorker(last.TargetId)?.DisplayName ?? $"#{last.TargetId}";
+
+                GUI.Label(new Rect(sx, sy, sw, 10f), when, LabelStyle(6, UiAmber));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"{initName} → {tgtName}   ctx {last.Context}",
+                    LabelStyle(6, UiWhite));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"Act {last.Action}  d20={last.ActionD20} {(last.ActionSuccess ? "OK" : "FAIL")}",
+                    LabelStyle(6, last.ActionSuccess ? UiGreen : UiAmber));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"Rsp {last.Response}  d20={last.ResponseD20} {(last.ResponseSuccess ? "OK" : "FAIL")}",
+                    LabelStyle(6, last.ResponseSuccess ? UiGreen : UiAmber));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"Rel Δ  I→T T/W/H {last.DeltaTrustIT:+0.0;-0.0}/{last.DeltaWarmthIT:+0.0;-0.0}/{last.DeltaHostilityIT:+0.0;-0.0}",
+                    LabelStyle(6, UiDim));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"       T→I T/W/H {last.DeltaTrustTI:+0.0;-0.0}/{last.DeltaWarmthTI:+0.0;-0.0}/{last.DeltaHostilityTI:+0.0;-0.0}",
+                    LabelStyle(6, UiDim));
+                sy += 10f;
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    $"State Δ  Fr I/T {last.DeltaFrustrationInit:+0.0;-0.0}/{last.DeltaFrustrationTarget:+0.0;-0.0}  " +
+                    $"Mo {last.DeltaMoraleInit:+0.0;-0.0}/{last.DeltaMoraleTarget:+0.0;-0.0}",
+                    LabelStyle(6, UiDim));
+                sy += 11f;
+
+                string dialogueLine;
+                Color dialogueCol;
+                if (lastStamp.HasValue)
+                {
+                    var s = lastStamp.Value;
+                    if (s.Presented)
+                    {
+                        dialogueLine = $"Dialogue SHOWN ({s.LinesQueued} lines)";
+                        dialogueCol = UiGreen;
+                    }
+                    else if (s.SuppressedDistance)
+                    {
+                        dialogueLine = $"Dialogue SUPPRESSED — distance > {SocialAuraPresenter.PresentDistanceMax:0.0}wu";
+                        dialogueCol = UiAmber;
+                    }
+                    else if (s.SuppressedSleep)
+                    {
+                        dialogueLine = "Dialogue SUPPRESSED — sleep / ineligible presence";
+                        dialogueCol = UiAmber;
+                    }
+                    else
+                    {
+                        dialogueLine = "Dialogue SUPPRESSED — unknown gate";
+                        dialogueCol = UiAmber;
+                    }
+                }
+                else
+                {
+                    var pres = _socialPresenter.LastPresentation;
+                    if (pres.Log == last && pres.Presented)
+                    {
+                        dialogueLine = $"Dialogue SHOWN ({pres.LinesQueued} lines)";
+                        dialogueCol = UiGreen;
+                    }
+                    else if (pres.Log == last && pres.SuppressedDistance)
+                    {
+                        dialogueLine = $"Dialogue SUPPRESSED — distance > {SocialAuraPresenter.PresentDistanceMax:0.0}wu";
+                        dialogueCol = UiAmber;
+                    }
+                    else if (pres.Log == last && pres.SuppressedSleep)
+                    {
+                        dialogueLine = "Dialogue SUPPRESSED — sleep / ineligible presence";
+                        dialogueCol = UiAmber;
+                    }
+                    else
+                    {
+                        dialogueLine = "Dialogue — (no presentation stamp)";
+                        dialogueCol = UiDim;
+                    }
+                }
+
+                GUI.Label(new Rect(sx, sy, sw, 10f), dialogueLine, LabelStyle(6, dialogueCol));
+                sy += 10f;
+                if (lastStamp.HasValue && lastStamp.Value.Presented)
+                {
+                    GUI.Label(new Rect(sx, sy, sw, 10f),
+                        $"  I: {TruncateDev(lastStamp.Value.InitiatorLine, 44)}",
+                        LabelStyle(6, UiWhite));
+                    sy += 10f;
+                    GUI.Label(new Rect(sx, sy, sw, 10f),
+                        $"  T: {TruncateDev(lastStamp.Value.ResponseLine, 44)}",
+                        LabelStyle(6, UiWhite));
+                    sy += 10f;
+                }
+                GUI.Label(new Rect(sx, sy, sw, 10f),
+                    TruncateDev(last.OutcomeSummary ?? "", 48),
+                    LabelStyle(6, UiMute));
+                sy += 13f;
+            }
+
+            // ——— RELATIONSHIP-AWARE WORK V1 (Exc↔Eng repair only) ———
+            GUI.Label(new Rect(sx, sy, sw, 12f), "COOP WORK V1 · EXC↔ENG REPAIR",
+                LabelStyle(9, UiMute, bold: true));
+            sy += 13f;
+            var coopPanel = EvaluateExcavatorEngineerCoop();
+            if (!coopPanel.Active)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "(need assigned Excavator + Engineer)",
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+            else
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"CooperationQuality  {coopPanel.Quality:0.00}",
+                    LabelStyle(9, UiAmber, bold: true));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    TruncateDev(coopPanel.Factors ?? "", 48),
+                    LabelStyle(9, UiWhite));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"Op  dispatch×{coopPanel.DispatchSpeedMul:0.00}  repairDur×{coopPanel.RepairDurationMul:0.00}",
+                    LabelStyle(9, UiCyan));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"Chance  benefit {coopPanel.BenefitChance:0.00}  setback {coopPanel.SetbackChance:0.00}",
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"Last  {ExcavatorEngineerCooperation.LastConsequence}",
+                    LabelStyle(9, UiWhite));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    TruncateDev(ExcavatorEngineerCooperation.LastConsequenceDetail ?? "—", 48),
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+            sy += 4f;
+
+            // ——— RELATIONSHIP V1.1 + MEMORY V1 ———
+            var memStore = _socialAura.Memory;
+            int memFocus = wr.WorkerId;
+            int pairOther = 0;
+            if (_socialNearbyScratch.Count > 0)
+                pairOther = _socialNearbyScratch[0].OtherId;
+            else if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    if (_crewWorkers[i] != null && _crewWorkers[i].WorkerId != memFocus)
+                    {
+                        pairOther = _crewWorkers[i].WorkerId;
+                        break;
+                    }
+                }
+            }
+
+            GUI.Label(new Rect(sx, sy, sw, 12f), "RELATIONSHIP V1.1 (selected pair)",
+                LabelStyle(9, UiMute, bold: true));
+            sy += 13f;
+            if (pairOther > 0)
+            {
+                string on = FindCrewWorker(pairOther)?.DisplayName ?? $"#{pairOther}";
+                var pairRel = _socialAura.Relation(memFocus, pairOther);
+                var towardPair = memStore != null
+                    ? memStore.GetToward(memFocus, pairOther)
+                    : System.Array.Empty<SocialMemoryEntry>();
+                var derived = RelationshipClassifier.Classify(pairRel, towardPair, out var derivedWhy);
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"{wr.DisplayName}→{on}",
+                    LabelStyle(9, UiCyan));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    RelationshipClassifier.FormatAxes(pairRel),
+                    LabelStyle(9, UiWhite));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    $"Derived  {derived}",
+                    LabelStyle(9, UiAmber, bold: true));
+                sy += 12f;
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    TruncateDev(derivedWhy ?? "", 48),
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+                RelationshipClassifier.FillSupportingMemories(
+                    derived, towardPair, _socialMemoryScratch, 3);
+                GUI.Label(new Rect(sx, sy, sw, 12f), "Supporting memories",
+                    LabelStyle(9, UiMute));
+                sy += 12f;
+                if (_socialMemoryScratch.Count == 0)
+                {
+                    GUI.Label(new Rect(sx, sy, sw, 12f), "  (none)", LabelStyle(9, UiDim));
+                    sy += 12f;
+                }
+                else
+                {
+                    for (int m = 0; m < _socialMemoryScratch.Count; m++)
+                    {
+                        var e = _socialMemoryScratch[m];
+                        GUI.Label(new Rect(sx, sy, sw, 12f),
+                            $"  {e.Type}  {e.Strength:0.00}  {e.Context}",
+                            LabelStyle(9, UiWhite));
+                        sy += 12f;
+                    }
+                }
+            }
+            else
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "(no pair selected)", LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+
+            sy += 4f;
+            GUI.Label(new Rect(sx, sy, sw, 12f), "MEMORY V1 (observer→target)",
+                LabelStyle(9, UiMute, bold: true));
+            sy += 13f;
+
+            if (memStore == null || memStore.TotalEntries == 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "(no memories yet)", LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+            else if (_crewWorkers != null)
+            {
+                float nowH = _absoluteGameHours;
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var other = _crewWorkers[i];
+                    if (other == null || other.WorkerId == memFocus) continue;
+                    var toward = memStore.GetToward(memFocus, other.WorkerId);
+                    if (toward.Count == 0)
+                    {
+                        GUI.Label(new Rect(sx, sy, sw, 12f),
+                            $"→ {other.DisplayName}: —",
+                            LabelStyle(9, UiDim));
+                        sy += 12f;
+                        continue;
+                    }
+                    GUI.Label(new Rect(sx, sy, sw, 12f),
+                        $"→ {other.DisplayName} ({toward.Count})",
+                        LabelStyle(9, UiCyan));
+                    sy += 12f;
+                    for (int m = 0; m < toward.Count && m < 6; m++)
+                    {
+                        var e = toward[m];
+                        GUI.Label(new Rect(sx, sy, sw, 12f),
+                            $"  {e.Type}  str={e.Strength:0.00}  age={e.AgeHours(nowH):0.0}h  {e.Context}",
+                            LabelStyle(9, e.Major ? UiAmber : UiWhite));
+                        sy += 12f;
+                    }
+                }
+
+                if (pairOther > 0)
+                {
+                    string on = FindCrewWorker(pairOther)?.DisplayName ?? $"#{pairOther}";
+                    memStore.GetStrongest(memFocus, pairOther, _socialMemoryScratch, 3);
+                    GUI.Label(new Rect(sx, sy, sw, 12f),
+                        $"TOP3 {wr.DisplayName}→{on}",
+                        LabelStyle(9, UiAmber, bold: true));
+                    sy += 12f;
+                    if (_socialMemoryScratch.Count == 0)
+                    {
+                        GUI.Label(new Rect(sx, sy, sw, 12f), "  (none)", LabelStyle(9, UiDim));
+                        sy += 12f;
+                    }
+                    else
+                    {
+                        for (int m = 0; m < _socialMemoryScratch.Count; m++)
+                        {
+                            var e = _socialMemoryScratch[m];
+                            GUI.Label(new Rect(sx, sy, sw, 12f),
+                                $"  {e.Type}  {e.Strength:0.00}  {e.Context}",
+                                LabelStyle(9, UiWhite));
+                            sy += 12f;
+                        }
+                    }
+                }
+            }
+
+            sy += 4f;
+
+            // ——— RELATIONSHIP WORK PLAYTEST (5-day, Exc↔Eng repair) ———
+            GUI.Label(new Rect(sx, sy, sw, 12f), "RELATIONSHIP WORK PLAYTEST · 5-DAY",
+                LabelStyle(9, UiAmber, bold: true));
+            sy += 13f;
+
+            int maraId = _workerMara != null ? _workerMara.WorkerId : 2;
+            int viktorId = _workerViktor != null ? _workerViktor.WorkerId : 5;
+            var mvRel = _socialAura.Relation(maraId, viktorId);
+            var mvMem = _socialAura.Memory != null
+                ? _socialAura.Memory.GetToward(maraId, viktorId)
+                : System.Array.Empty<SocialMemoryEntry>();
+            var mvClass = RelationshipClassifier.Classify(mvRel, mvMem, out _);
+            GUI.Label(new Rect(sx, sy, sw, 12f),
+                $"Mara→Viktor  {RelationshipClassifier.FormatAxes(mvRel)}",
+                LabelStyle(9, UiWhite));
+            sy += 12f;
+            GUI.Label(new Rect(sx, sy, sw, 12f),
+                $"Derived  {mvClass}   preset  {_coopWorkPlaytest.LastPresetLabel}",
+                LabelStyle(9, UiCyan));
+            sy += 12f;
+
+            RelationshipWorkPlaytestTracker.FillTopCoopMemories(
+                _socialAura.Memory, maraId, viktorId, _coopMemScratch, 3);
+            GUI.Label(new Rect(sx, sy, sw, 12f), "Top coop memories:",
+                LabelStyle(9, UiMute));
+            sy += 12f;
+            if (_coopMemScratch.Count == 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "  (none)", LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+            else
+            {
+                for (int m = 0; m < _coopMemScratch.Count; m++)
+                {
+                    var e = _coopMemScratch[m];
+                    string who = e.ObserverId == maraId ? "M→V" : "V→M";
+                    GUI.Label(new Rect(sx, sy, sw, 12f),
+                        $"  {who} {e.Type}  {e.Strength:0.00}",
+                        LabelStyle(9, UiWhite));
+                    sy += 12f;
+                }
+            }
+
+            var setRelBtn = new Rect(sx, sy, sw, 20f);
+            if (DrawCyberButton(setRelBtn,
+                    $"SET TEST RELATIONSHIP · {_coopWorkPlaytest.LastPresetLabel}",
+                    selected: false, accent: UiAmber))
+                DevCycleTestRelationship();
+            sy += 24f;
+
+            var coopDay = _coopWorkPlaytest.Current;
+            if (coopDay != null && coopDay.DayIndex > 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    _coopWorkPlaytest.FormatCompactDay(coopDay),
+                    LabelStyle(9, UiWhite));
+                sy += 12f;
+            }
+            else
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "(no repair collabs yet today)",
+                    LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+            var coopHist = _coopWorkPlaytest.Days;
+            if (coopHist != null && coopHist.Count > 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "prior coop days:", LabelStyle(9, UiMute));
+                sy += 12f;
+                for (int i = coopHist.Count - 1; i >= 0; i--)
+                {
+                    GUI.Label(new Rect(sx, sy, sw, 12f),
+                        _coopWorkPlaytest.FormatCompactDay(coopHist[i]),
+                        LabelStyle(9, UiDim));
+                    sy += 12f;
+                }
+            }
+
+            sy += 4f;
+
+            // ——— PLAYTEST SUMMARY (5-day rolling, observation only) ———
+            GUI.Label(new Rect(sx, sy, sw, 12f), "PLAYTEST SUMMARY · 5-DAY",
+                LabelStyle(9, UiAmber, bold: true));
+            sy += 13f;
+
+            var cur = _socialPlaytest.Current;
+            if (cur != null && cur.DayIndex > 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f),
+                    _socialPlaytest.FormatCompactDay(cur),
+                    LabelStyle(9, UiWhite));
+                sy += 12f;
+
+                // Per-worker encounters + avg frustration
+                if (_crewWorkers != null)
+                {
+                    for (int i = 0; i < _crewWorkers.Length; i++)
+                    {
+                        var w = _crewWorkers[i];
+                        if (w == null) continue;
+                        int ec = 0;
+                        if (cur.EncountersByWorker != null)
+                            cur.EncountersByWorker.TryGetValue(w.WorkerId, out ec);
+                        float af = cur.AvgFrustration(w.WorkerId);
+                        GUI.Label(new Rect(sx, sy, sw, 12f),
+                            $"  {w.DisplayName}  enc={ec}  FrØ={af:0.0}",
+                            LabelStyle(9, UiCyan));
+                        sy += 12f;
+                    }
+                }
+
+                // Top pairs today
+                if (cur.EncountersByPair != null && cur.EncountersByPair.Count > 0)
+                {
+                    GUI.Label(new Rect(sx, sy, sw, 12f), "  pairs:", LabelStyle(9, UiMute));
+                    sy += 12f;
+                    foreach (var kv in cur.EncountersByPair)
+                    {
+                        int a = (int)(kv.Key >> 32);
+                        int b = (int)(uint)kv.Key;
+                        string na = FindCrewWorker(a)?.DisplayName ?? $"#{a}";
+                        string nb = FindCrewWorker(b)?.DisplayName ?? $"#{b}";
+                        GUI.Label(new Rect(sx, sy, sw, 12f),
+                            $"  {na}·{nb} ×{kv.Value}",
+                            LabelStyle(9, UiDim));
+                        sy += 12f;
+                    }
+                }
+            }
+            else
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "(collecting…)", LabelStyle(9, UiDim));
+                sy += 12f;
+            }
+
+            // Prior archived days (newest first)
+            var hist = _socialPlaytest.Days;
+            if (hist != null && hist.Count > 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 12f), "prior days:", LabelStyle(9, UiMute));
+                sy += 12f;
+                for (int i = hist.Count - 1; i >= 0; i--)
+                {
+                    GUI.Label(new Rect(sx, sy, sw, 12f),
+                        _socialPlaytest.FormatCompactDay(hist[i]),
+                        LabelStyle(9, UiDim));
+                    sy += 12f;
+                }
+            }
+
+            sy += 6f;
+
+            // ——— LAST 10 CREW ———
+            GUI.Label(new Rect(sx, sy, sw, 10f), "LAST 10 ENCOUNTERS (CREW)",
+                LabelStyle(7, UiMute, bold: true));
+            sy += 11f;
+
+            if (_socialDevHistory.Count == 0)
+            {
+                GUI.Label(new Rect(sx, sy, sw, 10f), "(none yet)", LabelStyle(6, UiDim));
+                sy += 12f;
+            }
+            else
+            {
+                for (int i = _socialDevHistory.Count - 1; i >= 0; i--)
+                {
+                    var s = _socialDevHistory[i];
+                    var log = s.Log;
+                    if (log == null) continue;
+                    string a = FindCrewWorker(log.InitiatorId)?.DisplayName ?? $"#{log.InitiatorId}";
+                    string b = FindCrewWorker(log.TargetId)?.DisplayName ?? $"#{log.TargetId}";
+                    string dlg = s.Presented ? "say" : (s.SuppressedDistance ? "dist" : (s.SuppressedSleep ? "sleep" : "mute"));
+                    GUI.Label(new Rect(sx, sy, sw, 10f),
+                        $"D{s.Day} {FormatHourClock(s.GameHour)}  {a}→{b}  {log.Action}/{(log.ActionSuccess ? "OK" : "X")}  {dlg}",
+                        LabelStyle(6, s.Presented ? UiGreen : UiDim));
+                    sy += 10f;
+                }
+            }
+
+            GUI.EndScrollView();
+        }
+
+        /// <summary>DEV SOCIAL only — bumps Frustration on every crew person (clamped). No events.</summary>
+        void DevAddFrustrationAll(float amount)
+        {
+            if (_crewWorkers == null || amount == 0f) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr?.State == null) continue;
+                wr.State.AddFrustration(amount);
+                _socialAura.World.Get(wr.WorkerId)?.RefreshExpression();
+            }
+        }
+
+        /// <summary>DEV SOCIAL only — restores Frustration to WorkerState.DefaultFrustration. No events.</summary>
+        void DevResetFrustrationAll()
+        {
+            if (_crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr?.State == null) continue;
+                wr.State.Frustration = WorkerState.DefaultFrustration;
+                _socialAura.World.Get(wr.WorkerId)?.RefreshExpression();
+            }
+        }
+
+        static string FormatHourClock(float gameHour)
+        {
+            int h = Mathf.FloorToInt(gameHour) % 24;
+            if (h < 0) h += 24;
+            int m = Mathf.FloorToInt((gameHour - Mathf.Floor(gameHour)) * 60f);
+            if (m < 0) m = 0;
+            if (m > 59) m = 59;
+            return $"{h:00}:{m:00}";
+        }
+
+        static string TruncateDev(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+        }
+
+        void DrawWorkerRuntimeDevPanel()
+        {
+            if (_crewWorkers == null || _crewWorkers.Length == 0) return;
+
+            const float pw = 268f;
+            const float rowH = 22f;
+            float ph = 22f + 5 * rowH + 10f;
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = Screen.height - ph - 12f;
+            if (bx < 220f) bx = 220f;
+            var r = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(r, lit: false, accentOverride: UiDim);
+            Block(r);
+
+            float x = r.x + 10f;
+            float y = r.y + 6f;
+            float inner = pw - 20f;
+            GUI.Label(new Rect(x, y, inner, 12f), "DEV // WORKER RUNTIME · STAGE A",
+                LabelStyle(8, UiMute, bold: true));
+            y += 16f;
+
+            DrawWorkerRuntimeDevRow(ref y, x, inner, "PROSPECTOR BODY", _prospector?.AssignedWorker);
+            DrawWorkerRuntimeDevRow(ref y, x, inner, "EXCAVATOR BODY", _worker?.AssignedWorker);
+            DrawWorkerRuntimeDevRow(ref y, x, inner, "HAULER BODY", _hauler?.AssignedWorker);
+            DrawWorkerRuntimeDevRow(ref y, x, inner, "REFINER BODY", _refiner?.AssignedWorker);
+            DrawWorkerRuntimeDevRow(ref y, x, inner, "ENGINEER BODY", _engineer?.AssignedWorker);
+        }
+
+        void DrawWorkerRuntimeDevRow(ref float y, float x, float inner, string body, WorkerRuntime wr)
+        {
+            if (wr == null)
+            {
+                GUI.Label(new Rect(x, y, inner, 12f), $"{body}  ·  (unbound)",
+                    LabelStyle(8, UiDim));
+                y += 18f;
+                return;
+            }
+
+            // Body.Stats and Worker.Stats must be the same object
+            bool sameRef = false;
+            WorkerStats bodyStats = null;
+            if (body.StartsWith("PROSPECTOR")) bodyStats = _prospector?.Stats;
+            else if (body.StartsWith("EXCAVATOR")) bodyStats = _worker?.Stats;
+            else if (body.StartsWith("HAULER")) bodyStats = _hauler?.Stats;
+            else if (body.StartsWith("REFINER")) bodyStats = _refiner?.Stats;
+            else if (body.StartsWith("ENGINEER")) bodyStats = _engineer?.Stats;
+            sameRef = ReferenceEquals(bodyStats, wr.Stats);
+
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"{body}  {wr.DisplayName}  id:{wr.WorkerId}  {wr.StatsRefLabel}" +
+                (sameRef ? "  ✓" : "  ✗ REF MISMATCH"),
+                LabelStyle(8, sameRef ? UiGreen : new Color(1f, 0.35f, 0.3f), bold: !sameRef));
+            y += 18f;
+        }
+
+        void DrawWorkerAssignmentDevPanel()
+        {
+            if (_crewWorkers == null || _crewWorkers.Length == 0) return;
+
+            int idx = Mathf.Clamp(_assignmentDevWorkerIndex, 0, _crewWorkers.Length - 1);
+            var wr = _crewWorkers[idx];
+            if (wr == null) return;
+
+            var asg = _assignments.GetAssignment(wr.WorkerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            var def = JobStatPreview.Get(job);
+            int nStats = def.RelevantStats.Count;
+
+            const float pw = 300f;
+            // Worker summary + 5 compact providers + stats
+            float ph = 72f + 5f * 96f + 18f + nStats * 12f + 20f;
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            if (bx < 160f) bx = 160f;
+            float by = Mathf.Max(8f, 96f);
+            var r = new Rect(bx, by, pw, Mathf.Min(ph, Screen.height - by - 8f));
+            DrawCyberPanel(r, lit: true, accentOverride: UiCyan);
+            Block(r);
+
+            float x = r.x + 10f;
+            float y = r.y + 6f;
+            float inner = pw - 20f;
+
+            GUI.Label(new Rect(x, y, inner, 12f), "DEV // JOB ASSIGNMENT · STAGE E",
+                LabelStyle(8, UiMute, bold: true));
+            y += 14f;
+
+            float btnW = (inner - 8f * 4) / 5f;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var br = new Rect(x + i * (btnW + 8f), y, btnW, 18f);
+                Block(br);
+                string label = w.DisplayName.Length <= 4
+                    ? w.DisplayName
+                    : w.DisplayName.Substring(0, 3);
+                if (DrawCyberButton(br, label, selected: i == idx, accent: UiCyan))
+                    _assignmentDevWorkerIndex = i;
+            }
+            y += 22f;
+
+            // Worker-centric summary
+            GUI.Label(new Rect(x, y, inner, 12f),
+                $"{wr.DisplayName}  ·  {JobStatPreview.DisplayName(job)}",
+                LabelStyle(9, UiWhite, bold: true));
+            y += 13f;
+            string prov = asg != null ? asg.ProviderId : "—";
+            if (asg != null && !string.IsNullOrEmpty(asg.ProviderId)
+                && !asg.ProviderId.Contains("."))
+                prov = asg.ProviderDisplayLabel;
+            GUI.Label(new Rect(x, y, inner, 11f), $"Provider: {prov}", LabelStyle(7, UiAmber));
+            y += 14f;
+
+            y = DrawAssignProviderBlock(ref y, x, inner,
+                "SCANNER · PROSPECTING",
+                _prospector?.AssignedWorker,
+                _fieldScanner != null
+                    ? $"{_fieldScanner.ProviderId} · {_fieldScanner.StateLabel}"
+                    : "body.prospector (no kit)",
+                JobType.Prospecting);
+
+            y = DrawAssignProviderBlock(ref y, x, inner,
+                "EXCAVATOR · EXCAVATION",
+                _worker?.AssignedWorker,
+                _worker != null
+                    ? $"{_worker.ProviderId} · {_worker.MachineActivityLabel} · H{_worker.Heat:0}"
+                    : "—",
+                JobType.Excavation);
+
+            y = DrawAssignProviderBlock(ref y, x, inner,
+                "CART · HAULING",
+                _hauler?.AssignedWorker,
+                _hauler != null
+                    ? $"{_hauler.ProviderId} · {_hauler.ActivityLabel} · cargo {_hauler.CargoCount}"
+                    : "—",
+                JobType.Hauling);
+
+            y = DrawAssignProviderBlock(ref y, x, inner,
+                "WASHER · REFINING",
+                _refiner?.AssignedWorker,
+                _refiner != null
+                    ? $"{_refiner.ProviderId} · {_refiner.ActivityLabel}"
+                    : "—",
+                JobType.Refining);
+
+            y = DrawAssignProviderBlock(ref y, x, inner,
+                "KIT · ENGINEERING",
+                _engineer?.AssignedWorker,
+                _engineer != null
+                    ? $"{_engineer.ProviderId} · {_engineer.WorkLabel}"
+                    : "—",
+                JobType.Engineering);
+
+            string statsTitle = def.RelevantStatsAreProvisional
+                ? "RELEVANT STATS (PROVISIONAL)"
+                : "RELEVANT STATS";
+            GUI.Label(new Rect(x, y, inner, 11f), statsTitle, LabelStyle(7, UiMute, bold: true));
+            y += 12f;
+
+            if (nStats == 0)
+            {
+                GUI.Label(new Rect(x, y, inner, 11f), "(none)", LabelStyle(7, UiDim));
+                return;
+            }
+
+            for (int i = 0; i < nStats; i++)
+            {
+                var sid = def.RelevantStats[i];
+                int v = wr.Stats != null ? wr.Stats.Get(sid) : 0;
+                GUI.Label(new Rect(x, y, inner, 11f),
+                    $"{JobStatPreview.StatDisplayName(sid)}  {v}",
+                    LabelStyle(7, UiWhite));
+                y += 12f;
+            }
+        }
+
+        float DrawAssignProviderBlock(
+            ref float y, float x, float inner,
+            string title,
+            WorkerRuntime assigned,
+            string stateLine,
+            JobType job)
+        {
+            GUI.Label(new Rect(x, y, inner, 11f), title, LabelStyle(7, UiAmber, bold: true));
+            y += 12f;
+            GUI.Label(new Rect(x, y, inner, 11f),
+                assigned != null
+                    ? $"Assigned: {assigned.DisplayName}"
+                    : "VACANT",
+                LabelStyle(7, assigned != null ? UiWhite : UiAmber, bold: assigned == null));
+            y += 11f;
+            GUI.Label(new Rect(x, y, inner, 10f), stateLine, LabelStyle(6, UiDim));
+            y += 12f;
+
+            float abW = (inner - 4f) / 5f;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var abr = new Rect(x + i * (abW + 1f), y, abW, 16f);
+                Block(abr);
+                bool isCur = assigned != null && ReferenceEquals(assigned, w);
+                bool blocked = IsJobAssignBlocked(w, job, out string blockWhy);
+                string shortName = w.DisplayName.Length <= 3
+                    ? w.DisplayName
+                    : w.DisplayName.Substring(0, 3);
+                string lab = blocked ? $"{shortName}!" : shortName;
+                if (DrawCyberButton(abr, lab, selected: isCur,
+                        accent: blocked ? UiDim : UiGreen)
+                    && !blocked)
+                {
+                    if (TryAssignJob(w, job, out string why))
+                        DigHoodLog.Push($"ASSIGN OK | {why}");
+                    else
+                        DigHoodLog.Push($"ASSIGN BLOCKED | {why}");
+                }
+                if (blocked && abr.Contains(Event.current.mousePosition))
+                    GUI.Label(new Rect(x, y + 16f, inner, 10f), blockWhy, LabelStyle(6, UiAmber));
+            }
+            y += 18f;
+
+            var unR = new Rect(x, y, inner, 16f);
+            Block(unR);
+            bool unBlock = !CanReleaseFromJob(job, out string unWhy);
+            if (DrawCyberButton(unR, unBlock ? $"UNASSIGN ({unWhy})" : "UNASSIGN",
+                    accent: unBlock ? UiDim : UiAmber)
+                && !unBlock)
+            {
+                if (TryUnassignJob(job, out string why))
+                    DigHoodLog.Push($"UNASSIGN OK | {why}");
+                else
+                    DigHoodLog.Push($"UNASSIGN BLOCKED | {why}");
+            }
+            y += 20f;
+            return y;
+        }
+
         void DrawScanHistoryBrowser()
         {
             if (!_scanHistoryBrowserOpen) return;
             if (_playerTactical == null || !_playerTactical.Visible) return;
             if (_scanHistory == null) return;
 
-            // Dock mid-left, clear of worker roster (~220px) and Dig Hood / CONTROLS.
+            // Dock mid-left, clear of worker roster + face monitors (~290px) and Dig Hood / CONTROLS.
             const float panelW = 300f;
-            float panelX = 220f;
+            float panelX = 290f;
             float panelY = 96f;
             float panelH = Mathf.Min(440f, Screen.height - panelY - 130f);
             var panel = new Rect(panelX, panelY, panelW, panelH);
@@ -2863,13 +5984,13 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 ty += 13f;
                 string facing = ProspectorScanFormulas.FormatFacingLabel(rec.ScannerFacing);
                 GUI.Label(new Rect(lx, ty, tw, 12f),
-                    $"LOC ({rec.ScannerPosition.x:0.0},{rec.ScannerPosition.y:0.0})  ·  {facing}",
+                    $"LOC ({rec.ScannerPosition.x:0.0},{rec.ScannerPosition.y:0.0})  ·  {facing}  ·  " +
+                    $"{rec.ProspectorName} (id {rec.WorkerId})",
                     LabelStyle(8, UiDim));
                 ty += 13f;
                 GUI.Label(new Rect(lx, ty, tw, 12f),
                     $"RNG {rec.PlannedRangeCells:0.#}  ·  ±{rec.PlannedHalfAngleDeg:0.#}°  ·  " +
-                    $"{rec.ProspectorName}/{rec.ProspectorProfileLabel}  ·  " +
-                    $"ANOM {rec.SpatialSnapshots.Count}",
+                    $"{rec.ProspectorProfileLabel}  ·  ANOM {rec.SpatialSnapshots.Count}",
                     LabelStyle(8, UiMute));
             }
 
@@ -3193,56 +6314,35 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
             return sampleCount > 0;
         }
 
-        void DrawBanterBubble(float x, float y, WorkerBanter.Voice voice)
+        void DrawBanterBubble(float x, float y, WorkerRuntime wr)
         {
-            string line = _banter.Get(voice);
-            if (string.IsNullOrEmpty(line)) return;
+            if (wr == null) return;
+            var speech = _banter.GetForWorker(wr.WorkerId);
+            if (speech == null || string.IsNullOrEmpty(speech.Text)) return;
 
-            Color accent = voice switch
-            {
-                WorkerBanter.Voice.Prospector => UiCyan,
-                WorkerBanter.Voice.Excavator => UiAmber,
-                WorkerBanter.Voice.Refiner => new Color(0.7f, 0.55f, 1f),
-                WorkerBanter.Voice.Engineer => new Color(1f, 0.55f, 0.22f),
-                _ => UiGreen,
-            };
-            // Soft floating line — no panel / box
-            var st = LabelStyle(11, new Color(accent.r, accent.g, accent.b, 0.72f));
-            st.wordWrap = true;
-            GUI.Label(new Rect(x + 4f, y + 18f, 260f, 40f), line, st);
-        }
+            Color accent = AccentForWorkerId(wr.WorkerId);
+            const float bw = 248f;
+            const float bh = 58f;
+            var r = new Rect(x, y, bw, bh);
 
-        void DrawWorkerCard(Rect r, ControlWorker worker, string title, string subtitle,
-            GUIStyle titleStyle, GUIStyle subStyle)
-        {
-            bool on = _control == worker;
+            // Keep speech boxes clear of the right tool strip + open DEV popup.
+            float rightLimit = Screen.width - HudToolStripReserve - 16f;
+            if (_hudPopup == HudPopupKind.Social)
+                rightLimit -= 348f;
+            else if (_hudPopup != HudPopupKind.None)
+                rightLimit -= 300f;
+            if (r.xMax > rightLimit)
+                r.x = Mathf.Max(10f, rightLimit - r.width);
+
+            DrawCyberPanel(r, lit: false, accentOverride: accent);
             Block(r);
 
-            Color accent = worker switch
-            {
-                ControlWorker.Prospector => UiCyan,
-                ControlWorker.Excavator => UiAmber,
-                ControlWorker.Refiner => new Color(0.7f, 0.55f, 1f),
-                ControlWorker.Engineer => new Color(1f, 0.55f, 0.22f),
-                _ => UiGreen,
-            };
-
-            DrawCyberPanel(r, lit: on, accentOverride: on ? accent : default);
-            // Selected marker — thin left rail
-            var prev = GUI.color;
-            GUI.color = on ? new Color(accent.r, accent.g, accent.b, 0.55f + 0.35f * _uiPulse) : new Color(accent.r, accent.g, accent.b, 0.2f);
-            GUI.DrawTexture(new Rect(r.x + 6, r.y + 10, 2f, r.height - 20), Texture2D.whiteTexture);
-            GUI.color = prev;
-
-            var tStyle = new GUIStyle(titleStyle) { normal = { textColor = on ? accent : UiDim } };
-            GUI.Label(new Rect(r.x + 16, r.y + 12, r.width - 24, 20), title, tStyle);
-            GUI.Label(new Rect(r.x + 16, r.y + 34, r.width - 24, 16), subtitle, subStyle);
-            if (on)
-                GUI.Label(new Rect(r.x + 16, r.y + 50, r.width - 24, 14), "// SELECTED",
-                    LabelStyle(9, new Color(accent.r, accent.g, accent.b, 0.65f)));
-
-            if (GUI.Button(r, GUIContent.none, GUIStyle.none))
-                SelectWorker(worker);
+            var body = LabelStyle(11, new Color(accent.r, accent.g, accent.b, 0.92f));
+            body.wordWrap = true;
+            GUI.Label(new Rect(r.x + 8f, r.y + 5f, r.width - 16f, 14f),
+                speech.DisplayName.ToUpperInvariant(),
+                LabelStyle(9, new Color(accent.r, accent.g, accent.b, 0.8f), bold: true));
+            GUI.Label(new Rect(r.x + 8f, r.y + 20f, r.width - 16f, 34f), speech.Text, body);
         }
 
         bool DrawCyberButton(Rect r, string label, bool selected = false, Color accent = default)
@@ -3351,6 +6451,373 @@ static void DrawStatPillar(ref float y, float x, float w, string title,
                 if (x >= 0 && x < s) tex.SetPixel(x, 20 - i, new Color(0.35f, 1f, 0.55f));
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+        }
+
+        // ——— V1.1 lock audit hooks (batchmode / ForceBuild) ———
+
+        public void ForceBuildForAudit()
+        {
+            if (_crewWorkers != null)
+            {
+                if (_crewPhase != CrewPhase.OnShift)
+                    EnterOnShift();
+                return;
+            }
+            Build();
+            // Build ends in HeadingOut — audit operating invariants need OnShift
+            EnterOnShift();
+        }
+
+        public int AuditCrewCount() => _crewWorkers != null ? _crewWorkers.Length : 0;
+
+        public bool AuditUniqueWorkerIds()
+        {
+            if (_crewWorkers == null) return false;
+            var seen = new HashSet<int>();
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null || w.WorkerId <= 0) return false;
+                if (!seen.Add(w.WorkerId)) return false;
+            }
+            return seen.Count == 5;
+        }
+
+        public bool AuditDistinctStatsRefs()
+        {
+            if (_crewWorkers == null) return false;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            for (int j = i + 1; j < _crewWorkers.Length; j++)
+            {
+                if (_crewWorkers[i] == null || _crewWorkers[j] == null) return false;
+                if (ReferenceEquals(_crewWorkers[i].Stats, _crewWorkers[j].Stats)) return false;
+            }
+            return true;
+        }
+
+        public bool AuditOneAvatarPerWorker()
+        {
+            if (_crewWorkers == null) return false;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) return false;
+                if (_presence.Get(w.WorkerId) == null) return false;
+            }
+            return true;
+        }
+
+        public bool AuditDefaultJobMap()
+        {
+            return AuditJobOf(1) == JobType.Prospecting
+                && AuditJobOf(2) == JobType.Excavation
+                && AuditJobOf(3) == JobType.Hauling
+                && AuditJobOf(4) == JobType.Refining
+                && AuditJobOf(5) == JobType.Engineering;
+        }
+
+        public bool AuditHasDuplicateJobs() =>
+            _assignments != null && _assignments.HasDuplicateJobViolation(_crewWorkers);
+
+        public int AuditSelectedWorkerId() => _selectedWorkerId;
+
+        public void AuditSelectPerson(int workerId) => SelectPersonById(workerId);
+
+        public bool AuditSelectedJobIs(JobType job) => SelectedJobIs(job);
+
+        public bool AuditCanPerform(int workerId) =>
+            CanPerformJobActions(FindCrewWorker(workerId));
+
+        public string AuditControlHostLabel() => ResolveControlTarget().HostLabel ?? "";
+
+        public string AuditStatsRef(int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            return wr != null ? wr.StatsRefLabel : "";
+        }
+
+        public JobType AuditJobOf(int workerId)
+        {
+            var a = _assignments.GetAssignment(workerId);
+            return a != null ? a.JobType : JobType.Unassigned;
+        }
+
+        public bool AuditTryAssign(int workerId, JobType job, out string reason) =>
+            TryAssignJob(FindCrewWorker(workerId), job, out reason);
+
+        public bool AuditTryUnassign(JobType job, out string reason) =>
+            TryUnassignJob(job, out reason);
+
+        public int AuditWorkersOnJob(JobType job) => _assignments.CountWorkersOnJob(job);
+
+        public bool AuditTryBanter(JobType job, string source) =>
+            TryAssignedBanter(job, source, "V1.1 audit line.");
+
+        public void AuditClearBanter()
+        {
+            _banter.Clear();
+            _socialPresenter.ClearQueue();
+        }
+
+        public int AuditLastBanterWorkerId() =>
+            _banter.LastSpeech != null ? _banter.LastSpeech.WorkerId : 0;
+
+        public Vector2 AuditProviderPos(JobType job) => GetProviderOperatePoint(job);
+
+        public int AuditFindingsAuthorId()
+        {
+            var wr = GetBodyAssignedWorker(JobType.Prospecting);
+            return wr != null ? wr.WorkerId : 0;
+        }
+
+        public bool AuditAllJobsVacant() =>
+            AuditWorkersOnJob(JobType.Prospecting) == 0
+            && AuditWorkersOnJob(JobType.Excavation) == 0
+            && AuditWorkersOnJob(JobType.Hauling) == 0
+            && AuditWorkersOnJob(JobType.Refining) == 0
+            && AuditWorkersOnJob(JobType.Engineering) == 0;
+
+        public int AuditVisibleAvatarCount()
+        {
+            int n = 0;
+            if (_crewWorkers == null) return 0;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var av = _presence.Get(w.WorkerId);
+                if (av != null && !av.IsVisuallyHidden) n++;
+            }
+            return n;
+        }
+
+        public int AuditHiddenAssignedAvatarCount()
+        {
+            int n = 0;
+            if (_crewWorkers == null) return 0;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var asg = _assignments.GetAssignment(w.WorkerId);
+                if (asg == null || asg.JobType == JobType.Unassigned) continue;
+                var av = _presence.Get(w.WorkerId);
+                if (av != null && av.IsVisuallyHidden) n++;
+            }
+            return n;
+        }
+
+        public bool AuditAssignedAvatarsFollowing()
+        {
+            if (_crewWorkers == null) return false;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var w = _crewWorkers[i];
+                if (w == null) continue;
+                var asg = _assignments.GetAssignment(w.WorkerId);
+                if (asg == null || asg.JobType == JobType.Unassigned) continue;
+                var av = _presence.Get(w.WorkerId);
+                if (av == null || string.IsNullOrEmpty(av.FollowingProviderId)) return false;
+            }
+            return true;
+        }
+
+        public Vector2[] AuditAllProviderPositions() => new[]
+        {
+            AuditProviderPos(JobType.Prospecting),
+            AuditProviderPos(JobType.Excavation),
+            AuditProviderPos(JobType.Hauling),
+            AuditProviderPos(JobType.Refining),
+            AuditProviderPos(JobType.Engineering),
+        };
+
+        public bool AuditProvidersUnmoved(Vector2[] before, float epsSqr)
+        {
+            if (before == null || before.Length < 5) return false;
+            var now = AuditAllProviderPositions();
+            for (int i = 0; i < 5; i++)
+                if ((now[i] - before[i]).sqrMagnitude > epsSqr) return false;
+            return true;
+        }
+
+        public void AuditBeginHeadingHome() => BeginHeadingHome();
+        public void AuditEnterSleep() => EnterSleep();
+        public void AuditSkipSleep() => SkipSleep();
+        public void AuditEnterOnShift() => EnterOnShift();
+
+        public string AuditCrewPhaseName() => _crewPhase.ToString();
+
+        public bool AuditCanRelease(JobType job, out string reason) =>
+            CanReleaseFromJob(job, out reason);
+
+        public bool AuditPersonalConditionsStable(int workerId) => AuditWorkerStateStable(workerId);
+
+        public bool AuditWorkerStateStable(int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr == null) return false;
+            var bag = wr.State;
+            var job = AuditJobOf(workerId);
+            if (job != JobType.Unassigned)
+            {
+                TryUnassignJob(job, out _);
+                bool same = ReferenceEquals(bag, wr.State);
+                TryAssignJob(wr, job, out _);
+                return same && ReferenceEquals(bag, wr.State);
+            }
+            return ReferenceEquals(bag, wr.State);
+        }
+
+        public WorkerState AuditWorkerState(int workerId) => FindCrewWorker(workerId)?.State;
+
+        public WorkerRuntime AuditCrewWorker(int workerId) => FindCrewWorker(workerId);
+
+        public WorkerStateEventRecord AuditEmitForced(WorkerStateEvent e) =>
+            _stateEvents.EmitForced(e);
+
+        public WorkerStateEventRecord AuditEmit(WorkerStateEvent e) =>
+            _stateEvents.Emit(e);
+
+        public void AuditClearEventGate() => _stateEvents.ClearGate();
+
+        public int AuditEventHistoryCount(int workerId) =>
+            FindCrewWorker(workerId)?.EventHistory.Items.Count ?? 0;
+
+        public WorkerStateEventRecord AuditLastEvent(int workerId)
+        {
+            var hist = FindCrewWorker(workerId)?.EventHistory;
+            if (hist == null || hist.Items.Count == 0) return null;
+            return hist.Items[hist.Items.Count - 1];
+        }
+
+        public void AuditTickDaytime(float gameHours) 
+        {
+            if (_crewWorkers == null) return;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+                WorkerStateDaytimeRecovery.Tick(_crewWorkers[i], gameHours);
+        }
+
+        public void AuditApplyCrewSleepRecovery(float nightFraction01) =>
+            ApplyCrewSleepRecoveryFraction(nightFraction01);
+
+        public float AuditExcavatorHeat() => _worker != null ? _worker.Heat : -1f;
+
+        // ——— Social Aura Stage 1 audit hooks ———
+
+        public SocialAuraLiveSystem AuditSocialAura => _socialAura;
+        public SocialAuraPresenter AuditSocialPresenter => _socialPresenter;
+        public WorkerBanter AuditBanter => _banter;
+
+        public bool AuditTryPresentSocial(SocialEncounterLog log) =>
+            TryPresentSocialEncounterForAudit(log);
+
+        bool TryPresentSocialEncounterForAudit(SocialEncounterLog log)
+        {
+            if (log == null) return false;
+            TryPresentSocialEncounter(log);
+            return _socialPresenter.LastPresentation.Presented;
+        }
+
+        public int AuditTickSocialPresentation()
+        {
+            TickSocialPresentation();
+            return _socialPresenter.QueuedCount;
+        }
+
+        public bool AuditTryAmbientBanter(int workerId, string line)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr == null) return false;
+            return _banter.TrySay(
+                workerId,
+                wr.DisplayName,
+                WorkerBanter.JobContext.Excavation,
+                "Audit/Ambient",
+                _absoluteGameHours,
+                line);
+        }
+
+        public bool AuditTrySocialBanter(int workerId, string line)
+        {
+            var wr = FindCrewWorker(workerId);
+            if (wr == null) return false;
+            return TryAuthoredSocialBanter(
+                workerId, wr.DisplayName, JobType.Excavation, "audit", line);
+        }
+
+        public Vector2 AuditAvatarPos(int workerId)
+        {
+            var av = _presence.Get(workerId);
+            return av != null ? av.PresencePosition : Vector2.zero;
+        }
+
+        public Vector2 AuditProviderOperatePos(JobType job) => GetProviderOperatePoint(job);
+
+        public bool AuditAvatarHidden(int workerId)
+        {
+            var av = _presence.Get(workerId);
+            return av != null && av.IsVisuallyHidden;
+        }
+
+        public string AuditPhysicalStateName(int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            return wr == null ? "null" : GetPhysicalState(wr).ToString();
+        }
+
+        public bool AuditSocialEligible(int workerId)
+        {
+            var wr = FindCrewWorker(workerId);
+            return wr != null && SocialAuraEligibility.IsEligible(wr, MapSocialPresence(wr));
+        }
+
+        public void AuditTickSocial(float gameHoursDelta, bool syncMovingAvatars = true)
+        {
+            // Position-forced smoke tests must skip sync — otherwise Operating avatars snap back to hosts.
+            if (syncMovingAvatars)
+                SyncMovingAssignedAvatars();
+            if (_crewWorkers == null) return;
+            if (!_socialAura.IsBootstrapped)
+                _socialAura.Bootstrap(_crewWorkers);
+            int encBefore = _socialAura.TotalEncounters;
+            _socialAura.Tick(
+                _crewWorkers,
+                _presence,
+                gameHoursDelta,
+                MapSocialPresence,
+                id =>
+                {
+                    var asg = _assignments.GetAssignment(id);
+                    return asg != null ? asg.JobType : JobType.Unassigned;
+                },
+                isAsleep: _crewPhase == CrewPhase.Asleep,
+                campCenter: CampNavDestination);
+            if (_socialAura.TotalEncounters > encBefore && _socialAura.LastEncounter != null)
+                TryPresentSocialEncounter(_socialAura.LastEncounter);
+            TickSocialPresentation();
+        }
+
+        public void AuditForceCrewPhaseAsleep()
+        {
+            // Soft sleep entry for social eligibility tests without full commute
+            _crewPhase = CrewPhase.Asleep;
+        }
+
+        public void AuditForceCrewPhaseOnShift()
+        {
+            if (_crewPhase != CrewPhase.OnShift)
+                EnterOnShift();
+        }
+
+        public SocialDirectedRelation AuditRelation(int from, int to) =>
+            _socialAura.Relation(from, to);
+
+        public SocialPairTransient AuditPair(int a, int b) =>
+            _socialAura.Pair(a, b);
+
+        public void AuditSetAvatarPos(int workerId, Vector2 pos)
+        {
+            _presence.Get(workerId)?.SetPresencePosition(pos);
         }
     }
 }

@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEngine.Rendering.Universal;
 
@@ -22,14 +23,16 @@ namespace DeepCore.FreeMovement
     /// <summary>
     /// Field mechanic: repair → tunnel support → sparse lanterns.
     /// No track/road work.
+    /// Stage E: light Engineering provider façade (kit/workbench is implicit on this host).
     /// </summary>
-    public sealed class EngineerPerson : MonoBehaviour
+    public sealed class EngineerPerson : MonoBehaviour, IWorkProvider
     {
         public const float MoveSpeed = 1.45f;
         public const float BodyRadius = 0.12f;
         public const float RepairSeconds = 2.6f;
         public const float ArriveRadius = 0.38f;
         public float EvaluateIntervalGameHours = 0.35f;
+        static int _nextProviderSerial = 1;
 
         enum State : byte
         {
@@ -53,6 +56,14 @@ namespace DeepCore.FreeMovement
         float _repairTimer;
         float _buildHoursLeft;
         float _evaluateCooldown;
+        float _repairDispatchSpeedMul = 1f;
+        CooperationAssessment _activeRepairCoop = default;
+        Func<CooperationAssessment> _coopEval;
+        /// <summary>DEV observation hooks — playtest tracker only; no sim effect.</summary>
+        public Action<CooperationAssessment> OnRepairDispatched;
+        public Action<CooperationAssessment> OnRepairBegun;
+        public Action<CooperationWorkConsequence> OnRepairCompleted;
+        public Action OnRepairInterrupted;
         Transform _facing;
         bool _announcedDispatch;
         Vector2Int _jobCell;
@@ -93,10 +104,70 @@ namespace DeepCore.FreeMovement
         public Vector2 DebugTarget => _jobWorld;
         public Vector2Int DebugTargetCell => _jobCell;
 
-        /// <summary>Body / Mind / Soul sheet. Data only — unused by repair logic yet.</summary>
-        public WorkerStats Stats => _stats ??= new WorkerStats();
+        /// <summary>Body / Mind / Soul sheet. Provisional — unused by live repair formulas yet.</summary>
+        public WorkerStats Stats =>
+            _assignedWorker != null ? _assignedWorker.Stats : (_stats ??= new WorkerStats());
+
+        public WorkerRuntime AssignedWorker => _assignedWorker;
+
+        // ——— IWorkProvider (Engineering kit façade) ———
+        public string ProviderId { get; private set; } = "engineer.0";
+        public JobType JobType => DeepCore.FreeMovement.JobType.Engineering;
+        public int AssignedWorkerId { get; private set; } = -1;
+        public bool IsAvailable => true;
+
+        public bool CanAssign(WorkerRuntime worker, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            return true;
+        }
+
+        public void NotifyAssigned(WorkerRuntime worker) =>
+            AssignedWorkerId = worker != null ? worker.WorkerId : -1;
+
+        public void NotifyUnassigned() => AssignedWorkerId = -1;
 
         [SerializeField] WorkerStats _stats = new WorkerStats();
+        WorkerRuntime _assignedWorker;
+
+        public void BindWorker(WorkerRuntime worker)
+        {
+            if (worker == null || worker.Stats == null) return;
+            EnsureProviderId();
+            _assignedWorker = worker;
+            _stats = worker.Stats;
+            _stats.ClampAll();
+            WorkerJobDemand.EnsureStaminaPrimed(worker);
+            NotifyAssigned(worker);
+        }
+
+        public void ClearWorker()
+        {
+            _assignedWorker = null;
+            _stats = WorkerStats.CreateBaseline();
+            AssignedWorkerId = -1;
+        }
+
+        /// <summary>
+        /// Cancel personal path only. Repair timer, infra job, lantern/support targets persist.
+        /// </summary>
+        public void YieldForReassignment()
+        {
+            _nav?.Invalidate();
+            DigHoodLog.Push(
+                $"ASSIGN | Engineer yield | {_debugStatus} | repairT={_repairTimer:0.##}");
+        }
+
+        void EnsureProviderId()
+        {
+            if (string.IsNullOrEmpty(ProviderId) || ProviderId == "engineer.0")
+                ProviderId = $"engineer.{_nextProviderSerial++}";
+        }
 
         public static EngineerPerson Spawn(Transform parent, FineTerrainWorld world, Vector2 post)
         {
@@ -109,6 +180,7 @@ namespace DeepCore.FreeMovement
             CrewVisualKit.AttachEngineer(facing.transform, out _);
 
             var e = go.AddComponent<EngineerPerson>();
+            e.EnsureProviderId();
             e._facing = facing.transform;
             e.Setup(world, post);
             return e;
@@ -131,7 +203,12 @@ namespace DeepCore.FreeMovement
 
         public void BindExcavator(FreeWorkerController excavator) => _excavator = excavator;
         public void BindInfrastructure(MineInfrastructure infra) => _infra = infra;
+        /// <summary>Optional: Excavator↔Engineer CooperationQuality for repair only.</summary>
+        public void BindCooperation(Func<CooperationAssessment> eval) => _coopEval = eval;
         public void SetPost(Vector2 post) => _post = post;
+
+        public CooperationAssessment ActiveRepairCoop => _activeRepairCoop;
+        public float RepairDispatchSpeedMul => _repairDispatchSpeedMul;
 
         public void SoftTeleport(Vector2 pos)
         {
@@ -166,6 +243,9 @@ namespace DeepCore.FreeMovement
         {
             if (_world == null) return;
             _infra?.SetGameHours(absoluteGameHours);
+
+            // F0.5b vacancy: no repair / infra / lantern labour
+            if (_assignedWorker == null) return;
 
             bool needsRepair = _excavator != null && _excavator.IsOverheated;
 
@@ -215,11 +295,12 @@ namespace DeepCore.FreeMovement
                     SetStatus("REPAIRING");
                     if (!needsRepair)
                     {
+                        OnRepairInterrupted?.Invoke();
                         _state = State.ReturnToPost;
                         _nav?.Invalidate();
                         break;
                     }
-                    if (FollowTo(RepairStandPoint()))
+                    if (FollowTo(RepairStandPoint(), MoveSpeed * _repairDispatchSpeedMul))
                         BeginRepair();
                     break;
 
@@ -436,31 +517,102 @@ namespace DeepCore.FreeMovement
             _workKind = EngineerWorkKind.RepairEnRoute;
             SetStatus("REPAIRING");
             _nav?.Invalidate();
+            RefreshRepairCoop();
+            OnRepairDispatched?.Invoke(_activeRepairCoop);
             if (!_announcedDispatch)
             {
                 _announcedDispatch = true;
-                DigHoodLog.Push("REPAIR | Engineer dispatched — excavator OVERHEATED");
+                DigHoodLog.Push(
+                    $"REPAIR | Engineer dispatched — excavator OVERHEATED | coop Q={_activeRepairCoop.Quality:0.00} spd×{_repairDispatchSpeedMul:0.00}");
             }
         }
 
         void BeginRepair()
         {
+            RefreshRepairCoop();
             _state = State.Repairing;
-            _repairTimer = RepairSeconds;
+            float durMul = _activeRepairCoop.Active ? _activeRepairCoop.RepairDurationMul : 1f;
+            _repairTimer = RepairSeconds * durMul;
+            ExcavatorEngineerCooperation.StampAppliedModifiers(_repairDispatchSpeedMul, durMul);
+            OnRepairBegun?.Invoke(_activeRepairCoop);
             _workKind = EngineerWorkKind.Repairing;
             SetStatus("REPAIRING");
-            DigHoodLog.Push("REPAIR | Engineer on site — fixing drill…");
+            DigHoodLog.Push(
+                $"REPAIR | Engineer on site — fixing drill… | dur×{durMul:0.00} ({_repairTimer:0.00}s)");
         }
 
         void FinishRepair()
         {
+            int excavOpId = _excavator != null ? _excavator.AssignedWorkerId : 0;
             if (_excavator != null && _excavator.IsOverheated)
                 _excavator.ClearOverheatByEngineer();
+
+            const float baseRecoverMag = 4f;
+            float recoverMul = 1f;
+            var consequence = CooperationWorkConsequence.NeutralComplete;
+            if (_activeRepairCoop.Active && excavOpId > 0 && AssignedWorkerId > 0)
+            {
+                consequence = ExcavatorEngineerCooperation.ResolveRepairOutcome(
+                    _activeRepairCoop,
+                    excavOpId,
+                    AssignedWorkerId,
+                    _excavator != null ? _excavator.ProviderId : "",
+                    ProviderId,
+                    baseRecoverMag,
+                    out recoverMul);
+            }
+            OnRepairCompleted?.Invoke(consequence);
+
             _state = State.ReturnToPost;
             _workKind = EngineerWorkKind.Returning;
+            _repairDispatchSpeedMul = 1f;
             SetStatus("NO WORK NEEDED");
             _nav?.Invalidate();
-            DigHoodLog.Push("REPAIR | Fix complete — excavator online");
+            DigHoodLog.Push(
+                $"REPAIR | Fix complete — excavator online | {ExcavatorEngineerCooperation.LastConsequenceDetail}");
+
+            // EquipmentRecovered targets the operator who benefits (frozen id at repair complete)
+            if (excavOpId > 0)
+            {
+                WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                    excavOpId,
+                    WorkerStateEventType.EquipmentRecovered,
+                    baseRecoverMag * recoverMul,
+                    "EngineerRepair",
+                    JobType.Excavation,
+                    _excavator != null ? _excavator.ProviderId : "",
+                    relatedWorkerId: AssignedWorkerId > 0 ? AssignedWorkerId : 0));
+            }
+            if (AssignedWorkerId > 0)
+            {
+                WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                    AssignedWorkerId,
+                    WorkerStateEventType.ProgressSuccess,
+                    2.5f,
+                    "RepairComplete",
+                    JobType.Engineering,
+                    ProviderId,
+                    relatedWorkerId: excavOpId));
+            }
+        }
+
+        void RefreshRepairCoop()
+        {
+            if (_coopEval != null)
+            {
+                _activeRepairCoop = _coopEval();
+                _repairDispatchSpeedMul = _activeRepairCoop.Active
+                    ? _activeRepairCoop.DispatchSpeedMul
+                    : 1f;
+            }
+            else
+            {
+                _activeRepairCoop = CooperationAssessment.Inactive();
+                _repairDispatchSpeedMul = 1f;
+            }
+            ExcavatorEngineerCooperation.StampAppliedModifiers(
+                _repairDispatchSpeedMul,
+                _activeRepairCoop.Active ? _activeRepairCoop.RepairDurationMul : 1f);
         }
 
         void SetStatus(string status)
@@ -478,8 +630,9 @@ namespace DeepCore.FreeMovement
             return dig + delta.normalized * ArriveRadius;
         }
 
-        bool FollowTo(Vector2 goal)
+        bool FollowTo(Vector2 goal, float speed = -1f)
         {
+            float moveSpeed = speed > 0f ? speed : MoveSpeed;
             Vector2 from = Position;
             if ((goal - from).sqrMagnitude <= ArriveRadius * ArriveRadius * 0.55f)
             {
@@ -490,7 +643,7 @@ namespace DeepCore.FreeMovement
             return _nav.Follow(
                 from,
                 goal,
-                MoveSpeed,
+                moveSpeed,
                 BodyRadius,
                 face: FaceDir,
                 tryStep: TryStep);

@@ -51,7 +51,8 @@ namespace DeepCore.FreeMovement
             float plannedHalfAngleDeg,
             string prospectorId = null,
             WorkerSheetProfile prospectorProfile = WorkerSheetProfile.Baseline,
-            string prospectorProfileLabel = null)
+            string prospectorProfileLabel = null,
+            int workerId = 0)
         {
             if (world == null || history == null || scanner == null) return false;
             if (scanner.State != ProspectorScannerState.Ready) return false;
@@ -100,7 +101,8 @@ namespace DeepCore.FreeMovement
                 duration, size01,
                 prospectorId,
                 prospectorProfile,
-                prospectorProfileLabel);
+                prospectorProfileLabel,
+                workerId);
 
             DigHoodLog.Push(
                 $"SCAN #{_record.ScanId} START | cells {_cells.Count} | " +

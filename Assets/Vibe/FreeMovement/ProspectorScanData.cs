@@ -112,6 +112,8 @@ namespace DeepCore.FreeMovement
         public string ProspectorName = "Prospector";
         /// <summary>Stable identity frozen at scan start — do not resolve from live worker.</summary>
         public string ProspectorId = "prospector";
+        /// <summary>Numeric WorkerId frozen at scan start (Stage C attribution).</summary>
+        public int WorkerId;
         public WorkerSheetProfile ProspectorProfile = WorkerSheetProfile.Baseline;
         public string ProspectorProfileLabel = "BASE";
         public float StartGameHours;
@@ -271,7 +273,8 @@ namespace DeepCore.FreeMovement
             float size01,
             string prospectorId = null,
             WorkerSheetProfile prospectorProfile = WorkerSheetProfile.Baseline,
-            string prospectorProfileLabel = null)
+            string prospectorProfileLabel = null,
+            int workerId = 0)
         {
             // New scan always returns player to live tactical
             ReturnToCurrentTactical(notify: false);
@@ -292,6 +295,7 @@ namespace DeepCore.FreeMovement
                 PlannedHalfAngleDeg = plannedHalfAngleDeg,
                 ProspectorName = name,
                 ProspectorId = string.IsNullOrEmpty(prospectorId) ? name : prospectorId,
+                WorkerId = workerId,
                 ProspectorProfile = prospectorProfile,
                 ProspectorProfileLabel = profileLabel,
                 StartGameHours = startGameHours,

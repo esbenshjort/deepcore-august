@@ -25,17 +25,17 @@ namespace DeepCore.FreeMovement
         readonly List<AnomalySpatialSnapshot> _snapList = new(32);
 
         static readonly Color32 Clear = new(0, 0, 0, 0);
-        // Single neutral evidence language — cold cyan-gray
-        static readonly Color FillCore = new(0.22f, 0.42f, 0.52f, 1f);
-        static readonly Color FillEdge = new(0.35f, 0.48f, 0.58f, 1f);
-        static readonly Color Outline = new(0.7f, 0.82f, 0.9f, 1f);
-        static readonly Color Uncertain = new(0.5f, 0.58f, 0.66f, 1f);
-        // Historical — cooler / amber-tinted so old intel is visually distinct
-        static readonly Color HistFill = new(0.18f, 0.32f, 0.42f, 1f);
-        static readonly Color HistOutline = new(0.55f, 0.72f, 0.78f, 1f);
-        static readonly Color HistUncertain = new(0.42f, 0.48f, 0.52f, 1f);
-        static readonly Color HistRaw = new(0.25f, 0.38f, 0.48f, 1f);
-        static readonly Color HistCone = new(0.35f, 0.55f, 0.62f, 1f);
+        // Single neutral evidence language — quiet cyan-gray (subtle over dig)
+        static readonly Color FillCore = new(0.16f, 0.34f, 0.44f, 1f);
+        static readonly Color FillEdge = new(0.28f, 0.40f, 0.50f, 1f);
+        static readonly Color Outline = new(0.45f, 0.68f, 0.78f, 1f);
+        static readonly Color Uncertain = new(0.38f, 0.48f, 0.56f, 1f);
+        // Historical — cooler / quieter so old intel stays secondary
+        static readonly Color HistFill = new(0.14f, 0.26f, 0.34f, 1f);
+        static readonly Color HistOutline = new(0.38f, 0.55f, 0.62f, 1f);
+        static readonly Color HistUncertain = new(0.32f, 0.40f, 0.46f, 1f);
+        static readonly Color HistRaw = new(0.20f, 0.32f, 0.40f, 1f);
+        static readonly Color HistCone = new(0.28f, 0.45f, 0.52f, 1f);
 
         public bool Visible
         {
@@ -280,7 +280,7 @@ namespace DeepCore.FreeMovement
             for (int i = 0; i < a.SilhouetteTiles.Count; i++)
             {
                 var t = a.SilhouetteTiles[i];
-                OutlineCell(texW, t.x, t.y, hi, 0.72f * pulse);
+                OutlineCell(texW, t.x, t.y, hi, 0.45f * pulse);
             }
         }
 
@@ -291,7 +291,7 @@ namespace DeepCore.FreeMovement
             for (int i = 0; i < a.SilhouetteTiles.Count; i++)
             {
                 var t = a.SilhouetteTiles[i];
-                OutlineCell(texW, t.x, t.y, hi, 0.55f * pulse);
+                OutlineCell(texW, t.x, t.y, hi, 0.38f * pulse);
             }
         }
 
@@ -299,9 +299,9 @@ namespace DeepCore.FreeMovement
         {
             float str = Mathf.Clamp01(a.MaxSignalStrength);
             float q = Mathf.Clamp01(a.GeometryQuality);
-            float fillA = Mathf.Lerp(0.22f, 0.40f, str) * Mathf.Lerp(0.75f, 1f, q);
-            float outlineA = Mathf.Lerp(0.32f, 0.58f, q);
-            float uncertainA = Mathf.Lerp(0.18f, 0.08f, q) * Mathf.Lerp(0.85f, 1f, str);
+            float fillA = Mathf.Lerp(0.10f, 0.20f, str) * Mathf.Lerp(0.7f, 1f, q);
+            float outlineA = Mathf.Lerp(0.18f, 0.34f, q);
+            float uncertainA = Mathf.Lerp(0.10f, 0.04f, q) * Mathf.Lerp(0.8f, 1f, str);
 
             var coreSet = new HashSet<long>(a.SilhouetteTiles.Count * 2);
             for (int i = 0; i < a.SilhouetteTiles.Count; i++)
@@ -331,16 +331,16 @@ namespace DeepCore.FreeMovement
         {
             float str = Mathf.Clamp01(a.MaxSignalStrength);
             float q = Mathf.Clamp01(a.GeometryQuality);
-            // Interior: relatively solid. Low geometry quality slightly softens fill.
-            float fillA = Mathf.Lerp(0.28f, 0.48f, str) * Mathf.Lerp(0.82f, 1f, q);
-            float outlineA = Mathf.Lerp(0.4f, 0.72f, q);
+            // Quiet glass fill + hairline edge — readable, not loud.
+            float fillA = Mathf.Lerp(0.12f, 0.22f, str) * Mathf.Lerp(0.75f, 1f, q);
+            float outlineA = Mathf.Lerp(0.22f, 0.40f, q);
             if (a.AnalysisStatus == AnomalyAnalysisStatus.Assessed)
-                outlineA = Mathf.Min(0.85f, outlineA + 0.12f);
+                outlineA = Mathf.Min(0.48f, outlineA + 0.06f);
             else if (a.AnalysisStatus == AnomalyAnalysisStatus.Analysing)
-                outlineA = Mathf.Min(0.8f, outlineA + 0.08f);
+                outlineA = Mathf.Min(0.44f, outlineA + 0.04f);
 
             // Faded perimeter — more visible when precision is low
-            float uncertainA = Mathf.Lerp(0.22f, 0.10f, q) * Mathf.Lerp(0.85f, 1f, str);
+            float uncertainA = Mathf.Lerp(0.12f, 0.05f, q) * Mathf.Lerp(0.8f, 1f, str);
 
             var coreSet = new HashSet<long>(a.SilhouetteTiles.Count * 2);
             for (int i = 0; i < a.SilhouetteTiles.Count; i++)
@@ -401,7 +401,7 @@ namespace DeepCore.FreeMovement
             if (x < 0 || y < 0) return;
             int i = y * texW + x;
             if (i < 0 || i >= _px.Length) return;
-            byte aa = (byte)Mathf.Clamp(alpha * 255f, 0, 200);
+            byte aa = (byte)Mathf.Clamp(alpha * 255f, 0, 140);
             // Additive-ish keep max alpha for overlapping silhouettes
             if (_px[i].a >= aa) return;
             _px[i] = new Color32(

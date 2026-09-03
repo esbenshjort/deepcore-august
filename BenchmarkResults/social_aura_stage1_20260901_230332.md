@@ -1,0 +1,113 @@
+# Social Aura Stage 1 — Live Proximity Audit
+Generated: 2026-09-01 23:03:28
+
+Scope: LIVE proximity + exposure + InteractionPressure. No dialogue / final UI.
+
+## 1. Live Social Aura architecture
+
+WorkerRuntime → WorkerPresenceRegistry → WorkerAvatar.PresencePosition
+→ SocialAuraEligibility → pair distance/falloff → SocialExpressionModel
+→ InteractionPressure (game hours) → SocialEncounterResolver (Stage 0)
+→ mutate live WorkerState + directional relation store
+
+## 3. Eligibility rules
+
+- Eligible: Operating, Idle, CommutingHome, CommutingToWork
+- Not: Sleeping; NeedsCare; Injury ≥ 70
+- Not gated solely on CanPerformJobActions
+
+## 4–6. Distance / reach / pressure / time
+
+- Reach = Stage0 expression.Reach × ReachWorldScale (2.35)
+- Falloff = (1 − d/maxReach)² inside reach; asymmetric reach OK; exposed if either reaches
+- Pressure uses gameHoursDelta (not FPS); overnight strong decay; relations persist
+
+## 7–12. Context / storage / events / camp
+
+- Context from assignment collaboration pairs + WorkerStateEvent history window
+- Relations: SocialAuraWorld directed Trust/Warmth/Hostility (person ids)
+- Pair transient: pressure/cooldown/exposure (runtime)
+- Consequences: Stage 0 direct WorkerState mutation (event-routing deferred)
+- Camp/commute: IdleNearby soft + cooldown; no hard camp ban
+
+## 13. Debug tools
+
+- DEV strip SOCIAL panel: nearby, expression, pressure, relations, last encounter
+- Optional world gizmos: reach wire + exposed pair lines
+
+## 2. Canonical position verification per job
+
+- Lewis job=Prospecting avatar=(17.45,4.05) host=(17.45,4.05) dist=0.00 hidden=True — ProspectorPerson body — not scanner alone
+PASS | Position Prospecting: avatar tracks person/host operate point — dist=0.00 hidden=True
+- Mara job=Excavation avatar=(18.05,4.25) host=(18.05,4.25) dist=0.00 hidden=True — Hidden while Operating is OK; Transform still canonical
+PASS | Position Excavation: avatar tracks person/host operate point — dist=0.00 hidden=True
+- Kowalski job=Hauling avatar=(18.05,3.05) host=(18.05,3.05) dist=0.00 hidden=True — HaulerPerson cart body
+PASS | Position Hauling: avatar tracks person/host operate point — dist=0.00 hidden=True
+- Elena job=Refining avatar=(17.45,2.35) host=(17.45,2.35) dist=0.00 hidden=True — RefinerPerson station/consult
+PASS | Position Refining: avatar tracks person/host operate point — dist=0.00 hidden=True
+- Viktor job=Engineering avatar=(18.60,3.40) host=(18.60,3.40) dist=0.00 hidden=True — EngineerPerson en-route/repair
+PASS | Position Engineering: avatar tracks person/host operate point — dist=0.00 hidden=True
+
+Edge notes: morning return snap, camp clustering, host sprites vs hidden avatars.
+False proximity risk: camp door offsets + morning snap clustering — mitigated by pressure/cooldown, not hard camp ban.
+
+## 3 / smoke. Eligibility + sleep gate
+
+PASS | OnShift worker 1 socially eligible — Operating
+PASS | OnShift worker 2 socially eligible — Operating
+PASS | OnShift worker 3 socially eligible — Operating
+PASS | OnShift worker 4 socially eligible — Operating
+PASS | OnShift worker 5 socially eligible — Operating
+PASS | Sleeping workers not socially eligible
+PASS | NeedsCare suppresses eligibility
+
+## 14. Smoke tests A–L (automated subset)
+
+PASS | A. Far apart: pressure does not meaningfully accumulate — P 0→0
+PASS | B. Sustained proximity: pressure accumulates or encounter fires — P=0 encΔ=4
+PASS | C. Brief crossing usually no encounter — encΔ=0 P=0
+PASS | D. Sustained proximity can produce encounter — encΔ=2 P=0
+PASS | E. Sleeping: no pressure accumulation (decay ok) — P 0.98→0
+PASS | G. Relation identity survives reassignment (person-keyed)
+PASS | H. Unassigned awake worker remains socially eligible — Idle
+PASS | I. Excavator operator avatar near operate point (hidden OK) — avatar=(18.05, 4.25) host=(18.05, 4.25) hidden=True
+PASS | I. Engineer avatar is person presence (exists) — viktor=(18.60, 3.40)
+PASS | K. Game-time pressure roughly FPS-independent — smallTicks=0.4 oneTick=0.4
+PASS | L. Relationship memory persists overnight
+
+## 15. Live observation metrics (audit session)
+
+- Total encounters this session: 6
+- Work-area / camp / commute: 6 / 0 / 0
+- Cooldown suppressions: 38
+- Context distribution:
+  - WorkingTogether: 3
+  - IdleNearby: 3
+- Pair encounter counts:
+  - 1/2: 2
+  - 3/5: 1
+  - 3/4: 1
+  - 2/5: 1
+  - 1/5: 1
+- Last: POSITIVE_CONNECT | LIVE falloff=0.69 intens=0.43 ctx=IdleNearby×0.85 relMul=1 focusDamp=0.85 Δh=0.1 P=1.07/1.05
+PASS | F. Camp cluster does not explode encounters in short window — burstEnc=0
+
+## 16. Failure-condition audit
+
+Structural checks embedded above. Tally: 24 PASS / 0 FAIL
+
+## 17. Tuning risks
+
+- ReachWorldScale / PressureGainPerGameHour dominate live frequency.
+- IdleNearby at camp still allowed — cooldown + falloff must carry the load.
+- Morning snap can briefly cluster avatars → short false exposure.
+- Hidden Operating avatars still contribute position (correct) but look like host sprites.
+- SharedProblem requires both workers to have recent problem events — rare.
+- Consequences still mutate WorkerState directly (Stage 0 path); event-routing deferred.
+- LOS not implemented — open terrain OK; Stage 2 if tunnels create false through-wall exposure.
+
+## 18. Recommendation
+
+RECOMMENDATION: READY for Stage 2
+
+Live person-position proximity + pressure + Stage 0 resolver are wired. Stop after Stage 1.

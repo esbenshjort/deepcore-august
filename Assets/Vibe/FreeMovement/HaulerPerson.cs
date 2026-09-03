@@ -7,10 +7,13 @@ namespace DeepCore.FreeMovement
     /// <summary>
     /// Slow, deliberate hauler: scoops one loose cell at a time into an 8-slot cart,
     /// then returns the batch to basecamp. Paths on excavated cells (BFS) so tunnels don't trap it.
+    /// Stage E: one cart/host; assigned <see cref="WorkerRuntime"/> supplies identity/stats.
+    /// Implements <see cref="IWorkProvider"/> for Hauling (manager remains assignment authority).
     /// </summary>
-    public sealed class HaulerPerson : MonoBehaviour
+    public sealed class HaulerPerson : MonoBehaviour, IWorkProvider
     {
         public const int CartSlots = 8;
+        static int _nextProviderSerial = 1;
 
         enum State { Seek, PickUp, Return, Deposit }
 
@@ -60,6 +63,15 @@ namespace DeepCore.FreeMovement
         public Vector2 Position => transform.localPosition;
         public DeliveryCalculator Calculator => _calc;
         public bool PreferGold { get; private set; }
+        public int CargoCount => _cargoCount;
+        public string ActivityLabel => _state switch
+        {
+            State.Seek => PreferGold ? "SEEK PRECIOUS" : "SEEK",
+            State.PickUp => "LOADING",
+            State.Return => $"HAUL {_cargoCount}/{CartSlots}",
+            State.Deposit => "UNLOAD",
+            _ => "IDLE",
+        };
 
         /// <summary>Debug: current track speed multiplier under the hauler (1 if no track).</summary>
         public float DebugTrackSpeedMul =>
@@ -73,10 +85,80 @@ namespace DeepCore.FreeMovement
 
         public void SetGameHours(float absoluteGameHours) => _gameHours = absoluteGameHours;
 
-        /// <summary>Body / Mind / Soul sheet. Data only — unused by haul logic yet.</summary>
-        public WorkerStats Stats => _stats ??= new WorkerStats();
+        /// <summary>Body / Mind / Soul sheet. Provisional for haul formulas — unused by live haul logic yet.</summary>
+        public WorkerStats Stats =>
+            _assignedWorker != null ? _assignedWorker.Stats : (_stats ??= new WorkerStats());
+
+        public WorkerRuntime AssignedWorker => _assignedWorker;
+
+        // ——— IWorkProvider (Hauling) ———
+        public string ProviderId { get; private set; } = "hauler.0";
+        public JobType JobType => DeepCore.FreeMovement.JobType.Hauling;
+        public int AssignedWorkerId { get; private set; } = -1;
+        public bool IsAvailable => true;
+
+        public bool CanAssign(WorkerRuntime worker, out string reason)
+        {
+            reason = "";
+            if (worker == null)
+            {
+                reason = "No worker";
+                return false;
+            }
+            return true;
+        }
+
+        public void NotifyAssigned(WorkerRuntime worker) =>
+            AssignedWorkerId = worker != null ? worker.WorkerId : -1;
+
+        public void NotifyUnassigned() => AssignedWorkerId = -1;
 
         [SerializeField] WorkerStats _stats = new WorkerStats();
+        WorkerRuntime _assignedWorker;
+
+        public void BindWorker(WorkerRuntime worker)
+        {
+            if (worker == null || worker.Stats == null) return;
+            EnsureProviderId();
+            _assignedWorker = worker;
+            _stats = worker.Stats;
+            _stats.ClampAll();
+            WorkerJobDemand.EnsureStaminaPrimed(worker);
+            NotifyAssigned(worker);
+        }
+
+        public void ClearWorker()
+        {
+            _assignedWorker = null;
+            _stats = WorkerStats.CreateBaseline();
+            AssignedWorkerId = -1;
+        }
+
+        /// <summary>
+        /// Drop live navigation/pickup claim. Cargo, PreferGold, and haul FSM persist on the cart/host.
+        /// </summary>
+        public void YieldForReassignment()
+        {
+            if (_target != null)
+            {
+                _target.Claimed = false;
+                _target = null;
+            }
+            if (_state == State.PickUp)
+            {
+                _state = State.Seek;
+                _pickupTimer = 0f;
+            }
+            InvalidatePath();
+            DigHoodLog.Push(
+                $"ASSIGN | Hauler yield | Cargo {_cargoCount}/{CartSlots} | {ActivityLabel}");
+        }
+
+        void EnsureProviderId()
+        {
+            if (string.IsNullOrEmpty(ProviderId) || ProviderId == "hauler.0")
+                ProviderId = $"hauler.{_nextProviderSerial++}";
+        }
 
         public void SetPreferGold(bool on)
         {
@@ -203,6 +285,7 @@ namespace DeepCore.FreeMovement
             loadRoot.transform.localPosition = new Vector3(0f, 0.02f, 0f);
 
             var h = go.AddComponent<HaulerPerson>();
+            h.EnsureProviderId();
             h._facing = facing.transform;
             h._body = body != null ? body : facing.transform;
             h._cart = cart.transform;
@@ -249,6 +332,8 @@ namespace DeepCore.FreeMovement
         public void Tick()
         {
             if (_world == null || _calc == null) return;
+            // F0.5b vacancy: cart stays; no haul FSM progression
+            if (_assignedWorker == null) return;
             PruneIgnores();
 
             switch (_state)
@@ -302,6 +387,16 @@ namespace DeepCore.FreeMovement
                 _stuckFrames = 0;
                 _seekStuckTimer = 0f;
                 InvalidatePath();
+                if (AssignedWorkerId > 0)
+                {
+                    WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                        AssignedWorkerId,
+                        WorkerStateEventType.WorkBlocked,
+                        2.5f,
+                        "HaulRouteStuck",
+                        JobType.Hauling,
+                        ProviderId));
+                }
             }
 
             if (!IsLive(_target))
@@ -478,6 +573,16 @@ namespace DeepCore.FreeMovement
             LoosePile.ClearAllClaims();
             _softIgnore.Clear();
             Deposited?.Invoke();
+            if (AssignedWorkerId > 0)
+            {
+                WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                    AssignedWorkerId,
+                    WorkerStateEventType.ProgressSuccess,
+                    3f,
+                    "HaulDelivered",
+                    JobType.Hauling,
+                    ProviderId));
+            }
             _state = State.Seek;
         }
 
@@ -602,6 +707,7 @@ namespace DeepCore.FreeMovement
             float step = _moveSpeed * LoosePile.SpeedMulAt(pos, _radius) * Time.deltaTime;
             if (_infra != null)
                 step *= _infra.TrackSpeedMulAt(pos);
+            step *= WorkerJobDemand.PhysicalMoveMul(_assignedWorker);
             // Loaded cart is a grind — fuller = slower (full cart ≈ 40% walk speed)
             if (_calc != null && _calc.CarryPiles > 0)
             {
