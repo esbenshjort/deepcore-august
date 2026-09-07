@@ -39,6 +39,8 @@ namespace DeepCore.FreeMovement
                     ? $"Wash Station ({ProviderId})"
                 : !string.IsNullOrEmpty(ProviderId) && ProviderId.StartsWith("engineer.")
                     ? $"Engineer Kit ({ProviderId})"
+                : !string.IsNullOrEmpty(ProviderId) && ProviderId.StartsWith("steward.")
+                    ? $"Camp Steward ({ProviderId})"
                 : ProviderId switch
                 {
                     "body.prospector" => "Prospector Body / Heavy Scanner (placeholder)",
@@ -46,6 +48,7 @@ namespace DeepCore.FreeMovement
                     "body.hauler" => "Hauler Body / Cart (placeholder)",
                     "body.refiner" => "Refiner Body / Wash Station (placeholder)",
                     "body.engineer" => "Engineer Body / Kit (placeholder)",
+                    "body.steward" => "Steward Body / Camp Support",
                     "" => "—",
                     _ => ProviderId,
                 };

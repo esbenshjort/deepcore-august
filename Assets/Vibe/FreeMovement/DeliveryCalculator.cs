@@ -33,6 +33,7 @@ namespace DeepCore.FreeMovement
         readonly List<OreCell> _carryCells = new(16);
 
         public int CarryPiles => CarryRockPiles + CarryGoldPiles + CarryDiamondPiles;
+        public int CarryCellCount => _carryCells.Count;
         public float CarryRock => CarryRockMass + CarryGoldMass + CarryDiamondMass;
         public Stockpile RockPile;
         public Stockpile GoldPile;
@@ -123,35 +124,70 @@ namespace DeepCore.FreeMovement
 
         public void DepositCarry()
         {
-            if (CarryPiles <= 0 && _carryCells.Count == 0) return;
-
-            if (_carryCells.Count > 0)
+            while (TryDepositOne()) { }
+            if (CarryPiles > 0 || _carryCells.Count > 0)
             {
-                for (int i = 0; i < _carryCells.Count; i++)
+                // Fallback aggregate path (legacy totals without cells)
+                if (_carryCells.Count == 0)
                 {
-                    var c = _carryCells[i];
-                    if (c.IsDiamondOre) DiamondPile?.EnqueueOreCell(c);
-                    else if (c.IsGoldOre) GoldPile?.EnqueueOreCell(c);
-                    else RockPile?.EnqueueOreCell(c);
+                    if (CarryRockPiles > 0)
+                        RockPile?.DepositRock(CarryRockMass, CarryRockPiles);
+                    if (CarryGoldPiles > 0)
+                        GoldPile?.DepositGold(CarryGoldMass, CarryGoldSockets, CarryGoldValue, CarryGoldPiles);
+                    if (CarryDiamondPiles > 0)
+                        DiamondPile?.DepositDiamond(CarryDiamondMass, CarryDiamondSockets,
+                            CarryDiamondValue, CarryDiamondPiles);
+                    RockMass += CarryRockMass;
+                    GoldSockets += CarryGoldSockets;
+                    DiamondSockets += CarryDiamondSockets;
+                    PilesDelivered += CarryPiles;
+                    Deliveries++;
+                    ClearCarry();
                 }
+            }
+        }
+
+        /// <summary>Unload one carried cell into the matching stockpile. Returns false when cart empty.</summary>
+        public bool TryDepositOne()
+        {
+            if (_carryCells.Count == 0) return false;
+            int last = _carryCells.Count - 1;
+            var c = _carryCells[last];
+            _carryCells.RemoveAt(last);
+
+            if (c.IsDiamondOre)
+            {
+                DiamondPile?.EnqueueOreCell(c);
+                CarryDiamondPiles = Mathf.Max(0, CarryDiamondPiles - 1);
+                CarryDiamondMass = Mathf.Max(0f, CarryDiamondMass - c.Mass);
+                CarryDiamondSockets = Mathf.Max(0, CarryDiamondSockets - c.DiamondCount);
+                int dVal = c.DiamondCount <= 0 ? 0 : c.DiamondCount * (c.DiamondCount + 5) / 2;
+                CarryDiamondValue = Mathf.Max(0, CarryDiamondValue - dVal);
+                DiamondSockets += c.DiamondCount;
+            }
+            else if (c.IsGoldOre)
+            {
+                GoldPile?.EnqueueOreCell(c);
+                CarryGoldPiles = Mathf.Max(0, CarryGoldPiles - 1);
+                CarryGoldMass = Mathf.Max(0f, CarryGoldMass - c.Mass);
+                CarryGoldSockets = Mathf.Max(0, CarryGoldSockets - c.GoldCount);
+                int gVal = c.GoldCount <= 0 ? 0 : c.GoldCount * (c.GoldCount + 1) / 2;
+                CarryGoldValue = Mathf.Max(0, CarryGoldValue - gVal);
+                GoldSockets += c.GoldCount;
             }
             else
             {
-                if (CarryRockPiles > 0)
-                    RockPile?.DepositRock(CarryRockMass, CarryRockPiles);
-                if (CarryGoldPiles > 0)
-                    GoldPile?.DepositGold(CarryGoldMass, CarryGoldSockets, CarryGoldValue, CarryGoldPiles);
-                if (CarryDiamondPiles > 0)
-                    DiamondPile?.DepositDiamond(CarryDiamondMass, CarryDiamondSockets,
-                        CarryDiamondValue, CarryDiamondPiles);
+                RockPile?.EnqueueOreCell(c);
+                CarryRockPiles = Mathf.Max(0, CarryRockPiles - 1);
+                CarryRockMass = Mathf.Max(0f, CarryRockMass - c.Mass);
+                RockMass += c.Mass;
             }
 
-            RockMass += CarryRockMass;
-            GoldSockets += CarryGoldSockets;
-            DiamondSockets += CarryDiamondSockets;
-            PilesDelivered += Mathf.Max(CarryPiles, _carryCells.Count);
-            Deliveries++;
-            ClearCarry();
+            PilesDelivered++;
+            if (_carryCells.Count == 0)
+                Deliveries++;
+            Changed?.Invoke();
+            return true;
         }
 
         public void NotifyWashResult(int goldPieces, int dirtPieces, int diamondPieces = 0)

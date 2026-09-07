@@ -16,12 +16,17 @@ namespace DeepCore.FreeMovement
         readonly List<SocialEncounterLog> _logs = new(512);
         readonly Dictionary<int, int> _encountersThisShift = new();
         readonly SocialMemoryStore _memory = new();
+        readonly RelationshipTrajectoryStore _trajectory = new();
 
         public IReadOnlyList<SocialEncounterLog> Logs => _logs;
         public int ShiftIndex { get; private set; }
         public SocialMemoryStore Memory => _memory;
+        public RelationshipTrajectoryStore Trajectory => _trajectory;
 
         public void ClearLogs() => _logs.Clear();
+
+        /// <summary>Drop directed edges so hired crews can re-seed cautious impressions.</summary>
+        public void ClearDirectedRelations() => _directed.Clear();
 
         public void AddActor(SocialSimActor actor)
         {
@@ -136,6 +141,9 @@ namespace DeepCore.FreeMovement
             pair.CooldownRemaining = SocialAuraTuning.CooldownAfterEncounter;
             pair.LastEncounterShift = ShiftIndex;
 
+            var snapAB = RelationshipTrajectoryStore.Capture(Relation(idA, idB));
+            var snapBA = RelationshipTrajectoryStore.Capture(Relation(idB, idA));
+
             var log = SocialEncounterResolver.Resolve(this, a, b, context, whyPressure);
             if (log != null)
             {
@@ -148,6 +156,13 @@ namespace DeepCore.FreeMovement
                     : ShiftIndex * 10f;
                 SocialMemoryRecorder.Record(_memory, log, t);
                 SocialRespectApplicator.Apply(this, log);
+                string src = $"S{log.ShiftIndex}:{log.Action}/{log.Response}";
+                _trajectory.CommitDelta(log.InitiatorId, log.TargetId,
+                    log.InitiatorId == idA ? snapAB : snapBA,
+                    Relation(log.InitiatorId, log.TargetId), t, src, _memory);
+                _trajectory.CommitDelta(log.TargetId, log.InitiatorId,
+                    log.InitiatorId == idA ? snapBA : snapAB,
+                    Relation(log.TargetId, log.InitiatorId), t, src, _memory);
             }
             return log;
         }
@@ -254,6 +269,10 @@ namespace DeepCore.FreeMovement
 
             initiator.RefreshExpression();
             target.RefreshExpression();
+
+            if (outcome != null
+                && (outcome.StartsWith("POSITIVE_CONNECT") || outcome.StartsWith("SHARED_COMPLAINT_BOND")))
+                EarlyCrewPressure.RegisterPositiveBond();
 
             return new SocialEncounterLog
             {
@@ -427,6 +446,21 @@ namespace DeepCore.FreeMovement
             w[4] = 0.08f + bravery / 35f + neg * 0.35f; // PushBack
             w[5] = 0.05f + bravery / 30f + determination / 40f + neg * 0.45f - composure / 40f; // Escalate
             w[6] = 0.12f + focus / 40f + (1f - bravery / 40f); // Withdraw
+
+            // Early unfamiliar crew: misunderstandings / escalate slightly more likely;
+            // Composure + Tolerance resist harder under pressure; Determination can refuse to back down.
+            float early = EarlyCrewPressure.Instability01;
+            if (early > 0.01f)
+            {
+                w[4] *= EarlyCrewPressure.EscalateWeightMul;
+                w[5] *= EarlyCrewPressure.EscalateWeightMul;
+                float composureMask = Mathf.Clamp(1.25f - composure / 22f - tolerance / 38f, 0.28f, 1.25f);
+                w[5] *= composureMask;
+                if (target.State != null && target.State.Frustration >= 40f)
+                    w[5] *= 1f + determination * 0.01f * early;
+                // Empathy softens escalate toward bonded actions
+                w[5] *= Mathf.Clamp(1.1f - empathy / 45f, 0.7f, 1.1f);
+            }
 
             switch (action)
             {
@@ -679,6 +713,13 @@ namespace DeepCore.FreeMovement
             dTrTI = Mathf.Clamp(trTI, -2.5f, 2.5f);
             dWaTI = Mathf.Clamp(waTI, -2.5f, 2.5f);
             dHoTI = Mathf.Clamp(hoTI, -2.5f, 2.5f);
+
+            // Early hired-crew uncertainty: slower Trust gains, sharper negatives, weaker recovery
+            EarlyCrewPressure.ScaleEncounterDeltas(
+                ref dTrIT, ref dWaIT, ref dHoIT,
+                ref dTrTI, ref dWaTI, ref dHoTI,
+                ref dFrI, ref dFrT,
+                init, target);
 
             relIT.Add(dTrIT, dWaIT, dHoIT);
             relTI.Add(dTrTI, dWaTI, dHoTI);

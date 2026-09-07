@@ -1,5 +1,5 @@
 # Social Aura Stage 2 — Logic / Presentation Audit (offline)
-Generated: 2026-09-01 23:25:41
+Generated: 2026-09-03 21.16.51
 
 Scope: line bank + presenter gates + WorkerId ownership of lines.
 Live runner / banter arbitration: run Unity menu audit when Editor is free.
@@ -26,12 +26,12 @@ PASS | Near: presentation enqueues 1–3 lines — lines=2
 PASS | Lines authored to WorkerIds
 PASS | Far: suppress presentation, preserve result
 PASS | Sleep: suppress presentation
-PASS | Encourage can succeed visibly — I='Nice work. Keep that pace.' T='Alright. I'll hold the line.'
-PASS | Encourage can fail visibly — I='Come on, you're better than this.' T='Save the pep talk.'
-PASS | Joke can land or annoy (annoy path) — I='Cheer up — could be worse. …Alright, maybe not.' T='Don't talk to me like that.'
-PASS | SharedProblem complaint can bond — I='This whole setup's fighting us. You feel it too?' T='Exactly. We'll chew through it together.'
-PASS | Complaint can clash — I='This whole setup's fighting us. You feel it too?' T='Say that again.'
-PASS | Provoke can be ignored — I='Maybe the problem's standing right there.' T='Not worth it.'
+PASS | Encourage can succeed visibly — I='Solid. Hold that rhythm.' T='Heard. Back at it.'
+PASS | Encourage can fail visibly — I='Come on, you're better than this.' T='Keep the speech.'
+PASS | Joke can land or annoy (annoy path) — I='Cheer up — could be worse. …Alright, maybe not.' T='Wrong tone.'
+PASS | SharedProblem complaint can bond — I='This whole setup's fighting us. You feel it too?' T='Same grit in my teeth. Let's push.'
+PASS | Complaint can clash — I='Same headache, same dead end. I'm sick of it.' T='You picked a fight. Fine.'
+PASS | Provoke can be ignored — I='Impressive. In the wrong direction.' T='Hearing static.'
 PASS | Confront PushBack/Withdraw/Escalate — I='We're settling this. Now.' T='You want a problem? You've got one.'
 PASS | Social history keyed by WorkerId
 PASS | TrySaySocial stamps WorkerId

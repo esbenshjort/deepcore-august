@@ -1,6 +1,6 @@
 # V1.2A Universal Worker State Verification
 
-Generated: 2026-09-01 21:05:09
+Generated: 2026-09-03 09:08:01
 Mode: Unity batch ForceBuild — ownership / reference / sleep / stamina priming.
 
 ## 1. Five-worker ownership (all phases)
@@ -809,19 +809,19 @@ PASS | [Sleeping] State bags distinct 4≠5
 PASS | Back OnShift after SkipSleep
 PASS | [post-sleep OnShift] WorkerId 1 Runtime exists
 PASS | [post-sleep OnShift] WorkerId 1 State non-null
-PASS | [post-sleep OnShift] WorkerId 1 meters in range — MF=17.1 FS=62 Fr=7.3 Mo=55
+PASS | [post-sleep OnShift] WorkerId 1 meters in range — MF=17.1 FS=62 Fr=7.9 Mo=55
 PASS | [post-sleep OnShift] WorkerId 2 Runtime exists
 PASS | [post-sleep OnShift] WorkerId 2 State non-null
-PASS | [post-sleep OnShift] WorkerId 2 meters in range — MF=17.1 FS=62 Fr=7.3 Mo=55
+PASS | [post-sleep OnShift] WorkerId 2 meters in range — MF=17.1 FS=62 Fr=7.9 Mo=55
 PASS | [post-sleep OnShift] WorkerId 3 Runtime exists
 PASS | [post-sleep OnShift] WorkerId 3 State non-null
-PASS | [post-sleep OnShift] WorkerId 3 meters in range — MF=17.1 FS=62 Fr=7.3 Mo=55
+PASS | [post-sleep OnShift] WorkerId 3 meters in range — MF=17.1 FS=62 Fr=7.9 Mo=55
 PASS | [post-sleep OnShift] WorkerId 4 Runtime exists
 PASS | [post-sleep OnShift] WorkerId 4 State non-null
-PASS | [post-sleep OnShift] WorkerId 4 meters in range — MF=17.1 FS=62 Fr=7.3 Mo=55
+PASS | [post-sleep OnShift] WorkerId 4 meters in range — MF=17.1 FS=62 Fr=7.9 Mo=55
 PASS | [post-sleep OnShift] WorkerId 5 Runtime exists
 PASS | [post-sleep OnShift] WorkerId 5 State non-null
-PASS | [post-sleep OnShift] WorkerId 5 meters in range — MF=17.1 FS=62 Fr=7.3 Mo=55
+PASS | [post-sleep OnShift] WorkerId 5 meters in range — MF=17.1 FS=62 Fr=7.9 Mo=55
 PASS | [post-sleep OnShift] State bags distinct 1≠2
 PASS | [post-sleep OnShift] State bags distinct 1≠3
 PASS | [post-sleep OnShift] State bags distinct 1≠4
@@ -835,40 +835,40 @@ PASS | [post-sleep OnShift] State bags distinct 4≠5
 
 ## 2. Cross-job same-reference
 PASS | WorkerId 1 State non-null before tour
-PASS | WorkerId 1 same State ref on Prospecting — before=#6F046A88 after=#6F046A88
-PASS | WorkerId 1 same State ref on Excavation — before=#6F046A88 after=#6F046A88
-PASS | WorkerId 1 same State ref on Hauling — before=#6F046A88 after=#6F046A88
-PASS | WorkerId 1 same State ref on Refining — before=#6F046A88 after=#6F046A88
-PASS | WorkerId 1 same State ref on Engineering — before=#6F046A88 after=#6F046A88
-PASS | WorkerId 1 same State ref on Unassigned — before=#6F046A88 after=#6F046A88
+PASS | WorkerId 1 same State ref on Prospecting — before=#E6DA7810 after=#E6DA7810
+PASS | WorkerId 1 same State ref on Excavation — before=#E6DA7810 after=#E6DA7810
+PASS | WorkerId 1 same State ref on Hauling — before=#E6DA7810 after=#E6DA7810
+PASS | WorkerId 1 same State ref on Refining — before=#E6DA7810 after=#E6DA7810
+PASS | WorkerId 1 same State ref on Engineering — before=#E6DA7810 after=#E6DA7810
+PASS | WorkerId 1 same State ref on Unassigned — before=#E6DA7810 after=#E6DA7810
 PASS | WorkerId 2 State non-null before tour
-PASS | WorkerId 2 same State ref on Prospecting — before=#7D489D00 after=#7D489D00
-PASS | WorkerId 2 same State ref on Excavation — before=#7D489D00 after=#7D489D00
-PASS | WorkerId 2 same State ref on Hauling — before=#7D489D00 after=#7D489D00
-PASS | WorkerId 2 same State ref on Refining — before=#7D489D00 after=#7D489D00
-PASS | WorkerId 2 same State ref on Engineering — before=#7D489D00 after=#7D489D00
-PASS | WorkerId 2 same State ref on Unassigned — before=#7D489D00 after=#7D489D00
+PASS | WorkerId 2 same State ref on Prospecting — before=#F51EAA88 after=#F51EAA88
+PASS | WorkerId 2 same State ref on Excavation — before=#F51EAA88 after=#F51EAA88
+PASS | WorkerId 2 same State ref on Hauling — before=#F51EAA88 after=#F51EAA88
+PASS | WorkerId 2 same State ref on Refining — before=#F51EAA88 after=#F51EAA88
+PASS | WorkerId 2 same State ref on Engineering — before=#F51EAA88 after=#F51EAA88
+PASS | WorkerId 2 same State ref on Unassigned — before=#F51EAA88 after=#F51EAA88
 PASS | WorkerId 3 State non-null before tour
-PASS | WorkerId 3 same State ref on Prospecting — before=#8B8CCF78 after=#8B8CCF78
-PASS | WorkerId 3 same State ref on Excavation — before=#8B8CCF78 after=#8B8CCF78
-PASS | WorkerId 3 same State ref on Hauling — before=#8B8CCF78 after=#8B8CCF78
-PASS | WorkerId 3 same State ref on Refining — before=#8B8CCF78 after=#8B8CCF78
-PASS | WorkerId 3 same State ref on Engineering — before=#8B8CCF78 after=#8B8CCF78
-PASS | WorkerId 3 same State ref on Unassigned — before=#8B8CCF78 after=#8B8CCF78
+PASS | WorkerId 3 same State ref on Prospecting — before=#0362DD00 after=#0362DD00
+PASS | WorkerId 3 same State ref on Excavation — before=#0362DD00 after=#0362DD00
+PASS | WorkerId 3 same State ref on Hauling — before=#0362DD00 after=#0362DD00
+PASS | WorkerId 3 same State ref on Refining — before=#0362DD00 after=#0362DD00
+PASS | WorkerId 3 same State ref on Engineering — before=#0362DD00 after=#0362DD00
+PASS | WorkerId 3 same State ref on Unassigned — before=#0362DD00 after=#0362DD00
 PASS | WorkerId 4 State non-null before tour
-PASS | WorkerId 4 same State ref on Prospecting — before=#99D101F0 after=#99D101F0
-PASS | WorkerId 4 same State ref on Excavation — before=#99D101F0 after=#99D101F0
-PASS | WorkerId 4 same State ref on Hauling — before=#99D101F0 after=#99D101F0
-PASS | WorkerId 4 same State ref on Refining — before=#99D101F0 after=#99D101F0
-PASS | WorkerId 4 same State ref on Engineering — before=#99D101F0 after=#99D101F0
-PASS | WorkerId 4 same State ref on Unassigned — before=#99D101F0 after=#99D101F0
+PASS | WorkerId 4 same State ref on Prospecting — before=#11A70F78 after=#11A70F78
+PASS | WorkerId 4 same State ref on Excavation — before=#11A70F78 after=#11A70F78
+PASS | WorkerId 4 same State ref on Hauling — before=#11A70F78 after=#11A70F78
+PASS | WorkerId 4 same State ref on Refining — before=#11A70F78 after=#11A70F78
+PASS | WorkerId 4 same State ref on Engineering — before=#11A70F78 after=#11A70F78
+PASS | WorkerId 4 same State ref on Unassigned — before=#11A70F78 after=#11A70F78
 PASS | WorkerId 5 State non-null before tour
-PASS | WorkerId 5 same State ref on Prospecting — before=#A8153468 after=#A8153468
-PASS | WorkerId 5 same State ref on Excavation — before=#A8153468 after=#A8153468
-PASS | WorkerId 5 same State ref on Hauling — before=#A8153468 after=#A8153468
-PASS | WorkerId 5 same State ref on Refining — before=#A8153468 after=#A8153468
-PASS | WorkerId 5 same State ref on Engineering — before=#A8153468 after=#A8153468
-PASS | WorkerId 5 same State ref on Unassigned — before=#A8153468 after=#A8153468
+PASS | WorkerId 5 same State ref on Prospecting — before=#1FEB41F0 after=#1FEB41F0
+PASS | WorkerId 5 same State ref on Excavation — before=#1FEB41F0 after=#1FEB41F0
+PASS | WorkerId 5 same State ref on Hauling — before=#1FEB41F0 after=#1FEB41F0
+PASS | WorkerId 5 same State ref on Refining — before=#1FEB41F0 after=#1FEB41F0
+PASS | WorkerId 5 same State ref on Engineering — before=#1FEB41F0 after=#1FEB41F0
+PASS | WorkerId 5 same State ref on Unassigned — before=#1FEB41F0 after=#1FEB41F0
 
 ## 3. State isolation
 PASS | WorkerId 2 Frustration untouched by Lewis mutation — got=20 want=20
@@ -880,27 +880,27 @@ PASS | No transfer: Lewis still 77 after Mara takes Excavator
 PASS | No transfer: Mara still 22 as excavator
 
 ## 4. Sleep independence
-PASS | Sleep id 1: Frustration partial relief — before=80 after=45 relief=35
+PASS | Sleep id 1: Frustration partial relief — before=80 after=77 relief=3
 PASS | Sleep id 1: Morale not reset to 100 — morale=69.1
 PASS | Sleep id 1: Morale barely moved — before=70 after=69.1
 PASS | Sleep id 1: MentalFatigue recovered with residual — before=75 after=35
 PASS | Sleep id 1: FocusState toward baseline — before=30 after=46 base=62
-PASS | Sleep id 2: Frustration partial relief — before=65 after=30 relief=35
+PASS | Sleep id 2: Frustration partial relief — before=65 after=62 relief=3
 PASS | Sleep id 2: Morale not reset to 100 — morale=59.7
 PASS | Sleep id 2: Morale barely moved — before=60 after=59.7
 PASS | Sleep id 2: MentalFatigue recovered with residual — before=55 after=15
 PASS | Sleep id 2: FocusState toward baseline — before=45 after=53.5 base=62
-PASS | Sleep id 3: Frustration partial relief — before=55 after=20 relief=35
+PASS | Sleep id 3: Frustration partial relief — before=55 after=52 relief=3
 PASS | Sleep id 3: Morale not reset to 100 — morale=50.3
 PASS | Sleep id 3: Morale barely moved — before=50 after=50.3
 PASS | Sleep id 3: MentalFatigue recovered with residual — before=50 after=10
 PASS | Sleep id 3: FocusState toward baseline — before=55 after=58.5 base=62
-PASS | Sleep id 4: Frustration partial relief — before=48 after=13 relief=35
+PASS | Sleep id 4: Frustration partial relief — before=48 after=45 relief=3
 PASS | Sleep id 4: Morale not reset to 100 — morale=45.6
 PASS | Sleep id 4: Morale barely moved — before=45 after=45.6
 PASS | Sleep id 4: MentalFatigue recovered with residual — before=45 after=5
 PASS | Sleep id 4: FocusState toward baseline — before=70 after=66 base=62
-PASS | Sleep id 5: Frustration partial relief — before=42 after=7 relief=35
+PASS | Sleep id 5: Frustration partial relief — before=42 after=39 relief=3
 PASS | Sleep id 5: Morale not reset to 100 — morale=40.9
 PASS | Sleep id 5: Morale barely moved — before=40 after=40.9
 PASS | Sleep id 5: MentalFatigue recovered with residual — before=42 after=2
@@ -912,17 +912,17 @@ PASS | Post-sleep Frustration still distinct across crew
 
 ## 5. PhysicalStamina priming audit
 PASS | Unprimed Elena PhysicalStamina==0
-PASS | Hauling assign does not prime Elena stamina
-PASS | Sleep on unprimed does not invent PhysicalStamina — stam=0
-PASS | Sleep still recovers Frustration for unprimed — frust=5
+PASS | Hauling assign primes Elena stamina (person sheet) — primed=True stam=100
+PASS | Sleep recovers PhysicalStamina when primed
+PASS | Sleep still recovers Frustration for hauler — frust=37
 PASS | First Excavation bind primes Mara — stam=100 max=100
 PASS | Re-bind Excavation keeps fatigued stamina (no reset) — stam=40 want=40
 PASS | StaminaPrimed distinguishes uninitialized from zero
 
 ## Priming verdict
-SAFE TEMPORARY COMPATIBILITY DEBT: PhysicalStamina=0 + StaminaPrimed=false means uninitialized.
-Only Excavator EnsurePersonalStaminaPrimed initializes. Non-Excavator jobs never read the pool.
-UI treats unprimed as full. Sleep skips PhysicalStamina restore until primed.
+PhysicalStamina=0 + StaminaPrimed=false means uninitialized.
+WorkerJobDemand.EnsureStaminaPrimed runs on job bind (person sheet).
+UI treats unprimed as full. Sleep restores PhysicalStamina once primed.
 No redesign in this verify pass.
 
 ## Summary

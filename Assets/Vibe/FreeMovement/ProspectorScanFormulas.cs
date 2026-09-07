@@ -18,21 +18,28 @@ namespace DeepCore.FreeMovement
         /// TEMP: shrink production durations for SocketMap testing.
         /// Flip to false when balancing real scan length again.
         /// </summary>
-        public const bool UseTestingScanDurations = true;
-
-        /// <summary>~71h production → ~0.7h game (~8s real at 1× with 12s/hour).</summary>
-        public const float TestingDurationScale = 0.01f;
+        public static bool UseTestingScanDurations = true;
 
         /// <summary>
-        /// Analysis testing scale — production is 8–22h desk work; testing keeps deliberate pacing
-        /// without multi-minute waits. With 12s/game-hour: ~1.6–4.0h ≈ 19–48s real at 1×.
+        /// Scan testing scale — short enough to feel like active prospecting, long enough to read.
+        /// ~2.5–7 game hours ≈ ~30–84s real at 12s/game-hour.
         /// </summary>
-        public const float TestingAnalysisDurationScale = 0.18f;
-        public const float TestingMinAnalysisHours = 1.6f;
-        public const float TestingMaxAnalysisHours = 4.0f;
+        public const float TestingDurationScale = 0.075f;
 
-        public const float TestingMinScanHours = 0.05f;
-        public const float TestingMaxScanHours = 1.2f;
+        /// <summary>
+        /// Analysis testing scale — conclusions land in a short but readable desk sit.
+        /// Applied after production 1.5–4.0h band.
+        /// </summary>
+        public const float TestingAnalysisDurationScale = 0.12f;
+        public const float TestingMinAnalysisHours = 0.14f;
+        public const float TestingMaxAnalysisHours = 0.48f;
+
+        /// <summary>Refiner consult dwell (game hours) — short focused check.</summary>
+        public const float TestingConsultDwellHours = 0.035f;
+        public const float ProductionConsultDwellHours = 0.15f;
+
+        public const float TestingMinScanHours = 2.5f;
+        public const float TestingMaxScanHours = 7f;
 
         /// <summary>
         /// Area-ish fraction of equipment max cone (0 = tiny · 1 = full equipment limit).

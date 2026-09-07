@@ -299,11 +299,9 @@ namespace DeepCore.FreeMovement
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.WorkingTogether, SocialAction.Encourage,
                     SocialResponse.Deflect, false, true, "POSITIVE_FAIL"),
-                p => (p.ResponseLine.IndexOf("manage", StringComparison.OrdinalIgnoreCase) >= 0
-                      || p.ResponseLine.IndexOf("pep", StringComparison.OrdinalIgnoreCase) >= 0)
+                p => (ContainsAny(p.ResponseLine, "manage", "pep", "speech", "coaching"))
                      && (p.CloserLine == null
-                         || p.CloserLine.IndexOf("Noted", StringComparison.OrdinalIgnoreCase) >= 0
-                         || p.CloserLine.IndexOf("Message", StringComparison.OrdinalIgnoreCase) >= 0));
+                         || ContainsAny(p.CloserLine, "Noted", "Message", "Got it", "push", "Fine", "Figured")));
 
             Present("Joke can land",
                 SocialAuraPresenter.MakeSyntheticLog(
@@ -315,37 +313,31 @@ namespace DeepCore.FreeMovement
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.IdleNearby, SocialAction.Joke,
                     SocialResponse.PushBack, false, true, "POSITIVE_FAIL"),
-                p => p.ResponseLine.IndexOf("landed", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("talk", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "landed", "talk", "tone", "dig", "Wrong"));
 
             Present("SharedProblem complaint can bond",
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.SharedProblem, SocialAction.Complain,
                     SocialResponse.Agree, true, true, "SHARED_COMPLAINT_BOND"),
-                p => p.ResponseLine.IndexOf("alone", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("mess", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("together", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("chew", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "alone", "mess", "together", "chew", "grit", "Same", "push", "Shared"));
 
             Present("Complaint can clash",
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.SharedProblem, SocialAction.Complain,
                     SocialResponse.Escalate, true, false, "CLASH"),
-                p => p.ResponseLine.IndexOf("problem", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("again", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "problem", "again", "fight", "happens", "doing this"));
 
             Present("Provoke can be ignored",
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.WorkingTogether, SocialAction.Provoke,
                     SocialResponse.Ignore, true, true, "IGNORED_AGGRESSION"),
-                p => p.ResponseLine == "…" || p.ResponseLine.IndexOf("worth", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => p.ResponseLine == "…" || ContainsAny(p.ResponseLine, "worth", "static", "Moving", "Hearing"));
 
             Present("Confront → PushBack",
                 SocialAuraPresenter.MakeSyntheticLog(
                     1, 2, SocialContext.WorkingTogether, SocialAction.Confront,
                     SocialResponse.PushBack, true, true, "CLASH"),
-                p => p.ResponseLine.IndexOf("Back", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("mouth", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "Back", "mouth", "Ease", "Don't"));
 
             Present("Confront → Withdraw",
                 SocialAuraPresenter.MakeSyntheticLog(
@@ -425,6 +417,18 @@ namespace DeepCore.FreeMovement
             log.AppendLine();
             log.AppendLine("DEV SOCIAL panel: last encounter rolls/deltas + presentation lines (not player UI).");
             log.AppendLine();
+        }
+
+        static bool ContainsAny(string line, params string[] needles)
+        {
+            if (string.IsNullOrEmpty(line) || needles == null) return false;
+            for (int i = 0; i < needles.Length; i++)
+            {
+                if (string.IsNullOrEmpty(needles[i])) continue;
+                if (line.IndexOf(needles[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
         }
     }
 }

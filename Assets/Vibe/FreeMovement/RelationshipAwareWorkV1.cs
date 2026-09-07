@@ -232,7 +232,7 @@ namespace DeepCore.FreeMovement
                 WorkerStateEventHub.Emit(WorkerStateEvent.Create(
                     excavOpId,
                     WorkerStateEventType.WorkBlocked,
-                    2.2f,
+                    3.2f,
                     "CoopFriction",
                     JobType.Excavation,
                     excavProviderId,
@@ -240,7 +240,7 @@ namespace DeepCore.FreeMovement
                 WorkerStateEventHub.Emit(WorkerStateEvent.Create(
                     engOpId,
                     WorkerStateEventType.WorkBlocked,
-                    1.8f,
+                    2.6f,
                     "CoopFriction",
                     JobType.Engineering,
                     engProviderId,
@@ -317,6 +317,10 @@ namespace DeepCore.FreeMovement
                     case SocialMemoryType.BlamedMe:
                     case SocialMemoryType.InsultedMe:
                     case SocialMemoryType.FailedTogether:
+                    case SocialMemoryType.HurtBy:
+                    case SocialMemoryType.WitnessedViolence:
+                    case SocialMemoryType.KilledBy:
+                    case SocialMemoryType.WitnessedDeath:
                         neg += e.Strength * (e.Major ? 1.15f : 1f);
                         break;
                 }

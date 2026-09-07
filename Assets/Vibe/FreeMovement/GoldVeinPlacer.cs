@@ -722,7 +722,7 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>Force diggable soft rock (clears accidental bedrock from the corridor).</summary>
-        static void FillSoftRockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
+        public static void FillSoftRockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
         {
             for (int y = y0; y < y0 + height; y++)
             for (int x = x0; x < x0 + width; x++)
@@ -736,7 +736,7 @@ namespace DeepCore.FreeMovement
             }
         }
 
-        static void FillBedrockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
+        public static void FillBedrockRect(FineTerrainWorld w, int x0, int y0, int width, int height)
         {
             for (int y = y0; y < y0 + height; y++)
             for (int x = x0; x < x0 + width; x++)
@@ -748,7 +748,7 @@ namespace DeepCore.FreeMovement
             }
         }
 
-        static void FillGoldRect(
+        public static void FillGoldRect(
             FineTerrainWorld w, int x0, int y0, int width, int height,
             int minGrade, int maxGrade)
         {
@@ -773,7 +773,7 @@ namespace DeepCore.FreeMovement
             }
         }
 
-        static void FillDiamondRect(
+        public static void FillDiamondRect(
             FineTerrainWorld w, int x0, int y0, int width, int height,
             int minGrade, int maxGrade)
         {
@@ -797,5 +797,10 @@ namespace DeepCore.FreeMovement
                 w.Set(x, y, FineTerrainWorld.FromCounts(4 - dia, 0, 0, dia));
             }
         }
+
+        /// <summary>Public wrapper for mission / audit gas placement.</summary>
+        public static bool TryPlaceGasPocket(FineTerrainWorld w, int cx, int cy, int rx, int ry,
+            float stretch = 1f, int rockBuffer = 3) =>
+            TryCarveGasPocket(w, cx, cy, rx, ry, stretch, rockBuffer);
     }
 }

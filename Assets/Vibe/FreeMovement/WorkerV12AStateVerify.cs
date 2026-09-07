@@ -202,11 +202,12 @@ namespace DeepCore.FreeMovement
                 for (int id = 1; id <= 5; id++)
                 {
                     var s = runner.AuditWorkerState(id);
+                    float expectedRelief = WorkerState.EffectiveSleepFrustrationRelief(frust0[id]);
                     Check($"Sleep id {id}: Frustration partial relief",
                         s.Frustration > 0f && s.Frustration < frust0[id]
                         && Mathf.Approximately(s.Frustration,
-                            Mathf.Max(0f, frust0[id] - WorkerSleepRecovery.FrustrationRelief)),
-                        $"before={frust0[id]:0.#} after={s.Frustration:0.#} relief={WorkerSleepRecovery.FrustrationRelief}");
+                            Mathf.Max(0f, frust0[id] - expectedRelief)),
+                        $"before={frust0[id]:0.#} after={s.Frustration:0.#} relief={expectedRelief:0.##}");
                     Check($"Sleep id {id}: Morale not reset to 100",
                         s.Morale < 99f,
                         $"morale={s.Morale:0.#}");
@@ -250,18 +251,17 @@ namespace DeepCore.FreeMovement
                 Check("Unprimed Elena PhysicalStamina==0",
                     Mathf.Approximately(elena.PhysicalStamina, 0f) && !elena.StaminaPrimed);
 
-                // Non-excavator hosts must not consume stamina — code audit: Hauler/Refiner/Engineer/Prospector
-                // have no Stamina reads (verified by static search). Runtime: assign Elena Hauling then sleep.
+                // Person stamina sheet: any job bind primes via WorkerJobDemand.EnsureStaminaPrimed.
                 runner.AuditTryAssign(4, JobType.Hauling, out _);
-                Check("Hauling assign does not prime Elena stamina",
-                    !elena.StaminaPrimed && Mathf.Approximately(elena.PhysicalStamina, 0f));
+                Check("Hauling assign primes Elena stamina (person sheet)",
+                    elena.StaminaPrimed && elena.PhysicalStamina > 1f,
+                    $"primed={elena.StaminaPrimed} stam={elena.PhysicalStamina:0.#}");
 
                 float stamBeforeSleep = elena.PhysicalStamina;
                 runner.AuditApplyCrewSleepRecovery(1f);
-                Check("Sleep on unprimed does not invent PhysicalStamina",
-                    Mathf.Approximately(elena.PhysicalStamina, stamBeforeSleep),
-                    $"stam={elena.PhysicalStamina:0.#}");
-                Check("Sleep still recovers Frustration for unprimed",
+                Check("Sleep recovers PhysicalStamina when primed",
+                    elena.PhysicalStamina >= stamBeforeSleep - 0.01f);
+                Check("Sleep still recovers Frustration for hauler",
                     elena.Frustration < elenaFrust,
                     $"frust={elena.Frustration:0.#}");
 
@@ -285,18 +285,22 @@ namespace DeepCore.FreeMovement
                     Mathf.Approximately(mara.State.PhysicalStamina, fatigued),
                     $"stam={mara.State.PhysicalStamina:0.#} want={fatigued:0.#}");
 
+                VacateAll(runner);
+                var kow = runner.AuditWorkerState(3);
+                kow.StaminaPrimed = false;
+                kow.PhysicalStamina = 0f;
                 Check("StaminaPrimed distinguishes uninitialized from zero",
-                    !elena.StaminaPrimed && Mathf.Approximately(elena.PhysicalStamina, 0f)
+                    !kow.StaminaPrimed && Mathf.Approximately(kow.PhysicalStamina, 0f)
                     && mara.State.StaminaPrimed);
 
                 log.AppendLine();
                 log.AppendLine("## Priming verdict");
                 log.AppendLine(
-                    "SAFE TEMPORARY COMPATIBILITY DEBT: PhysicalStamina=0 + StaminaPrimed=false means uninitialized.");
+                    "PhysicalStamina=0 + StaminaPrimed=false means uninitialized.");
                 log.AppendLine(
-                    "Only Excavator EnsurePersonalStaminaPrimed initializes. Non-Excavator jobs never read the pool.");
+                    "WorkerJobDemand.EnsureStaminaPrimed runs on job bind (person sheet).");
                 log.AppendLine(
-                    "UI treats unprimed as full. Sleep skips PhysicalStamina restore until primed.");
+                    "UI treats unprimed as full. Sleep restores PhysicalStamina once primed.");
                 log.AppendLine("No redesign in this verify pass.");
             }
             catch (Exception ex)

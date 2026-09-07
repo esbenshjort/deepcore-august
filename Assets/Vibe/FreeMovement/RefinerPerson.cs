@@ -41,8 +41,18 @@ namespace DeepCore.FreeMovement
         public bool IsDiscussing => _discussing;
         public WashMachine Washer => _washer;
 
-        /// <summary>Fixed meet point by the washer — Prospector walks here instead of chasing.</summary>
-        public Vector2 ConsultationMeetPoint => WorkPoint;
+        /// <summary>Fixed meet point — washer by default, camp analysis table when overridden.</summary>
+        public Vector2 ConsultationMeetPoint =>
+            _hasConsultOverride ? _consultOverride : WorkPoint;
+
+        Vector2 _consultOverride;
+        bool _hasConsultOverride;
+
+        public void SetConsultationMeetOverride(Vector2 worldPos)
+        {
+            _consultOverride = worldPos;
+            _hasConsultOverride = true;
+        }
 
         public string ActivityLabel
         {
@@ -205,17 +215,6 @@ namespace DeepCore.FreeMovement
             _washer?.ResetMachine();
         }
 
-        /// <summary>Move only — keep wash / consult / held-cell job memory across sleep.</summary>
-        public void SoftTeleport(Vector2 pos)
-        {
-            transform.localPosition = pos;
-        }
-
-        public void TeleportTo(Vector2 pos)
-        {
-            SoftTeleport(pos);
-        }
-
         /// <summary>
         /// Prospector needs a consult: pause fetch/carry, keep held ore, walk to meet.
         /// Washer may keep spinning if already running.
@@ -226,7 +225,7 @@ namespace DeepCore.FreeMovement
             _consultActive = true;
             _discussing = false;
             _consultMeet = meetNearProspector;
-            _consultHoursLeft = Mathf.Max(0.2f, expectedHours);
+            _consultHoursLeft = Mathf.Max(0.05f, expectedHours);
             if (_state != State.Consulting)
             {
                 _resumeAfterConsult = _state;
@@ -528,8 +527,11 @@ namespace DeepCore.FreeMovement
         void Step(Vector2 dir)
         {
             if (dir.sqrMagnitude < 0.0001f) return;
-            float mul = LoosePile.SpeedMulAt(Position, 0.12f);
-            transform.localPosition = Position + dir.normalized * (_moveSpeed * mul * Time.deltaTime);
+            float bias = _moveSpeed / WorkerPhysicalProfile.ReferenceWalkSpeed;
+            float speed = WorkerLocomotion.WalkSpeedAt(
+                _assignedWorker, _world, Position, 0.12f,
+                roleBias: bias, carriedLoad01: 0f, isMoving: true);
+            transform.localPosition = Position + dir.normalized * (speed * Time.deltaTime);
         }
 
         void OnValidate()

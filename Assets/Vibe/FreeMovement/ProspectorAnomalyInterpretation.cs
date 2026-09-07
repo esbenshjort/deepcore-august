@@ -104,14 +104,14 @@ namespace DeepCore.FreeMovement
 
             float speed01 = stats.AnalysisSpeed01;
             // Desk clock only — field/refiner trips add more time between published findings.
-            // Target band ~8–22h so meaningful discoveries land roughly every 8–24 productive hours.
-            float baseHours = Mathf.Lerp(11f, 18f, complexity01);
+            // Target: useful conclusion in a fraction of an 8h shift (~1.5–4.0h), not multi-day.
+            float baseHours = Mathf.Lerp(2.0f, 3.6f, complexity01);
             float hours = baseHours * Mathf.Lerp(1.35f, 0.72f, speed01);
-            hours = Mathf.Clamp(hours, 8f, 22f);
+            hours = Mathf.Clamp(hours, 1.5f, 4.0f);
 
             if (ProspectorScanFormulas.UseTestingScanDurations)
             {
-                // Playable but not instant at 1× clock (~few–dozen seconds real)
+                // Playable but not instant at 1× clock
                 hours *= ProspectorScanFormulas.TestingAnalysisDurationScale;
                 hours = Mathf.Clamp(hours,
                     ProspectorScanFormulas.TestingMinAnalysisHours,
@@ -131,11 +131,11 @@ namespace DeepCore.FreeMovement
             if (ProspectorScanFormulas.UseTestingScanDurations)
             {
                 hours = Mathf.Clamp(hours,
-                    ProspectorScanFormulas.TestingMinAnalysisHours * 0.5f,
-                    ProspectorScanFormulas.TestingMaxAnalysisHours * 0.65f);
+                    ProspectorScanFormulas.TestingMinAnalysisHours * 0.45f,
+                    ProspectorScanFormulas.TestingMaxAnalysisHours * 0.55f);
             }
             else
-                hours = Mathf.Clamp(hours, 3.2f, 8.8f);
+                hours = Mathf.Clamp(hours, 0.55f, 1.6f);
             return hours;
         }
 

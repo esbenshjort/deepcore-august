@@ -25,10 +25,12 @@ namespace DeepCore.FreeMovement
 
         public const float HeatMin = 0f;
         public const float HeatMax = 100f;
-        public const float PassiveCoolPerSecond = 5f;
-        public const float CoolResumeHeat = 60f;
-        public const int PushDecisionDC = 22;
-        public const int ExtremeControlDC = 25;
+        public const float PassiveCoolPerSecond = 4f;
+        public const float CoolResumeHeat = 55f;
+        /// <summary>Lower = excavator pushes past preferred max more often (into danger/extreme).</summary>
+        public const int PushDecisionDC = 17;
+        /// <summary>Higher = composure fails more often at extreme → more overheat lockouts.</summary>
+        public const int ExtremeControlDC = 28;
         public const float FrustrationCoolReliefPerSecond = 0.5f;
         public const float FrustrationSleepReliefPerSecond = 2f;
         public const float FrustrationProgressBaseRelief = 2f;
@@ -48,7 +50,8 @@ namespace DeepCore.FreeMovement
         public const float InjuryMoveSpeedMul = 0.85f;
 
 
-        [SerializeField] float moveSpeed = 1.35f;
+        [SerializeField] float moveSpeed = 1.35f; // MACHINE chassis — not WorkerLocomotion walk
+
         [SerializeField] float rotateSpeed = 100f;
         [SerializeField] float digInterval = 0.95f;
         [SerializeField] float tipReach = 0.48f;
@@ -102,6 +105,8 @@ namespace DeepCore.FreeMovement
         System.Action<int, int> _onBrokeCell;
         System.Action<TerrainCell, bool> _onDigImpact;
         public event System.Action<int, int> WeakPointFound;
+        /// <summary>Collapse debris chip (cell x,y).</summary>
+        public event System.Action<int, int> DebrisStrike;
 
         /// <summary>Balance harness only — dig strike finished (before-cell snapshot, broke).</summary>
         public event System.Action<TerrainCell, bool> BalanceDigImpact;
@@ -173,15 +178,22 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>
+        /// Stop dig engagement and clear active-work visuals. Machine stays put; heat cools passively.
+        /// </summary>
+        public void ParkMachineIdle()
+        {
+            IsActivelyDigging = false;
+            _dugThisTick = false;
+            _digTimer = 0f;
+        }
+
+        /// <summary>
         /// Stop this operator's dig engagement. Machine heat, cooling intent, route, and tool power persist.
         /// Personal conditions stay on the WorkerRuntime (not wiped).
         /// </summary>
         public void YieldForReassignment()
         {
-            IsActivelyDigging = false;
-            _dugThisTick = false;
-            // Safe simulation boundary: abandon in-progress dig cadence wait; next operator starts fresh cadence
-            _digTimer = 0f;
+            ParkMachineIdle();
             DigHoodLog.Push(
                 $"ASSIGN | Excavator yield | Heat {_heat:0.#} | Cooling {_isCooling} | " +
                 $"Route {_route.Count} | Overheat {IsOverheated}");
@@ -225,6 +237,31 @@ namespace DeepCore.FreeMovement
         public bool HasGoal => _hasGoal || _route.Count > 0;
         public int RouteCount => _route.Count;
         public FineTerrainWorld World => _world;
+
+        /// <summary>
+        /// 0 = soft/open, 1 = hard bedrock face under the bit — drives impact sparks.
+        /// </summary>
+        public float DigFaceHardness
+        {
+            get
+            {
+                if (_world == null || !IsActivelyDigging) return 0f;
+                Vector2 tip = DrillTip(0.38f);
+                var cell = _world.WorldToCell(tip);
+                if (!_world.InBounds(cell.x, cell.y) || !_world.IsMovementBlocker(cell.x, cell.y))
+                {
+                    tip = DrillTip(0.55f);
+                    cell = _world.WorldToCell(tip);
+                    if (!_world.InBounds(cell.x, cell.y) || !_world.IsMovementBlocker(cell.x, cell.y))
+                        return 0.35f;
+                }
+                var c = _world.Get(cell.x, cell.y);
+                if (c.Material == TerrainMaterial.Bedrock) return 1f;
+                float armorT = Mathf.InverseLerp(
+                    FineTerrainWorld.RockArmor, FineTerrainWorld.BedrockArmor, c.Armor);
+                return Mathf.Clamp01(0.45f + armorT * 0.4f);
+            }
+        }
         public Vector2 Goal => _goal;
 
         /// <summary>Temporary dig readout for the STATS panel.</summary>
@@ -250,7 +287,30 @@ namespace DeepCore.FreeMovement
 
         public void TeleportTo(Vector2 pos)
         {
+            Vector2 from = Position;
+            if (_world != null && _world.CircleHitsSolid(pos, _moveRadius * 0.85f))
+            {
+                var c = _world.WorldToCell(pos);
+                bool found = false;
+                for (int r = 0; r <= 10 && !found; r++)
+                {
+                    for (int oy = -r; oy <= r && !found; oy++)
+                    for (int ox = -r; ox <= r && !found; ox++)
+                    {
+                        if (r > 0 && Mathf.Abs(ox) != r && Mathf.Abs(oy) != r) continue;
+                        int x = c.x + ox, y = c.y + oy;
+                        if (!_world.IsTunnelOpen(x, y)) continue;
+                        Vector2 cand = _world.CellCenter(x, y);
+                        if (_world.CircleHitsSolid(cand, _moveRadius * 0.8f)) continue;
+                        pos = cand;
+                        found = true;
+                    }
+                }
+            }
             transform.localPosition = pos;
+            WorkerRelocationLog.Report(
+                AssignedWorker != null ? AssignedWorker.DisplayName : "Excavator",
+                from, pos, "TeleportTo", "FreeWorkerController");
             IsActivelyDigging = false;
             // Dig route / pins are instructions — keep them across sleep & commute snaps.
             if (_route.Count > 0)
@@ -269,8 +329,21 @@ namespace DeepCore.FreeMovement
             Vector2 body = Position;
             if (_route.Count == 0)
             {
-                // Quiet "left off here" pin — slightly ahead of facing so arrival digs the wall.
-                Vector2 tip = DrillTip(Mathf.Max(0.28f, _moveRadius * 0.9f));
+                // Tip must land in a *different* cell ahead (AddPin snaps to centers —
+                // a tip still inside the body cell was clearing the route instantly).
+                Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
+                Vector2 tip = Position + dir * Mathf.Max(0.55f, _moveRadius * 1.6f);
+                if (_world != null)
+                {
+                    float cs = Mathf.Max(0.05f, _world.CellSize);
+                    for (int i = 0; i < 8; i++)
+                    {
+                        var c = _world.WorldToCell(tip);
+                        if (_world.InBounds(c.x, c.y) && _world.IsMovementBlocker(c.x, c.y))
+                            break;
+                        tip += dir * cs;
+                    }
+                }
                 AddPin(tip, replaceRoute: true);
                 DigHoodLog.Push("SHIFT BREAK | Left-off pin placed at dig face");
             }
@@ -333,19 +406,6 @@ namespace DeepCore.FreeMovement
         }
 
 
-        /// <summary>
-        /// Obsolete — sleep recovery is person-level on the crew (V1.2A).
-        /// No-op retained so old call sites compile until removed.
-        /// </summary>
-        [System.Obsolete("V1.2A: use crew WorkerState.ApplySleepRecoveryFraction")]
-        public void TickRestFrustrationRelief(float deltaTime) { }
-
-        /// <summary>
-        /// Obsolete — sleep recovery is person-level on the crew (V1.2A).
-        /// </summary>
-        [System.Obsolete("V1.2A: use crew WorkerState.ApplySleepRecoveryFraction")]
-        public void ApplyRestFrustrationForDuration(float realSeconds) { }
-
         public void SetCrewVisible(bool on)
         {
             foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
@@ -398,12 +458,14 @@ namespace DeepCore.FreeMovement
             _routeLine = go.AddComponent<LineRenderer>();
             _routeLine.useWorldSpace = false;
             _routeLine.loop = false;
-            _routeLine.widthMultiplier = 0.035f;
+            _routeLine.widthMultiplier = 1f;
+            _routeLine.startWidth = 0.012f;
+            _routeLine.endWidth = 0.008f;
             _routeLine.numCapVertices = 2;
             _routeLine.sortingOrder = 34;
             var sh = Shader.Find("Sprites/Default");
             if (sh != null) _routeLine.material = new Material(sh);
-            _routeLine.startColor = _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.45f);
+            _routeLine.startColor = _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.22f);
             _routeLine.positionCount = 0;
         }
 
@@ -421,6 +483,8 @@ namespace DeepCore.FreeMovement
             if (_world.InBounds(cell.x, cell.y))
                 p = _world.CellCenter(cell.x, cell.y);
 
+            p = EnsurePinBeyondNose(p);
+
             if (replaceRoute)
             {
                 _route.Clear();
@@ -429,6 +493,43 @@ namespace DeepCore.FreeMovement
             _route.Add(p);
             RefreshVisuals();
             ActivateCurrentPin();
+        }
+
+        /// <summary>
+        /// Pins snapped onto the excavator's own cell complete in one tick (arrive &lt; 0.1)
+        /// and leave the machine idle at the wall. Push at least one cell past the nose.
+        /// </summary>
+        Vector2 EnsurePinBeyondNose(Vector2 pin)
+        {
+            const float minDist = 0.2f; // must exceed Tick arrive threshold (0.1)
+            Vector2 pos = Position;
+            if (Vector2.Distance(pos, pin) >= minDist)
+                return pin;
+
+            Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
+            Vector2 fromPin = pin - pos;
+            if (fromPin.sqrMagnitude > 0.0001f)
+                dir = fromPin.normalized;
+
+            float cs = _world != null ? Mathf.Max(0.05f, _world.CellSize) : 0.2f;
+            Vector2 p = pin;
+            for (int i = 0; i < 12; i++)
+            {
+                p += dir * cs;
+                if (_world != null)
+                {
+                    var size = _world.WorldSize;
+                    p = new Vector2(
+                        Mathf.Clamp(p.x, _moveRadius, size.x - _moveRadius),
+                        Mathf.Clamp(p.y, _moveRadius, size.y - _moveRadius));
+                    var c = _world.WorldToCell(p);
+                    if (_world.InBounds(c.x, c.y))
+                        p = _world.CellCenter(c.x, c.y);
+                }
+                if (Vector2.Distance(pos, p) >= minDist)
+                    return p;
+            }
+            return pos + dir * Mathf.Max(minDist, cs);
         }
 
         /// <summary>Legacy single-goal API — replaces route with one pin.</summary>
@@ -480,10 +581,51 @@ namespace DeepCore.FreeMovement
             _routeI++;
             if (_routeI >= _route.Count)
             {
+                if (TryContinueChewingAtFace())
+                    return;
                 ClearRoute();
                 return;
             }
             ActivateCurrentPin();
+        }
+
+        /// <summary>
+        /// Route finished but bit is still against rock — keep a face pin so we don't
+        /// ParkMachineIdle mid-wall (looks like Mara "suddenly stopped").
+        /// </summary>
+        bool TryContinueChewingAtFace()
+        {
+            if (_assignedWorker == null || _world == null) return false;
+            if (IsOverheated || _isCooling || Conditions.IsResting || IsTooInjuredToMine)
+                return false;
+
+            Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
+            if (!PathBlockedByRock(Position, dir))
+            {
+                bool found = false;
+                for (int i = -3; i <= 3; i++)
+                {
+                    if (i == 0) continue;
+                    float rad = i * 22f * Mathf.Deg2Rad;
+                    float cos = Mathf.Cos(rad), sin = Mathf.Sin(rad);
+                    Vector2 d = new(dir.x * cos - dir.y * sin, dir.x * sin + dir.y * cos);
+                    if (!PathBlockedByRock(Position, d)) continue;
+                    dir = d.normalized;
+                    Face(dir);
+                    found = true;
+                    break;
+                }
+                if (!found) return false;
+            }
+
+            Vector2 tip = Position + dir * Mathf.Max(_moveRadius * 1.55f, DigTipDepth + _world.CellSize);
+            tip = EnsurePinBeyondNose(tip);
+            _route.Clear();
+            _routeI = 0;
+            _route.Add(tip);
+            ActivateCurrentPin();
+            DigHoodLog.Push("DIG | Continue chewing at face");
+            return true;
         }
 
         void RefreshVisuals()
@@ -497,7 +639,7 @@ namespace DeepCore.FreeMovement
                 sr.sprite = _pinSprite;
                 sr.sortingOrder = 36;
                 DigVisualKit.ApplyLit(sr);
-                pin.localScale = Vector3.one * 0.42f;
+                pin.localScale = Vector3.one * 0.22f;
                 _pinVisuals.Add(pin);
             }
 
@@ -509,14 +651,14 @@ namespace DeepCore.FreeMovement
                 _pinVisuals[i].localPosition = _route[i];
                 var sr = _pinVisuals[i].GetComponent<SpriteRenderer>();
                 if (sr == null) continue;
-                // Current = bright green; upcoming = dimmer; past = muted
+                // Current = soft neon; upcoming = quieter; past = near-gone
                 if (i < _routeI)
-                    sr.color = new Color(0.35f, 0.55f, 0.4f, 0.35f);
+                    sr.color = new Color(0.35f, 0.7f, 0.45f, 0.18f);
                 else if (i == _routeI)
-                    sr.color = new Color(0.4f, 1f, 0.55f, 1f);
+                    sr.color = new Color(0.4f, 1f, 0.55f, 0.55f);
                 else
-                    sr.color = new Color(0.45f, 0.9f, 0.6f, 0.7f);
-                _pinVisuals[i].localScale = Vector3.one * (i == _routeI ? 0.5f : 0.38f);
+                    sr.color = new Color(0.4f, 0.95f, 0.55f, 0.32f);
+                _pinVisuals[i].localScale = Vector3.one * (i == _routeI ? 0.26f : 0.18f);
             }
 
             if (_routeLine == null) return;
@@ -532,21 +674,33 @@ namespace DeepCore.FreeMovement
             _routeLine.SetPosition(0, Position);
             for (int i = 0; i < remaining; i++)
                 _routeLine.SetPosition(i + 1, _route[_routeI + i]);
-            _routeLine.startColor = new Color(0.35f, 1f, 0.55f, 0.55f);
-            _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.2f);
+            _routeLine.startWidth = 0.012f;
+            _routeLine.endWidth = 0.007f;
+            _routeLine.startColor = new Color(0.35f, 1f, 0.55f, 0.28f);
+            _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.1f);
         }
 
         public void Tick(Vector2 wasd) => Tick(wasd, clearGoalOnWasd: true);
+
+        /// <summary>Heat/stamina only — never digs. Use when operator is away (commute, toilet, off-shift).</summary>
+        public void TickPassiveOnly()
+        {
+            if (_world == null) return;
+            ParkMachineIdle();
+            TickPassiveHeat();
+            if (_assignedWorker != null)
+                TickStaminaRecovery();
+        }
 
         public void Tick(Vector2 wasd, bool clearGoalOnWasd)
         {
             if (_world == null) return;
             _dugThisTick = false;
 
-            // F0.5b vacancy: machine stays; passive heat/cooling only — no dig / route / operator rolls
+            // F0.5b vacancy / unmanned: machine stays; passive heat only — no dig
             if (_assignedWorker == null)
             {
-                IsActivelyDigging = false;
+                ParkMachineIdle();
                 TickPassiveHeat();
                 return;
             }
@@ -562,10 +716,18 @@ namespace DeepCore.FreeMovement
 
             if (!_hasGoal)
             {
-                IsActivelyDigging = false;
-                TickPassiveHeat();
-                TickStaminaRecovery();
-                return;
+                // Empty route but still nose-into-rock (shift pin snapped away, Escape, etc.)
+                if (TryContinueChewingAtFace())
+                {
+                    // Goal armed — fall through to route follow this tick
+                }
+                else
+                {
+                    ParkMachineIdle();
+                    TickPassiveHeat();
+                    TickStaminaRecovery();
+                    return;
+                }
             }
 
             // Keep route line attached to excavator while moving
@@ -817,9 +979,13 @@ namespace DeepCore.FreeMovement
             for (int tx = bx0; tx <= bx1; tx++)
             {
                 if (!_world.InBounds(tx, ty)) continue;
-                if (!_world.IsMovementBlocker(tx, ty)) continue;
-                var cell = _world.Get(tx, ty);
-                if (cell.IsUndamageableBorder) continue;
+                bool debris = _world.HasBlockingDebris(tx, ty);
+                if (!_world.IsMovementBlocker(tx, ty) && !debris) continue;
+                if (!debris)
+                {
+                    var cell = _world.Get(tx, ty);
+                    if (cell.IsUndamageableBorder) continue;
+                }
                 if (!CellOverlapsCircle(tx, ty, pos, _moveRadius * 1.05f) &&
                     !CellOverlapsCircle(tx, ty, tryPos, _moveRadius * 1.05f))
                     continue;
@@ -827,8 +993,14 @@ namespace DeepCore.FreeMovement
                 Vector2 d = c - pos;
                 float along = Vector2.Dot(d, dir);
                 float side = Mathf.Abs(Vector2.Dot(d, perp));
-                float score = Vector2.Distance(c, pos) + side * 1.1f - along * 0.15f
-                    - (cell.MaxHp - cell.Hp) * 0.05f;
+                float score = Vector2.Distance(c, pos) + side * 1.1f - along * 0.15f;
+                if (!debris)
+                {
+                    var cell = _world.Get(tx, ty);
+                    score -= (cell.MaxHp - cell.Hp) * 0.05f;
+                }
+                else
+                    score -= 0.8f; // prefer clearing blocking debris when pressed against it
                 if (score < bestScore)
                 {
                     bestScore = score;
@@ -876,6 +1048,16 @@ namespace DeepCore.FreeMovement
 
         bool StrikeCell(int x, int y)
         {
+            if (_world.HasBlockingDebris(x, y))
+            {
+                DebrisStrike?.Invoke(x, y);
+                ApplyDigStamina();
+                DigHoodLog.Push($"DIG | Debris clearance strike ({x},{y}) hp={_world.GetDebrisHp(x, y)}");
+                ExcavationDustFx.SpawnLingering(transform.parent, _world.CellCenter(x, y),
+                    _world.CellSize, heavy: true);
+                return true;
+            }
+
             EnsureWeakPointRoll(x, y);
 
             var before = _world.Get(x, y);
@@ -928,16 +1110,19 @@ namespace DeepCore.FreeMovement
             }
 
             _obstructionCounter++;
-            if (_obstructionCounter % 3 != 0)
+            if (_obstructionCounter % 2 != 0)
                 return;
 
-            float mag = 3f;
+            float mag = 4.8f;
             if (target.Material == TerrainMaterial.Bedrock)
-                mag *= 1.5f;
+                mag *= 1.55f;
             if (target.HasWeakPoint)
                 mag *= 0.75f;
+            // Longer stuck streaks hit harder (compound into RepeatedFailure sooner)
+            if (_obstructionCounter >= 6)
+                mag *= 1.2f;
 
-            var type = _obstructionCounter >= 9
+            var type = _obstructionCounter >= 6
                 ? WorkerStateEventType.RepeatedFailure
                 : WorkerStateEventType.WorkBlocked;
 
@@ -992,12 +1177,13 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Heat from one completed dig.
-        /// BaseHeat: Rock 2, Bedrock 6. SafetyProtocol × 0.1 reduction (floor 0.5).
-        /// Weak Point × 0.8. Rhythm above 10 trims heat slightly (still floored at 0.5).
+        /// BaseHeat: Rock 3.4, Bedrock 9. Tuned so overheat lockouts (engineer repairs) show up often.
+        /// SafetyProtocol × 0.1 reduction (floor 0.5). Weak Point × 0.8.
+        /// Rhythm above 10 trims heat slightly (still floored at 0.5).
         /// </summary>
         void ApplyDigHeat(in TerrainCell cell)
         {
-            float baseHeat = cell.Material == TerrainMaterial.Bedrock ? 6f : 2f;
+            float baseHeat = cell.Material == TerrainMaterial.Bedrock ? 9f : 3.4f;
             int safety = Stats.Get(WorkerStatId.SafetyProtocol);
             int rhythm = Stats.Get(WorkerStatId.Rhythm);
             float added = Mathf.Max(0.5f, baseHeat - safety * 0.1f);
@@ -1017,21 +1203,21 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Preferred max heat from Safety Protocol — where the worker normally considers cooling.
-        /// PreferredMaxHeat = clamp(92 − Safety×0.8, 76, 91).
+        /// PreferredMaxHeat = clamp(88 − Safety×0.75, 72, 86) — earlier push/cool gate → more extreme climbs.
         /// </summary>
         float PreferredMaxHeat
         {
             get
             {
                 int safety = Stats.Get(WorkerStatId.SafetyProtocol);
-                return Mathf.Clamp(92f - safety * 0.8f, 76f, 91f);
+                return Mathf.Clamp(88f - safety * 0.75f, 72f, 86f);
             }
         }
 
         /// <summary>
         /// Decision gate before a dig strike. Rolls only at dig attempts (not every frame).
-        /// EXTREME (95–99): Composure vs DC 25.
-        /// At/above PreferredMaxHeat: Determination vs DC 22.
+        /// EXTREME (95–99): Composure vs ExtremeControlDC.
+        /// At/above PreferredMaxHeat: Determination vs PushDecisionDC.
         /// </summary>
         bool AllowDigByHeatControl()
         {
@@ -1214,8 +1400,13 @@ namespace DeepCore.FreeMovement
             }
         }
 
-        /// <summary>Injury ≥ Care threshold — cannot resume mining; Steward/Triage later.</summary>
-        public bool IsTooInjuredToMine => Conditions.Injury >= InjuryCareThreshold;
+        /// <summary>Injury / incapacitation — cannot resume mining.</summary>
+        public bool IsTooInjuredToMine =>
+            (Conditions != null && Conditions.Incapacitated)
+            || Conditions.Injury >= InjuryCareThreshold
+            || (_assignedWorker != null
+                && ( _assignedWorker.State != null && _assignedWorker.State.Incapacitated
+                    || WorkerInjuryConsequences.ForcesOutOfWork(_assignedWorker.Injuries)));
 
         public bool NeedsCare => Conditions.NeedsCare || IsTooInjuredToMine;
 
@@ -1244,6 +1435,27 @@ namespace DeepCore.FreeMovement
                     Conditions.NeedsCare = true;
                 BalanceInjuryEvent?.Invoke();
                 EmitOperatorState(WorkerStateEventType.Injury, InjuryOnFail, "OverheatInjury");
+                if (_assignedWorker != null)
+                {
+                    var typed = WorkerAccidentSystem.PickOverheatInjury();
+                    // Meter already applied — add typed record without double-adding full meter
+                    var rec = new WorkerInjuryRecord
+                    {
+                        Type = typed,
+                        BodyPart = WorkerInjuryCatalog.DefaultPart(typed),
+                        Severity = WorkerInjuryCatalog.SeverityOf(typed),
+                        Cause = WorkerInjuryCause.ExcavationOverheat,
+                        CauseLabel = "OverheatInjury",
+                        InflictedGameHours = WorkerStateClock.GameHours,
+                        RecoveryGameHoursTotal = WorkerInjuryCatalog.DefaultRecoveryHours(typed),
+                        RecoveryGameHoursLeft = WorkerInjuryCatalog.DefaultRecoveryHours(typed),
+                        MeterContribution = InjuryOnFail,
+                    };
+                    _assignedWorker.Injuries.Add(rec);
+                    _assignedWorker.Injuries.SyncNeedsCare(Conditions);
+                    _assignedWorker.Injuries.NoteAccident(
+                        $"{_assignedWorker.DisplayName} {rec.DisplayName} — overheat");
+                }
             }
 
             LogInjury();

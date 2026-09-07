@@ -302,7 +302,7 @@ namespace DeepCore.DualGrid
 
         void EnsureGlobalLight()
         {
-            foreach (var l in FindObjectsByType<Light2D>(FindObjectsSortMode.None))
+            foreach (var l in FindObjectsByType<Light2D>())
             {
                 if (l.lightType != Light2D.LightType.Global) continue;
                 l.intensity = 0.18f;

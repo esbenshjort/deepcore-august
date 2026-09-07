@@ -1,5 +1,5 @@
 # Relationship V1.1 Audit
-Generated: 2026-09-03 08:18:13
+Generated: 2026-09-03 09:09:06
 
 Scope: directional Respect + derived RelationshipClass (DEV only).
 No Trust/Warmth/Hostility formula changes. No encounter frequency / dialogue changes.

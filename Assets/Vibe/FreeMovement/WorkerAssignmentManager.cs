@@ -150,7 +150,7 @@ namespace DeepCore.FreeMovement
             Clear();
             if (crew == null) return;
 
-            // Expected order: Lewis, Mara, Kowalski, Elena, Viktor
+            // Expected order: Lewis, Mara, Kowalski, Elena, Viktor, [optional Steward]
             JobType[] jobs =
             {
                 JobType.Prospecting,
@@ -158,6 +158,7 @@ namespace DeepCore.FreeMovement
                 JobType.Hauling,
                 JobType.Refining,
                 JobType.Engineering,
+                JobType.Steward,
             };
 
             for (int i = 0; i < crew.Count && i < jobs.Length; i++)
@@ -186,11 +187,16 @@ namespace DeepCore.FreeMovement
                     $"Worker {w.WorkerId} missing assignment");
             }
 
-            foreach (var job in JobStatPreview.OccupiedJobs)
+            // Prototype may be 5 (legacy) or 6 (with Steward) — only assert jobs that have workers
+            for (int i = 0; i < crew.Count; i++)
             {
+                var w = crew[i];
+                if (w == null) continue;
+                var a = GetAssignment(w.WorkerId);
+                if (a == null) continue;
                 Debug.Assert(
-                    TryGetWorkerIdForJob(job, out int wid) && wid > 0,
-                    $"Job {job} has no worker");
+                    TryGetWorkerIdForJob(a.JobType, out int wid) && wid == w.WorkerId,
+                    $"Job {a.JobType} mapping mismatch");
             }
 
             // Unique stats per person
@@ -203,7 +209,7 @@ namespace DeepCore.FreeMovement
                     "Workers must not share WorkerStats sheets");
             }
 
-            // Default mapping: worker index → expected job
+            // Default mapping: worker index → expected job (extend when Steward present)
             JobType[] expected =
             {
                 JobType.Prospecting,
@@ -211,6 +217,7 @@ namespace DeepCore.FreeMovement
                 JobType.Hauling,
                 JobType.Refining,
                 JobType.Engineering,
+                JobType.Steward,
             };
             for (int i = 0; i < crew.Count && i < expected.Length; i++)
             {

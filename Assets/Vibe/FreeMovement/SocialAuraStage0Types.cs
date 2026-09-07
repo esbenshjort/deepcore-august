@@ -19,6 +19,8 @@ namespace DeepCore.FreeMovement
         RecentFailure = 4,
         IdleNearby = 5,
         Emergency = 6,
+        /// <summary>Off-shift camp proximity — uses existing encounter resolver; not universally positive.</summary>
+        Camp = 7,
     }
 
     public enum SocialAction : byte
@@ -238,6 +240,7 @@ namespace DeepCore.FreeMovement
             SocialContext.Emergency => 1.40f,
             SocialContext.RecentFailure => 1.20f,
             SocialContext.RecentSuccess => 1.10f,
+            SocialContext.Camp => 0.90f, // distinct from IdleNearby; not a positivity buff
             SocialContext.IdleNearby => 0.85f,
             _ => 1f,
         };

@@ -1,11 +1,11 @@
 ﻿# V1.1 Worker Architecture Lock Audit
 
-Generated: 2026-08-30 18:15:30
+Generated: 2026-09-07 10:22:32
 Mode: Unity batch ForceBuild + programmatic regression (not interactive Play Mode UI).
 
 ## 1. Bootstrap / person / avatar / assignment
-PASS | Crew count 5 — n=5
-PASS | Unique WorkerIds 1..5
+FAIL | Crew count 5 — n=6
+FAIL | Unique WorkerIds 1..5
 PASS | Each person one Stats sheet
 PASS | Exactly one avatar per worker
 PASS | Default jobs Lewis Pros / Mara Exc / Kow Haul / Elena Ref / Vik Eng
@@ -54,8 +54,8 @@ PASS | Hauler provider position stable
 
 ## 6. Vacancy E — unassign all
 PASS | All jobs vacant
-PASS | Five people still in roster
-PASS | Five avatars visible when Unassigned — visible=5
+FAIL | Five people still in roster
+FAIL | Five avatars visible when Unassigned — visible=6
 PASS | No job banter when vacant
 PASS | Selected person survives vacancy
 
@@ -66,8 +66,8 @@ PASS | Kowalski Haul
 PASS | Elena Ref
 PASS | Viktor Eng
 PASS | Default map restored
-PASS | Assigned avatars hidden — hidden=5
-PASS | Avatar sync following set for assigned
+FAIL | Assigned avatars hidden — hidden=1
+FAIL | Avatar sync following set for assigned
 
 ## 8. Shift / sleep / wake
 PASS | Phase HeadingHome
@@ -84,14 +84,24 @@ PASS | Providers still unmoved after SkipSleep
 PASS | Selection survives SkipSleep
 PASS | Assignments survive SkipSleep
 PASS | OnShift after wake
-PASS | CanPerform again when Operating
-PASS | Assigned avatars hidden again
+FAIL | CanPerform again when Operating
+FAIL | Assigned avatars hidden again
 
 ## 9. Provider release / scan block hooks
 PASS | CanRelease Prospecting when not mid-scan — OK
 
 ## 10. Personal vs machine
-PASS | Lewis PersonalConditions object stable across jobs
+PASS | Lewis WorkerState object stable across jobs
+PASS | Lewis has WorkerState
+PASS | Lewis/Mara State are distinct bags
+PASS | Morale not maxed at spawn — morale=55.4
+PASS | FocusState distinct from perfect — focusState=62
+PASS | FocusState != static Focus capacity — focusState=62 statFocus=10
+PASS | After Mara takes Excavator, Lewis keeps Frustration — lewis=55
+PASS | Mara brings her own Frustration — mara=12
+PASS | Sleep leaves Frustration residue — frust=71.6
+PASS | Sleep does not max Morale — morale=55.4
+PASS | Sleep Morale barely moves — before=55.4 after=55.4
 PASS | Excavator Heat is machine field (readable)
 
 ## 11. ControlWorker / role debt (classified)
@@ -101,12 +111,12 @@ PASS | Excavator Heat is machine field (readable)
 - D: removed obsolete CycleControl / SelectWorker / DrawWorkerCard stubs
 
 ## Summary
-PASS: 71
-FAIL: 0
+PASS: 73
+FAIL: 8
 
 ## Known non-blocking debt (carry-forward)
 - Excavator heat hard-resets on sleep (prefer passive cooling)
-- WorkerRuntime.PersonalConditions TEMP pending V1.2
+- WorkerRuntime.State V1.2A — daytime MentalFatigue/FocusState/Morale mostly static until V1.2B/C
 - Host sprites can look crewed while vacant / avatar hidden
 - Morning provider return is bridge snap, not polished travel
 - H/R/E relevant stats provisional
@@ -120,6 +130,12 @@ avatar presence, selection, banter authorship, and shift phase transitions
 programmatically. Interactive WASD/HUD play was not driven.
 Prospector geo diagnostic + prior excavator CSV baselines remain separate artifacts.
 
-## VERDICT: A. V1.1 READY TO LOCK
-Architecture and live regression are sound.
-Proceed to V1.2 Universal Worker State when ready.
+## VERDICT: B. V1.1 NOT READY
+- BLOCKER: Crew count 5: n=6
+- BLOCKER: Unique WorkerIds 1..5
+- BLOCKER: Five people still in roster
+- BLOCKER: Five avatars visible when Unassigned: visible=6
+- BLOCKER: Assigned avatars hidden: hidden=1
+- BLOCKER: Avatar sync following set for assigned
+- BLOCKER: CanPerform again when Operating
+- BLOCKER: Assigned avatars hidden again

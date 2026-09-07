@@ -16,6 +16,8 @@ namespace DeepCore.FreeMovement
         public bool IsDiamond => DiamondGrade > 0;
         public bool IsPrecious => GoldGrade > 0 || DiamondGrade > 0;
         public bool Claimed { get; set; }
+        /// <summary>World-radius of the rubble heap for walk slowdown / overlap.</summary>
+        public float FootprintRadius { get; private set; } = 0.12f;
 
         /// <summary>Gold payout — more sockets = more value (1→1, 2→3, 3→6, 4→10).</summary>
         public int GoldValue => GoldGrade <= 0 ? 0 : GoldGrade * (GoldGrade + 1) / 2;
@@ -60,32 +62,63 @@ namespace DeepCore.FreeMovement
             var go = new GameObject(name);
             go.transform.SetParent(parent, false);
             go.transform.localPosition = localPos;
+            go.transform.localScale = Vector3.one;
+            go.transform.localRotation = Quaternion.identity;
 
             float size = Mathf.Max(0.01f, cellSize);
-            go.transform.localScale = Vector3.one * size;
-            go.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(-8f, 8f));
-
             int seed = (Mathf.RoundToInt(localPos.x * 100f) * 73856093)
                        ^ (Mathf.RoundToInt(localPos.y * 100f) * 19349663)
                        ^ (goldGrade * 83492791)
                        ^ (diamondGrade * 19349663)
-                       ^ (sockets * 9973);
+                       ^ (sockets * 9973)
+                       ^ (Random.Range(0, 1 << 20));
 
-            var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = DigVisualKit.MakeWallChunk(goldGrade, bedrock, seed, diamondGrade);
-            sr.sortingOrder = 18;
-            DigVisualKit.ApplyLit(sr);
-            sr.color = Color.white;
+            // 3–6 bigger chips — reads as a rubble heap, not a sparse drop
+            int chips = Random.Range(3, 7);
+            float spread = size * Random.Range(0.42f, 0.72f);
+            float maxChipReach = 0f;
+            for (int i = 0; i < chips; i++)
+            {
+                var chip = new GameObject($"Chip{i}");
+                chip.transform.SetParent(go.transform, false);
+                Vector2 off = Random.insideUnitCircle;
+                if (off.sqrMagnitude < 0.0001f) off = Vector2.right;
+                off = off.normalized * (spread * Random.Range(0.2f, 1f));
+                // Keep a dense core so the pile still looks solid
+                if (i == 0) off *= 0.25f;
+                chip.transform.localPosition = off;
+
+                float sm = size * Random.Range(0.58f, 0.98f);
+                float aspect = Random.Range(0.7f, 1.35f);
+                chip.transform.localScale = new Vector3(sm * aspect, sm / Mathf.Max(0.55f, aspect), 1f);
+                chip.transform.localRotation = Quaternion.Euler(0f, 0f, Random.Range(-55f, 55f));
+                maxChipReach = Mathf.Max(maxChipReach, off.magnitude + sm * 0.45f);
+
+                var sr = chip.AddComponent<SpriteRenderer>();
+                // Rock chips rarely full-gold wash — flecks only unless rich
+                byte chipGold = goldGrade;
+                byte chipDia = diamondGrade;
+                if (goldGrade > 0 && i > 0 && Random.value > 0.45f)
+                    chipGold = (byte)Mathf.Max(0, goldGrade - 1);
+                if (diamondGrade > 0 && i > 0 && Random.value > 0.5f)
+                    chipDia = 0;
+                sr.sprite = DigVisualKit.MakeLooseRockChunk(chipGold, bedrock, seed + i * 9173, chipDia);
+                sr.sortingOrder = 18 + (i & 1);
+                DigVisualKit.ApplyLit(sr);
+                sr.color = Color.white;
+            }
 
             var pile = go.AddComponent<LoosePile>();
             pile.Mass = mass;
             pile.GoldGrade = goldGrade;
             pile.DiamondGrade = diamondGrade;
             pile.Sockets = sockets;
-            go.AddComponent<LooseSettle>().Init(localPos, size, ejectFrom);
+            pile.FootprintRadius = Mathf.Max(size * 0.55f, maxChipReach);
+            go.AddComponent<LooseSettle>().Init(localPos, ejectFrom);
 
             if (diamondGrade > 0 || goldGrade > 0)
-                OreShimmer.Attach(go.transform, diamondGrade > 0, goldGrade, diamondGrade, size);
+                OreShimmer.Attach(go.transform, diamondGrade > 0, goldGrade, diamondGrade,
+                    size * 0.85f);
 
             return pile;
         }
@@ -108,7 +141,7 @@ namespace DeepCore.FreeMovement
             Vector2 behind = drillTip - facing.normalized * (cs * 1.35f);
             int cx = Mathf.FloorToInt(behind.x / cs);
             int cy = Mathf.FloorToInt(behind.y / cs);
-            return CellCenter(cx, cy, cs) + Random.insideUnitCircle * (cs * 0.06f);
+            return CellCenter(cx, cy, cs) + Random.insideUnitCircle * (cs * Random.Range(0.16f, 0.34f));
         }
 
         static Vector2 CellCenter(int cx, int cy, float cs) =>
@@ -131,15 +164,18 @@ namespace DeepCore.FreeMovement
         }
 
         /// <summary>
-        /// Place the dug wall cell as a floor pickup at that cell center (exact 1:1).
+        /// Place dug material as a scattered floor pile — not snapped to the cell grid.
         /// </summary>
         public static LoosePile SpawnAtExcavatedCell(Transform parent, Vector2 drillTip,
             int cellX, int cellY, TerrainCell cell, float cellSize)
         {
             float cs = Mathf.Max(0.01f, cellSize);
             Vector2 land = CellCenter(cellX, cellY, cs);
-            // Tiny jitter only — keep footprint reading as the dug cell
-            land += Random.insideUnitCircle * (cs * 0.04f);
+            // Broad scatter so piles don't telegraph the tile lattice
+            land += Random.insideUnitCircle * (cs * Random.Range(0.12f, 0.32f));
+            Vector2 away = land - drillTip;
+            if (away.sqrMagnitude > 0.0001f)
+                land += away.normalized * (cs * Random.Range(0.02f, 0.12f));
             return Spawn(parent, null, land, cell.Mass, cell.GoldGrade, cs,
                 ejectFrom: drillTip, sockets: cell.Sockets, diamondGrade: cell.DiamondGrade);
         }
@@ -202,25 +238,24 @@ namespace DeepCore.FreeMovement
             return p.transform.localPosition;
         }
 
-        /// <summary>True if standing on / brushing a loose rock chunk on the floor.</summary>
+        /// <summary>True if standing on / brushing a loose rock heap on the floor.</summary>
         public static bool IsOnLoose(Vector2 terrainPos, float bodyRadius = 0.12f)
         {
-            float hit = bodyRadius + 0.1f;
-            float hit2 = hit * hit;
             for (int i = 0; i < Active.Count; i++)
             {
                 var p = Active[i];
                 if (p == null) continue;
                 Vector2 pp = PileTerrainPos(p);
-                if ((pp - terrainPos).sqrMagnitude <= hit2)
+                float hit = bodyRadius + Mathf.Max(0.1f, p.FootprintRadius * 0.85f);
+                if ((pp - terrainPos).sqrMagnitude <= hit * hit)
                     return true;
             }
             return false;
         }
 
-        /// <summary>1 on clear floor, 0.5 when walking over loose rock.</summary>
+        /// <summary>1 on clear floor, ~0.45 when walking through loose rubble.</summary>
         public static float SpeedMulAt(Vector2 terrainPos, float bodyRadius = 0.12f) =>
-            IsOnLoose(terrainPos, bodyRadius) ? 0.5f : 1f;
+            IsOnLoose(terrainPos, bodyRadius) ? 0.45f : 1f;
 
         public static void ClearAllClaims()
         {
@@ -258,25 +293,22 @@ namespace DeepCore.FreeMovement
         float _t;
         Vector2 _start;
         float _spin;
-        float _endScale;
+        float _sizeHint;
 
-        public void Init(Vector2 targetLocal, float size, Vector2? ejectFrom = null)
+        public void Init(Vector2 targetLocal, Vector2? ejectFrom = null)
         {
             _target = targetLocal;
-            _endScale = size;
+            _sizeHint = 0.12f;
             if (ejectFrom.HasValue)
             {
-                // Burst out from drill tip toward landing — same visual mass as settled rock
-                _start = ejectFrom.Value + Random.insideUnitCircle * (size * 0.12f);
+                _start = ejectFrom.Value + Random.insideUnitCircle * 0.04f;
             }
             else
             {
-                _start = targetLocal + Random.insideUnitCircle * (size * 0.55f) + Vector2.up * (size * 0.35f);
+                _start = targetLocal + Random.insideUnitCircle * 0.08f + Vector2.up * 0.05f;
             }
             transform.localPosition = _start;
-            // Same footprint as the dug wall cell the whole flight
-            transform.localScale = Vector3.one * _endScale;
-            _spin = Random.Range(-90f, 90f);
+            _spin = Random.Range(-160f, 160f);
             _t = 0f;
         }
 
@@ -284,18 +316,15 @@ namespace DeepCore.FreeMovement
         {
             _t += Time.deltaTime * 5.2f;
             float u = Mathf.Clamp01(_t);
-            // Fast out of tip, ease into ground
             float ease = 1f - (1f - u) * (1f - u);
             Vector2 p = Vector2.Lerp(_start, _target, ease);
-            float lift = Mathf.Sin(u * Mathf.PI) * (_endScale * 0.18f);
+            float lift = Mathf.Sin(u * Mathf.PI) * (_sizeHint * 1.4f);
             p.y += lift * 0.55f;
             transform.localPosition = p;
-            transform.localScale = Vector3.one * _endScale;
             transform.Rotate(0f, 0f, _spin * Time.deltaTime * (1f - u));
             if (u >= 1f)
             {
                 transform.localPosition = _target;
-                transform.localScale = Vector3.one * _endScale;
                 Destroy(this);
             }
         }

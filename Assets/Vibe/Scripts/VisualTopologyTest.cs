@@ -296,7 +296,7 @@ namespace DeepCore.Vibe
             if (cam.GetComponent<TrackpadCameraController>() == null)
                 cam.gameObject.AddComponent<TrackpadCameraController>();
 
-            foreach (var existing in FindObjectsByType<Light2D>(FindObjectsSortMode.None))
+            foreach (var existing in FindObjectsByType<Light2D>())
             {
                 if (existing.lightType != Light2D.LightType.Global) continue;
                 existing.intensity = globalLightIntensity;

@@ -10,10 +10,10 @@ namespace DeepCore.FreeMovement
     public sealed class ProspectorDrySpellTracker
     {
         /// <summary>OnShift game-hours without Discovery before the first signal.</summary>
-        public const float FirstSignalAfterOnShiftHours = 32f;
+        public const float FirstSignalAfterOnShiftHours = 24f;
 
         /// <summary>OnShift game-hours between subsequent dry-spell signals while still dry.</summary>
-        public const float RepeatGapOnShiftHours = 20f;
+        public const float RepeatGapOnShiftHours = 14f;
 
         /// <summary>Obsolete name — use <see cref="FirstSignalAfterOnShiftHours"/>.</summary>
         public const float FirstSignalAfterGameHours = FirstSignalAfterOnShiftHours;
@@ -21,7 +21,7 @@ namespace DeepCore.FreeMovement
         /// <summary>Obsolete name — use <see cref="RepeatGapOnShiftHours"/>.</summary>
         public const float RepeatGapGameHours = RepeatGapOnShiftHours;
 
-        public const float EventMagnitude = 8f;
+        public const float EventMagnitude = 11f;
         public const string EventSource = "ProspectorDrySpell";
 
         float _dryOnShiftHours;

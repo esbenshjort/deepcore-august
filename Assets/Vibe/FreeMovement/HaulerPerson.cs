@@ -25,8 +25,8 @@ namespace DeepCore.FreeMovement
         float _pickupRadius = 0.55f;
         int _maxCarryPiles = CartSlots;
         float _pickupDuration = 1.15f;     // heave each cell into the cart
-        float _depositBaseDuration = 1.05f;
-        float _depositPerPiece = 0.22f;    // unloading a full cart takes real time
+        float _depositBaseDuration = 0.55f;
+        float _depositPerPiece = 0.55f;    // one-by-one unload, similar cadence to pickup
         float _seekStuckTimer;
         float _claimRecoverTimer;
 
@@ -57,8 +57,8 @@ namespace DeepCore.FreeMovement
         float _gameHours;
 
         // Briefly skip piles we couldn't reach
-        readonly Dictionary<int, float> _softIgnore = new(16);
-        static readonly List<int> _tmpIgnoreKeys = new(8);
+        readonly Dictionary<EntityId, float> _softIgnore = new(16);
+        static readonly List<EntityId> _tmpIgnoreKeys = new(8);
 
         public Vector2 Position => transform.localPosition;
         public DeliveryCalculator Calculator => _calc;
@@ -69,7 +69,7 @@ namespace DeepCore.FreeMovement
             State.Seek => PreferGold ? "SEEK PRECIOUS" : "SEEK",
             State.PickUp => "LOADING",
             State.Return => $"HAUL {_cargoCount}/{CartSlots}",
-            State.Deposit => "UNLOAD",
+            State.Deposit => _cargoCount > 0 ? $"UNLOAD {_cargoCount}" : "UNLOAD",
             _ => "IDLE",
         };
 
@@ -213,23 +213,6 @@ namespace DeepCore.FreeMovement
             ClearCargoSlots();
         }
 
-        public void SoftTeleport(Vector2 pos)
-        {
-            // Keep PreferGold, cargo, and FSM — only drop live pile claim and repath
-            if (_target != null)
-            {
-                _target.Claimed = false;
-                _target = null;
-            }
-            if (_state == State.PickUp)
-                _state = State.Seek;
-            _pickupTimer = 0f;
-            transform.localPosition = pos;
-            InvalidatePath();
-        }
-
-        public void TeleportTo(Vector2 pos) => SoftTeleport(pos);
-
         public void SetCrewVisible(bool on)
         {
             foreach (var r in GetComponentsInChildren<SpriteRenderer>(true))
@@ -359,14 +342,14 @@ namespace DeepCore.FreeMovement
         bool IsIgnored(LoosePile p)
         {
             if (p == null) return true;
-            int id = p.GetInstanceID();
+            EntityId id = p.GetEntityId();
             return _softIgnore.TryGetValue(id, out float until) && until > Time.time;
         }
 
         void SoftIgnore(LoosePile p, float seconds)
         {
             if (p == null) return;
-            _softIgnore[p.GetInstanceID()] = Time.time + seconds;
+            _softIgnore[p.GetEntityId()] = Time.time + seconds;
         }
 
         void TickSeek()
@@ -392,7 +375,7 @@ namespace DeepCore.FreeMovement
                     WorkerStateEventHub.Emit(WorkerStateEvent.Create(
                         AssignedWorkerId,
                         WorkerStateEventType.WorkBlocked,
-                        2.5f,
+                        3.4f,
                         "HaulRouteStuck",
                         JobType.Hauling,
                         ProviderId));
@@ -550,8 +533,8 @@ namespace DeepCore.FreeMovement
             if ((_basecamp - Position).sqrMagnitude < 0.12f * 0.12f)
             {
                 _state = State.Deposit;
-                int pieces = Mathf.Max(_cargoCount, _calc != null ? _calc.CarryPiles : 0);
-                _depositTimer = _depositBaseDuration + pieces * _depositPerPiece;
+                // First piece after a short settle — then one-by-one like loading
+                _depositTimer = _depositBaseDuration * 0.35f;
                 InvalidatePath();
                 return;
             }
@@ -568,7 +551,41 @@ namespace DeepCore.FreeMovement
         {
             _depositTimer -= Time.deltaTime;
             if (_depositTimer > 0f) return;
-            _calc.DepositCarry();
+
+            bool hasCargo = _cargoCount > 0
+                || (_calc != null && (_calc.CarryCellCount > 0 || _calc.CarryPiles > 0));
+            // Prefer cell-accurate one-by-one unload
+            if (_calc != null && _calc.TryDepositOne())
+            {
+                PopCargoSlot();
+                _depositTimer = _depositPerPiece + Random.Range(0.05f, 0.14f);
+                return;
+            }
+
+            // Legacy batch fallback (no cell list)
+            if (hasCargo && _calc != null && _calc.CarryPiles > 0)
+            {
+                _calc.DepositCarry();
+                ClearCargoSlots();
+            }
+
+            FinishDeposit();
+        }
+
+        void PopCargoSlot()
+        {
+            if (_cargoCount <= 0) return;
+            int i = _cargoCount - 1;
+            _cargoCount--;
+            var sr = _slotSr[i];
+            if (sr == null) return;
+            sr.gameObject.SetActive(false);
+            sr.sprite = null;
+            sr.transform.localScale = Vector3.one * (_slotLocalScale * 0.55f);
+        }
+
+        void FinishDeposit()
+        {
             ClearCargoSlots();
             LoosePile.ClearAllClaims();
             _softIgnore.Clear();
@@ -704,21 +721,25 @@ namespace DeepCore.FreeMovement
             Vector2 dir = to.normalized;
             Face(dir);
 
-            float step = _moveSpeed * LoosePile.SpeedMulAt(pos, _radius) * Time.deltaTime;
-            if (_infra != null)
-                step *= _infra.TrackSpeedMulAt(pos);
-            step *= WorkerJobDemand.PhysicalMoveMul(_assignedWorker);
-            // Loaded cart is a grind — fuller = slower (full cart ≈ 40% walk speed)
+            float load01 = 0f;
             if (_calc != null && _calc.CarryPiles > 0)
-            {
-                float load = Mathf.Clamp01(_cargoCount / (float)CartSlots);
-                step *= Mathf.Lerp(0.72f, 0.40f, load);
-            }
-            else if (_state == State.Seek && IsLive(_target))
-            {
-                // Closing on a pile: settle into a careful approach
-                step *= 0.82f;
-            }
+                load01 = Mathf.Clamp01(_cargoCount / (float)CartSlots);
+
+            float speed = WorkerLocomotion.WalkSpeedAt(
+                _assignedWorker,
+                _world,
+                pos,
+                _radius,
+                roleBias: _moveSpeed / WorkerPhysicalProfile.ReferenceWalkSpeed,
+                carriedLoad01: load01,
+                isMoving: true);
+            if (_infra != null)
+                speed *= _infra.TrackSpeedMulAt(pos);
+            // Closing on a pile: settle into a careful approach (role behaviour, not sheet)
+            if (load01 <= 0.001f && _state == State.Seek && IsLive(_target))
+                speed *= 0.82f;
+
+            float step = speed * Time.deltaTime;
 
             float r = _radius;
             if (_stuckFrames > 6) r = _radius * 0.55f;

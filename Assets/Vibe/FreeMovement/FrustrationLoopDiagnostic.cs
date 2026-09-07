@@ -44,7 +44,10 @@ namespace DeepCore.FreeMovement
             log.AppendLine("## Tunables under test");
             log.AppendLine($"- Daytime FrustrationDecayPerGameHour = {WorkerStateDaytimeRecovery.FrustrationDecayPerGameHour}");
             log.AppendLine($"- Sleep FrustrationRelief = {WorkerSleepRecovery.FrustrationRelief}");
-            log.AppendLine($"- ProgressSuccess relief = min(BaseGain×0.28, 0.55)");
+            log.AppendLine($"- ProgressSuccess relief = min(BaseGain×{WorkerStateEventProcessor.ProgressSuccessReliefScale}, {WorkerStateEventProcessor.ProgressSuccessReliefCap})");
+            log.AppendLine($"- WorkBlockedMul={WorkerStateEventProcessor.WorkBlockedMul} RepeatedFailureMul={WorkerStateEventProcessor.RepeatedFailureMul}");
+            log.AppendLine($"- CompoundPerFrustration={WorkerStateEventProcessor.CompoundPerFrustration} Cap={WorkerStateEventProcessor.CompoundMax}");
+            log.AppendLine($"- Sleep FrustrationRelief base={WorkerSleepRecovery.FrustrationRelief} (diminishing when high)");
             log.AppendLine($"- DrySpell first={ProspectorDrySpellTracker.FirstSignalAfterGameHours}h repeat={ProspectorDrySpellTracker.RepeatGapGameHours}h mag={ProspectorDrySpellTracker.EventMagnitude}");
             log.AppendLine();
 

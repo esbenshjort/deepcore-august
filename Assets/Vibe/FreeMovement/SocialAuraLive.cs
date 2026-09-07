@@ -25,6 +25,8 @@ namespace DeepCore.FreeMovement
         public static bool IsEligible(WorkerRuntime wr, SocialPresenceKind presence)
         {
             if (wr?.State == null) return false;
+            if (!wr.State.IsAlive) return false;
+            if (wr.State.Incapacitated) return false;
             if (presence == SocialPresenceKind.Sleeping) return false;
             if (wr.State.NeedsCare) return false;
             if (wr.State.Injury >= InjurySuppressThreshold) return false;
@@ -68,7 +70,8 @@ namespace DeepCore.FreeMovement
             JobType jobB,
             SocialPresenceKind presenceA,
             SocialPresenceKind presenceB,
-            float nowGameHours)
+            float nowGameHours,
+            bool bothInCamp = false)
         {
             if (TrySharedProblem(a, b, nowGameHours))
                 return SocialContext.SharedProblem;
@@ -97,6 +100,15 @@ namespace DeepCore.FreeMovement
                 if (IsCollaborationPair(jobA, jobB))
                     return SocialContext.WorkingTogether;
             }
+
+            // Camp foundation: off-shift (not Operating) + both inside camp radius.
+            // Still resolved by normal Social Aura — may help or harm.
+            if (bothInCamp
+                && presenceA != SocialPresenceKind.Operating
+                && presenceB != SocialPresenceKind.Operating
+                && presenceA != SocialPresenceKind.Sleeping
+                && presenceB != SocialPresenceKind.Sleeping)
+                return SocialContext.Camp;
 
             return SocialContext.IdleNearby;
         }
@@ -170,10 +182,12 @@ namespace DeepCore.FreeMovement
     public sealed class SocialAuraLiveSystem
     {
         readonly SocialAuraWorld _world = new();
+        readonly SocialConflictSystem _conflict = new();
         readonly Dictionary<int, int> _encountersThisShift = new();
         readonly HashSet<long> _knownPairs = new();
         readonly List<SocialEncounterLog> _liveLogs = new(128);
         SocialEncounterLog _lastEncounter;
+        SocialConflictEvent _lastConflict;
         int _shiftIndex;
         bool _bootstrapped;
 
@@ -187,8 +201,11 @@ namespace DeepCore.FreeMovement
 
         public IReadOnlyList<SocialEncounterLog> LiveLogs => _liveLogs;
         public SocialEncounterLog LastEncounter => _lastEncounter;
+        public SocialConflictEvent LastConflict => _lastConflict;
         public SocialAuraWorld World => _world;
+        public SocialConflictSystem Conflict => _conflict;
         public SocialMemoryStore Memory => _world.Memory;
+        public RelationshipTrajectoryStore Trajectory => _world.Trajectory;
         public bool IsBootstrapped => _bootstrapped;
 
         public void Bootstrap(IReadOnlyList<WorkerRuntime> crew)
@@ -254,8 +271,11 @@ namespace DeepCore.FreeMovement
             if (isAsleep)
             {
                 TickOvernightDecay(gameHoursDelta);
+                _conflict.TickOvernight(_world, WorkerStateClock.GameHours, gameHoursDelta);
                 return;
             }
+
+            _conflict.ClearPendingPresent();
 
             int n = crew.Count;
             var eligible = new bool[n];
@@ -307,9 +327,29 @@ namespace DeepCore.FreeMovement
 
                     exposedKeys.Add(pk);
 
+                    bool nearCamp = Vector2.Distance(pos[i], campCenter) <= campRadius
+                                    && Vector2.Distance(pos[j], campCenter) <= campRadius;
                     var ctx = SocialContextLive.Derive(
                         crew[i], crew[j], jobs[i], jobs[j], kinds[i], kinds[j],
-                        WorkerStateClock.GameHours);
+                        WorkerStateClock.GameHours, bothInCamp: nearCamp);
+
+                    // Active argument: divert pressure into conflict beats (game-hour gated)
+                    if (_conflict.HasActiveArgument(idA, idB))
+                    {
+                        float intensity = 0.5f * (
+                            (_world.Get(idA)?.Expression.Intensity ?? 0.5f)
+                            + (_world.Get(idB)?.Expression.Intensity ?? 0.5f));
+                        float gainHint = gameHoursDelta
+                                         * SocialAuraLiveTuning.PressureGainPerGameHour
+                                         * (0.35f + 0.65f * intensity)
+                                         * falloff;
+                        var pair = _world.Pair(idA, idB);
+                        var conflictEv = _conflict.TickActivePair(
+                            _world, idA, idB, WorkerStateClock.GameHours, gainHint, pair);
+                        if (conflictEv != null)
+                            _lastConflict = conflictEv;
+                        continue;
+                    }
 
                     var log = ExposeLive(idA, idB, ctx, gameHoursDelta, falloff);
                     if (log == null) continue;
@@ -324,12 +364,16 @@ namespace DeepCore.FreeMovement
                     if (!PairEncounterCounts.ContainsKey(pk)) PairEncounterCounts[pk] = 0;
                     PairEncounterCounts[pk]++;
 
-                    bool nearCamp = Vector2.Distance(pos[i], campCenter) <= campRadius
-                                    && Vector2.Distance(pos[j], campCenter) <= campRadius;
                     bool commuting = IsCommute(kinds[i]) || IsCommute(kinds[j]);
-                    if (nearCamp) CampEncounters++;
+                    if (ctx == SocialContext.Camp || nearCamp) CampEncounters++;
                     else if (commuting) CommuteEncounters++;
                     else WorkAreaEncounters++;
+
+                    // Round 3: hostile resolve may open a multi-stage argument
+                    var emerged = _conflict.TryEmergeFromEncounter(
+                        _world, log, WorkerStateClock.GameHours);
+                    if (emerged != null)
+                        _lastConflict = emerged;
                 }
             }
 
@@ -389,7 +433,8 @@ namespace DeepCore.FreeMovement
                          * falloff
                          * contextMul
                          * relationMul
-                         * focusDamp;
+                         * focusDamp
+                         * EarlyCrewPressure.PressureGainMul;
 
             pair.InteractionPressure += gain;
             pair.ExposureThisShift += gameHoursDelta;
@@ -406,15 +451,24 @@ namespace DeepCore.FreeMovement
             pair.CooldownRemaining = SocialAuraTuning.CooldownAfterEncounter;
             pair.LastEncounterShift = _shiftIndex;
 
+            var snapAB = RelationshipTrajectoryStore.Capture(_world.Relation(idA, idB));
+            var snapBA = RelationshipTrajectoryStore.Capture(_world.Relation(idB, idA));
             var log = SocialEncounterResolver.Resolve(_world, a, b, context, why);
             if (log != null)
             {
                 pair.PushHistory(log);
                 _encountersThisShift[idA] = encA + 1;
                 _encountersThisShift[idB] = encB + 1;
-                SocialMemoryRecorder.Record(
-                    _world.Memory, log, WorkerStateClock.GameHours);
+                float t = WorkerStateClock.GameHours;
+                SocialMemoryRecorder.Record(_world.Memory, log, t);
                 SocialRespectApplicator.Apply(_world, log);
+                string src = $"S{log.ShiftIndex}:{log.Action}/{log.Response}";
+                _world.Trajectory.CommitDelta(log.InitiatorId, log.TargetId,
+                    log.InitiatorId == idA ? snapAB : snapBA,
+                    _world.Relation(log.InitiatorId, log.TargetId), t, src, _world.Memory);
+                _world.Trajectory.CommitDelta(log.TargetId, log.InitiatorId,
+                    log.InitiatorId == idA ? snapBA : snapAB,
+                    _world.Relation(log.TargetId, log.InitiatorId), t, src, _world.Memory);
             }
             return log;
         }
@@ -504,7 +558,8 @@ namespace DeepCore.FreeMovement
                 var rel = _world.Relation(focusId, wr.WorkerId);
                 var ctx = SocialContextLive.Derive(
                     focusWr, wr, jobOf(focusId), jobOf(wr.WorkerId),
-                    presenceOf(focusWr), kind, WorkerStateClock.GameHours);
+                    presenceOf(focusWr), kind, WorkerStateClock.GameHours,
+                    bothInCamp: false);
 
                 into.Add(new NearbyDebug
                 {

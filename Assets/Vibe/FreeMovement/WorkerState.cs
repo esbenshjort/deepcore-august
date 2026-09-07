@@ -34,6 +34,20 @@ namespace DeepCore.FreeMovement
         [Header("INJURY")]
         [Range(MeterMin, MeterMax)] [SerializeField] float injury;
         [SerializeField] bool needsCare;
+        [SerializeField] bool incapacitated;
+        [SerializeField] float incapacitatedGameHours = -1f;
+        [SerializeField] string incapacitatedCause = "";
+        [SerializeField] bool trappedFromCamp;
+
+        [Header("VITALITY")]
+        [SerializeField] bool isAlive = true;
+        [SerializeField] float deathGameHours = -1f;
+        [SerializeField] int killedByWorkerId;
+
+        /// <summary>Care threshold — Steward / Triage later.</summary>
+        public const float CareInjuryThreshold = 60f;
+        /// <summary>Critical injury band before rare lethal outcomes.</summary>
+        public const float CriticalInjuryThreshold = 75f;
 
         /// <summary>
         /// Current physical reserve. Max is derived by consumers from WorkerStats.Stamina
@@ -120,6 +134,31 @@ namespace DeepCore.FreeMovement
             set => needsCare = value;
         }
 
+        /// <summary>
+        /// Trauma prevents independent action — distinct from NeedsCare / Dead.
+        /// Remains at physical location; never teleported.
+        /// </summary>
+        public bool Incapacitated => incapacitated;
+
+        public float IncapacitatedGameHours => incapacitatedGameHours;
+        public string IncapacitatedCause => incapacitatedCause ?? "";
+
+        /// <summary>True when no open tunnel path from camp (collapse debris).</summary>
+        public bool TrappedFromCamp
+        {
+            get => trappedFromCamp;
+            set => trappedFromCamp = value;
+        }
+
+        /// <summary>False after a lethal social incident. Never auto-revives.</summary>
+        public bool IsAlive => isAlive;
+
+        /// <summary>Game-hours of death, or −1 if alive.</summary>
+        public float DeathGameHours => deathGameHours;
+
+        /// <summary>WorkerId of killer when known; 0 if unset.</summary>
+        public int KilledByWorkerId => killedByWorkerId;
+
         public static float ClampMeter(float value) => Mathf.Clamp(value, MeterMin, MeterMax);
 
         /// <summary>Factory with conservative defaults (not perfect).</summary>
@@ -142,6 +181,51 @@ namespace DeepCore.FreeMovement
             injury = 0f;
             needsCare = false;
             exhaustionLatched = false;
+            ClearIncapacitated();
+            trappedFromCamp = false;
+            // Do not revive — dead workers stay dead across spawn-default resets.
+        }
+
+        public void MarkIncapacitated(float gameHours, string cause)
+        {
+            if (!isAlive) return;
+            incapacitated = true;
+            incapacitatedGameHours = gameHours;
+            incapacitatedCause = cause ?? "";
+            needsCare = true;
+            isResting = false;
+        }
+
+        public void ClearIncapacitated()
+        {
+            incapacitated = false;
+            incapacitatedGameHours = -1f;
+            incapacitatedCause = "";
+        }
+
+        /// <summary>Lethal social outcome. Persistent; no respawn.</summary>
+        public void MarkDead(float gameHours, int killedBy = 0)
+        {
+            if (!isAlive) return;
+            isAlive = false;
+            deathGameHours = gameHours;
+            killedByWorkerId = killedBy;
+            needsCare = false;
+            isResting = false;
+            ClearIncapacitated();
+            Injury = MeterMax;
+        }
+
+        /// <summary>DEV / audit only — never call from gameplay.</summary>
+        public void DevRevive()
+        {
+            isAlive = true;
+            deathGameHours = -1f;
+            killedByWorkerId = 0;
+            injury = 0f;
+            needsCare = false;
+            ClearIncapacitated();
+            trappedFromCamp = false;
         }
 
         /// <summary>Balance harness / debug wipe of mutable meters (keeps defaults for new fields).</summary>
@@ -152,9 +236,12 @@ namespace DeepCore.FreeMovement
 
         public float AddInjury(float amount)
         {
+            if (!isAlive) return 0f;
             if (amount <= 0f) return 0f;
             float before = injury;
             Injury = injury + amount;
+            if (injury >= CareInjuryThreshold)
+                needsCare = true;
             return injury - before;
         }
 
@@ -215,10 +302,23 @@ namespace DeepCore.FreeMovement
             FocusState = Mathf.Lerp(FocusState, WorkerSleepRecovery.FocusStateBaseline,
                 WorkerSleepRecovery.FocusStateLerp * t);
 
-            ReduceFrustration(WorkerSleepRecovery.FrustrationRelief * t);
+            ReduceFrustration(EffectiveSleepFrustrationRelief(Frustration) * t);
 
             Morale = Mathf.Lerp(Morale, WorkerSleepRecovery.MoraleBaseline,
                 WorkerSleepRecovery.MoraleLerp * t);
+        }
+
+        /// <summary>
+        /// Sleep takes the edge off but does not wipe a rotten shift — high Frustration
+        /// gets diminishing overnight relief.
+        /// </summary>
+        public static float EffectiveSleepFrustrationRelief(float currentFrustration)
+        {
+            float baseRelief = WorkerSleepRecovery.FrustrationRelief;
+            if (currentFrustration <= 25f) return baseRelief;
+            if (currentFrustration <= 50f) return baseRelief * 0.75f;
+            if (currentFrustration <= 75f) return baseRelief * 0.5f;
+            return baseRelief * 0.32f;
         }
     }
 
@@ -238,7 +338,7 @@ namespace DeepCore.FreeMovement
         public const float FocusStateLerp = 0.50f;
 
         /// <summary>Frustration points removed over a full night (partial — residue allowed).</summary>
-        public const float FrustrationRelief = 3f;
+        public const float FrustrationRelief = 2.2f;
 
         /// <summary>Morale soft target — barely used.</summary>
         public const float MoraleBaseline = 55f;

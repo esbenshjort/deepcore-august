@@ -132,6 +132,8 @@ namespace DeepCore.FreeMovement
         bool[] _gasRevealed;
         /// <summary>Gas cells that may show floor / FX (grows from breach mouth as you enter).</summary>
         bool[] _gasSeen;
+        /// <summary>Collapse debris HP — &gt;0 blocks IsTunnelOpen / pathfinding until cleared.</summary>
+        byte[] _debrisHp;
         public event Action Changed;
         /// <summary>Inclusive dirty cell rect after a change batch.</summary>
         public event Action<int, int, int, int> RegionChanged;
@@ -392,13 +394,43 @@ namespace DeepCore.FreeMovement
             int i = y * Width + x;
             if (_gas != null && _gas[i] && (_gasRevealed == null || !_gasRevealed[i]))
                 return false;
+            if (_debrisHp != null && _debrisHp[i] > 0)
+                return false;
             return true;
         }
 
-        /// <summary>True if this cell still blocks movement (solid, damaged, or unfinished).</summary>
+        public bool HasBlockingDebris(int x, int y)
+        {
+            if (!InBounds(x, y) || _debrisHp == null) return false;
+            return _debrisHp[y * Width + x] > 0;
+        }
+
+        public byte GetDebrisHp(int x, int y)
+        {
+            if (!InBounds(x, y) || _debrisHp == null) return 0;
+            return _debrisHp[y * Width + x];
+        }
+
+        /// <summary>Place or update blocking collapse debris. hp==0 clears.</summary>
+        public void SetBlockingDebris(int x, int y, byte hp)
+        {
+            if (!InBounds(x, y)) return;
+            if (_debrisHp == null)
+                _debrisHp = new byte[Width * Height];
+            int i = y * Width + x;
+            byte prev = _debrisHp[i];
+            _debrisHp[i] = hp;
+            if (prev != hp)
+                Notify(x, y);
+        }
+
+        public void ClearBlockingDebris(int x, int y) => SetBlockingDebris(x, y, 0);
+
+        /// <summary>True if this cell still blocks movement (solid, damaged, unfinished, or collapse debris).</summary>
         public bool IsMovementBlocker(int x, int y)
         {
             if (!InBounds(x, y)) return true;
+            if (_debrisHp != null && _debrisHp[y * Width + x] > 0) return true;
             ref readonly var c = ref _cells[y * Width + x];
             if (c.Phase != TerrainPhase.Excavated) return true;
             return c.Hp > 0;

@@ -10,7 +10,8 @@ namespace DeepCore.FreeMovement
     public sealed class WorkerBanter
     {
         /// <summary>
-        /// Job/context line category (not a person identity).
+        /// Speech authorship label only — never drives physical demand, injury
+        /// consequences, work restrictions, or job-stat interpretation.
         /// Formerly named Voice / role personality.
         /// </summary>
         public enum JobContext : byte
@@ -20,6 +21,9 @@ namespace DeepCore.FreeMovement
             Hauling = 2,
             Refining = 3,
             Engineering = 4,
+            /// <summary>Camp / commute / no assignment — speech metadata only.</summary>
+            Unassigned = 5,
+            Steward = 6,
         }
 
         /// <summary>Frozen authorship at TrySay — survives later reassignment.</summary>
@@ -33,6 +37,10 @@ namespace DeepCore.FreeMovement
             public float Until;
             public float AuthoredUnscaledTime;
             public float AuthoredGameHours;
+            /// <summary>True when authored by Social Aura exchange (world bubble eligible).</summary>
+            public bool IsSocial;
+            /// <summary>Presentation valence from resolved social outcome (None for job banter).</summary>
+            public SocialSpeechValence Valence;
         }
 
         readonly Dictionary<int, Speech> _activeByWorker = new();
@@ -81,7 +89,7 @@ namespace DeepCore.FreeMovement
             if (SocialPriorityActive) return false;
             return TrySayInternal(
                 workerId, displayName, context, sourceEvent, gameHours,
-                ShowSeconds, MinGap, clearCooldown: false, options);
+                ShowSeconds, MinGap, clearCooldown: false, isSocial: false, options);
         }
 
         /// <summary>
@@ -94,6 +102,20 @@ namespace DeepCore.FreeMovement
             JobContext context,
             string sourceEvent,
             float gameHours,
+            params string[] options) =>
+            TrySaySocial(workerId, displayName, context, sourceEvent, gameHours,
+                SocialSpeechValence.Neutral, options);
+
+        /// <summary>
+        /// Social Aura / conflict speech with presentation valence from the resolved outcome.
+        /// </summary>
+        public bool TrySaySocial(
+            int workerId,
+            string displayName,
+            JobContext context,
+            string sourceEvent,
+            float gameHours,
+            SocialSpeechValence valence,
             params string[] options)
         {
             if (workerId <= 0) return false;
@@ -103,7 +125,8 @@ namespace DeepCore.FreeMovement
             // Short gap so target can speak soon after initiator in a queued exchange
             return TrySayInternal(
                 workerId, displayName, context, sourceEvent, gameHours,
-                SocialShowSeconds, gapSeconds: 1.6f, clearCooldown: true, options);
+                SocialShowSeconds, gapSeconds: 1.6f, clearCooldown: true, isSocial: true,
+                valence, options);
         }
 
         bool TrySayInternal(
@@ -115,6 +138,22 @@ namespace DeepCore.FreeMovement
             float showSeconds,
             float gapSeconds,
             bool clearCooldown,
+            bool isSocial,
+            string[] options) =>
+            TrySayInternal(workerId, displayName, context, sourceEvent, gameHours,
+                showSeconds, gapSeconds, clearCooldown, isSocial, SocialSpeechValence.None, options);
+
+        bool TrySayInternal(
+            int workerId,
+            string displayName,
+            JobContext context,
+            string sourceEvent,
+            float gameHours,
+            float showSeconds,
+            float gapSeconds,
+            bool clearCooldown,
+            bool isSocial,
+            SocialSpeechValence valence,
             string[] options)
         {
             if (workerId <= 0) return false;
@@ -143,6 +182,10 @@ namespace DeepCore.FreeMovement
                 Until = t + showSeconds,
                 AuthoredUnscaledTime = t,
                 AuthoredGameHours = gameHours,
+                IsSocial = isSocial,
+                Valence = isSocial
+                    ? (valence == SocialSpeechValence.None ? SocialSpeechValence.Neutral : valence)
+                    : SocialSpeechValence.None,
             };
             _activeByWorker[workerId] = speech;
             _cooldownUntil[workerId] = t + gapSeconds;
@@ -165,6 +208,8 @@ namespace DeepCore.FreeMovement
             JobContext.Hauling => "Hauling",
             JobContext.Refining => "Refining",
             JobContext.Engineering => "Engineering",
+            JobContext.Unassigned => "Unassigned",
+            JobContext.Steward => "Steward",
             _ => "?",
         };
     }

@@ -371,6 +371,10 @@ namespace DeepCore.FreeMovement
             t == SocialMemoryType.LetMeDown
             || t == SocialMemoryType.BlamedMe
             || t == SocialMemoryType.FailedTogether
-            || t == SocialMemoryType.InsultedMe;
+            || t == SocialMemoryType.InsultedMe
+            || t == SocialMemoryType.HurtBy
+            || t == SocialMemoryType.WitnessedViolence
+            || t == SocialMemoryType.KilledBy
+            || t == SocialMemoryType.WitnessedDeath;
     }
 }

@@ -294,7 +294,7 @@ namespace DeepCore.FreeMovement
 
         void EnsureGlobalLight()
         {
-            foreach (var l in FindObjectsByType<Light2D>(FindObjectsSortMode.None))
+            foreach (var l in FindObjectsByType<Light2D>())
             {
                 if (l.lightType != Light2D.LightType.Global) continue;
                 l.intensity = 0.012f; // near-black mine — lanterns only

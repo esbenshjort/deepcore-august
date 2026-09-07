@@ -1,0 +1,67 @@
+=== commute ===
+exit=1
+file=system_integration_cleanup_20260907_101606.md
+- PASS  1. One living worker = one avatar
+- PASS  2. Identity/state survives reassignment — OK
+- PASS  3. Assignment does not own person identity
+- PASS  4. EnterOnShift documents no SoftTeleport hosts
+- PASS  4b. BeginHeadingOut does not SoftArriveAllWork
+- PASS  5. SoftArriveAllHome removed (no normal home teleport API)
+- PASS  5b. SoftArriveAllWork only ForceBuild/audit
+- FAIL  6. Seated audit crew OnShift Operating for excavator
+
+=== body ===
+exit=0
+file=persistent_worker_body_v1_20260907_102150.md
+- PASS  IsMachineCabinJob(Excavation)
+- PASS  IsMachineCabinJob(Prospecting) false
+- PASS  ExcavatorCabin exit offset non-zero
+- PASS  SetOperatorBodyVisible(false) disables Body sprite
+- PASS  SetOperatorBodyVisible(true) enables Body sprite
+- PASS  Enter cabin hides avatar
+- PASS  Enter sets FollowingProviderId
+- PASS  Exit shows avatar
+
+=== crew ===
+exit=0
+file=crew_cycle_latest.md
+- PASS  Default 8h work — h=8
+- PASS  Default band NORMAL
+- PASS  8h sleep estimate near preferred — sleep=7.5
+- PASS  8h has camp/free surplus — camp=7
+- PASS  10h OVERTIME band
+- PASS  12h HEAVY band
+- PASS  Long commute shrinks sleep — sleep=5.7
+- PASS  Sleep estimate positive at 8h — sleep=7.5
+
+=== debris ===
+exit=1
+file=debris_collapse_v1_latest.md
+- PASS  TunnelCollapseSystem present
+- PASS  CollapseInjuryResolver present
+- PASS  FallingDebrisFx present
+- PASS  Debris blocks IsTunnelOpen
+- PASS  IsMovementBlocker includes debris
+- PASS  WorkerState.Incapacitated
+- PASS  TrappedFromCamp flag
+- PASS  Roster Kind.Incapacitated
+
+=== v11 ===
+exit=1
+file=v11_lock_audit_latest.md
+PASS: 73
+FAIL: 8
+## VERDICT: B. V1.1 NOT READY
+
+=== integ ===
+exit=0
+file=system_integration_cleanup_latest.md
+- PASS  1. One living worker = one avatar
+- PASS  2. Identity/state survives reassignment — OK
+- PASS  3. Assignment does not own person identity
+- PASS  4. EnterOnShift documents no SoftTeleport hosts
+- PASS  4b. BeginHeadingOut does not SoftArriveAllWork
+- PASS  5. SoftArriveAllHome removed (no normal home teleport API)
+- PASS  5b. SoftArriveAllWork only ForceBuild/audit
+- PASS  6. Seated audit crew OnShift Operating for excavator — phase=OnShift phys=Operating job=Excavation
+

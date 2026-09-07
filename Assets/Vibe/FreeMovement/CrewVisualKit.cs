@@ -52,6 +52,7 @@ namespace DeepCore.FreeMovement
         static Sprite _statusBulb;
         static Sprite _headlampBeam;
         static Sprite _headlampBead;
+        static Sprite[] _offDutyWorkers;
 
         public static Sprite ExcavatorBody
         {
@@ -111,6 +112,24 @@ namespace DeepCore.FreeMovement
                 _refiner = MakeRefiner();
                 return _refiner;
             }
+        }
+
+        /// <summary>
+        /// Off-duty person sprite (WorkerId 1–5 → variants 0–4). Same suit language as on-duty crew.
+        /// </summary>
+        public static Sprite OffDutyForWorker(int workerId)
+        {
+            EnsureOffDutyWorkers();
+            int v = Mathf.Clamp(workerId - 1, 0, _offDutyWorkers.Length - 1);
+            return _offDutyWorkers[v];
+        }
+
+        static void EnsureOffDutyWorkers()
+        {
+            if (_offDutyWorkers != null) return;
+            _offDutyWorkers = new Sprite[5];
+            for (int i = 0; i < 5; i++)
+                _offDutyWorkers[i] = MakeOffDutyWorker(i);
         }
 
         public static Sprite StatusBulb
@@ -213,6 +232,7 @@ namespace DeepCore.FreeMovement
             var anim = root.GetComponent<DrillerVisual>();
             if (anim == null) anim = root.AddComponent<DrillerVisual>();
             anim.Init(worker, drill.transform, body.transform, bulbs);
+            FootstepDustFx.Attach(root.transform);
         }
 
         public static void AttachProspector(Transform facingRoot, out Light2D[] bulbs)
@@ -222,8 +242,8 @@ namespace DeepCore.FreeMovement
             if (bulbs.Length > 2 && bulbs[2] != null)
             {
                 bulbs[2].color = new Color(0.35f, 1f, 0.45f);
-                bulbs[2].intensity = 0.14f;
-                bulbs[2].pointLightOuterRadius = 0.16f;
+                bulbs[2].intensity = 0.32f;
+                bulbs[2].pointLightOuterRadius = 0.28f;
             }
         }
 
@@ -234,18 +254,19 @@ namespace DeepCore.FreeMovement
             if (bulbs.Length > 0 && bulbs[0] != null)
             {
                 bulbs[0].color = new Color(0.3f, 0.95f, 1f);
-                bulbs[0].intensity = 0.16f;
-                bulbs[0].pointLightOuterRadius = 0.18f;
+                bulbs[0].intensity = 0.38f;
+                bulbs[0].pointLightOuterRadius = 0.32f;
                 var sr = bulbs[0].GetComponent<SpriteRenderer>();
-                if (sr != null) sr.color = new Color(0.45f, 0.95f, 1f, 1f);
+                if (sr != null) sr.color = new Color(0.55f, 0.98f, 1f, 1f);
             }
             // Tablet cyan spill
             if (bulbs.Length > 1 && bulbs[1] != null)
             {
                 bulbs[1].color = new Color(0.3f, 0.9f, 1f);
-                bulbs[1].intensity = 0.12f;
+                bulbs[1].intensity = 0.3f;
+                bulbs[1].pointLightOuterRadius = 0.28f;
                 var sr = bulbs[1].GetComponent<SpriteRenderer>();
-                if (sr != null) sr.color = new Color(0.4f, 0.9f, 1f, 0.95f);
+                if (sr != null) sr.color = new Color(0.5f, 0.95f, 1f, 1f);
             }
         }
 
@@ -296,6 +317,53 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        /// <summary>Camp steward — soft green care / kitchen lamp language.</summary>
+        public static void AttachSteward(Transform facingRoot, out Light2D[] bulbs)
+        {
+            bulbs = AttachCrewBody(facingRoot, OffDutyForWorker(6), 0.54f, EngineerBulbLocals);
+            if (bulbs.Length > 0 && bulbs[0] != null)
+            {
+                bulbs[0].color = new Color(0.45f, 1f, 0.55f);
+                bulbs[0].intensity = 0.32f;
+                bulbs[0].pointLightOuterRadius = 0.28f;
+            }
+            var body = facingRoot.Find("Body");
+            if (body != null)
+            {
+                var go = new GameObject("StewardLamp");
+                go.transform.SetParent(body, false);
+                go.transform.localPosition = new Vector2(0.06f, -0.04f);
+                var light = go.AddComponent<Light2D>();
+                DigVisualKit.ConfigurePointLight(light,
+                    new Color(0.55f, 1f, 0.65f),
+                    intensity: 0.16f,
+                    outer: 0.24f,
+                    inner: 0.02f,
+                    shadows: false,
+                    falloff: 0.8f);
+            }
+        }
+
+        /// <summary>
+        /// Off-duty walking presence — hard-hat crew without role tools.
+        /// </summary>
+        public static SpriteRenderer AttachOffDuty(Transform root, int workerId)
+        {
+            var body = new GameObject("Body");
+            body.transform.SetParent(root, false);
+            body.transform.localPosition = Vector3.zero;
+            body.transform.localScale = Vector3.one * 0.54f;
+            var sr = body.AddComponent<SpriteRenderer>();
+            sr.sprite = OffDutyForWorker(workerId);
+            sr.sortingOrder = 38;
+            DigVisualKit.ApplyLit(sr);
+
+            AttachHeadlamp(body.transform, new Vector2(0f, 0.11f));
+            AttachStatusBulb(body.transform, new Vector2(-0.08f, -0.02f), 0, green: true);
+            AttachStatusBulb(body.transform, new Vector2(0.08f, -0.02f), 1, green: true);
+            return sr;
+        }
+
         static Light2D[] AttachCrewBody(Transform facingRoot, Sprite sprite, float scale, Vector2[] bulbLocals)
         {
             var body = new GameObject("Body");
@@ -312,6 +380,9 @@ namespace DeepCore.FreeMovement
             for (int i = 0; i < bulbLocals.Length; i++)
                 bulbs[i] = AttachStatusBulb(body.transform, bulbLocals[i], i, green: true);
             bulbs[bulbLocals.Length] = lamp;
+
+            // Walking people kick a whisper of floor dust
+            FootstepDustFx.Attach(facingRoot);
             return bulbs;
         }
 
@@ -453,7 +524,7 @@ namespace DeepCore.FreeMovement
             var go = new GameObject($"StatusBulb_{index}");
             go.transform.SetParent(body, false);
             go.transform.localPosition = local;
-            go.transform.localScale = Vector3.one * 0.038f;
+            go.transform.localScale = Vector3.one * 0.048f;
 
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = StatusBulb;
@@ -461,17 +532,30 @@ namespace DeepCore.FreeMovement
             var sh = Shader.Find("Sprites/Default");
             if (sh != null) sr.sharedMaterial = new Material(sh);
             sr.color = green
-                ? new Color(0.4f, 1f, 0.5f, 0.9f)
-                : new Color(0.45f, 0.85f, 1f, 1f);
+                ? new Color(0.45f, 1f, 0.55f, 1f)
+                : new Color(0.5f, 0.95f, 1f, 1f);
+
+            // Soft bloom halo behind the LED (reads as neon in the dark).
+            var halo = new GameObject("Halo");
+            halo.transform.SetParent(go.transform, false);
+            halo.transform.localPosition = Vector3.zero;
+            halo.transform.localScale = Vector3.one * 2.4f;
+            var hsr = halo.AddComponent<SpriteRenderer>();
+            hsr.sprite = DigVisualKit.LanternGlow;
+            hsr.sortingOrder = 41;
+            if (sh != null) hsr.sharedMaterial = new Material(sh);
+            hsr.color = green
+                ? new Color(0.25f, 1f, 0.4f, 0.42f)
+                : new Color(0.25f, 0.85f, 1f, 0.4f);
 
             var light = go.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(light,
-                green ? new Color(0.35f, 1f, 0.45f) : new Color(0.4f, 0.85f, 1f),
-                intensity: green ? 0.09f : 0.2f,
-                outer: green ? 0.1f : 0.26f,
-                inner: 0.006f,
+                green ? new Color(0.35f, 1f, 0.45f) : new Color(0.4f, 0.9f, 1f),
+                intensity: green ? 0.28f : 0.4f,
+                outer: green ? 0.24f : 0.36f,
+                inner: 0.012f,
                 shadows: false,
-                falloff: 0.9f);
+                falloff: 0.82f);
             return light;
         }
 
@@ -1218,6 +1302,118 @@ namespace DeepCore.FreeMovement
             LocalDot(48, 61, BlueCore);
 
             SoftShade(tex, s, 48, 24, 10, 10, MoltenCore, 0.08f);
+
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.45f), s);
+        }
+
+        // ——— Off-duty person variants (same base suit as role sprites) ———
+
+        static Sprite MakeOffDutyWorker(int variant)
+        {
+            const int s = 96;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+            Clear(tex, s);
+
+            PaintCrewBase(tex, s, includeBeltYellowCans: variant == 2 || variant == 4);
+
+            void LocalDisc(float cx, float cy, float rx, float ry, Color fill, Color? edge = null) =>
+                Disc(tex, s, cx, cy, rx, ry, fill, edge);
+            void LocalBox(int x0, int y0, int w, int h, Color c) => Box(tex, s, x0, y0, w, h, c);
+            void LocalDot(int x, int y, Color c) => Dot(tex, s, x, y, c);
+
+            Color accent = variant switch
+            {
+                0 => Cyan,      // Lewis
+                1 => OrangeHi,  // Mara
+                2 => Green,     // Kowalski
+                3 => new Color(0.72f, 0.52f, 1f), // Elena
+                _ => new Color(1f, 0.42f, 0.28f), // Viktor
+            };
+            Color accentCore = Color.Lerp(accent, Color.white, 0.45f);
+
+            // Helmet identity stripe
+            LocalBox(40, 50, 16, 2, accent);
+            LocalDot(48, 51, accentCore);
+
+            // Soft shoulder pads (off-duty still looks equipped)
+            LocalDisc(26, 46, 8, 7, SuitDeep, Outline);
+            LocalDisc(26, 46, 6, 5.5f, SuitHi, null);
+            LocalDisc(70, 46, 8, 7, SuitDeep, Outline);
+            LocalDisc(70, 46, 6, 5.5f, SuitHi, null);
+            Weather(tex, s, 20, 40, 16, 16, 3 + variant);
+            Weather(tex, s, 62, 40, 16, 16, 7 + variant);
+
+            switch (variant)
+            {
+                case 0: // radio / headset
+                    LocalDisc(34, 30, 9, 8, Charcoal, Outline);
+                    LocalDisc(34, 30, 7, 6, MetalDeep, null);
+                    LocalBox(31, 27, 6, 3, Metal);
+                    LocalDot(33, 28, accent);
+                    LocalDot(35, 29, GreenCore);
+                    LocalBox(66, 44, 3, 10, MetalDeep);
+                    LocalDisc(67, 55, 3.5f, 3.5f, accent, Outline);
+                    LocalDot(67, 55, accentCore);
+                    Hose(tex, s, 40, 32, 48, 40);
+                    break;
+                case 1: // thermos + clipboard
+                    LocalDisc(32, 32, 4.5f, 8, MetalDeep, Outline);
+                    LocalDisc(32, 32, 3f, 6, Metal, null);
+                    LocalBox(30, 38, 4, 2, OrangeDeep);
+                    LocalDot(32, 30, accent);
+                    LocalBox(60, 34, 12, 16, Charcoal);
+                    LocalBox(61, 35, 10, 14, SuitDeep);
+                    LocalBox(62, 36, 8, 12, new Color(0.12f, 0.14f, 0.16f));
+                    LocalBox(63, 38, 6, 1, accent);
+                    LocalBox(63, 41, 6, 1, Metal);
+                    LocalBox(63, 44, 5, 1, MetalDeep);
+                    break;
+                case 2: // hanging wrench + spare pouch
+                    LocalBox(64, 28, 4, 14, MetalDeep);
+                    LocalBox(62, 26, 8, 4, Metal);
+                    LocalDisc(66, 42, 4, 3, MetalHi, Outline);
+                    LocalDot(66, 42, accent);
+                    LocalDisc(30, 34, 6, 5, SuitDeep, Outline);
+                    LocalBox(28, 32, 4, 5, Charcoal);
+                    LocalDot(29, 34, Green);
+                    LocalDot(29, 34, GreenCore);
+                    Hose(tex, s, 58, 36, 64, 32);
+                    break;
+                case 3: // datapad
+                    LocalBox(58, 40, 16, 14, Outline);
+                    LocalBox(59, 41, 14, 12, Charcoal);
+                    LocalBox(60, 42, 12, 10, Black);
+                    LocalBox(61, 44, 10, 2, accent);
+                    LocalBox(61, 47, 8, 1, Metal);
+                    LocalBox(61, 49, 6, 1, MetalDeep);
+                    LocalDot(70, 44, accentCore);
+                    LocalDisc(32, 34, 5, 6, Charcoal, Outline);
+                    LocalDot(32, 35, accent);
+                    break;
+                default: // canteen + gloves tuck
+                    LocalDisc(66, 32, 6, 8, RedTank, Outline);
+                    LocalDisc(66, 32, 4, 6, RedHi, null);
+                    LocalBox(64, 26, 4, 2, Metal);
+                    LocalDot(66, 30, accent);
+                    LocalDisc(30, 36, 5.5f, 4.5f, Glove, Outline);
+                    LocalDisc(30, 36, 3.5f, 2.5f, Charcoal, null);
+                    LocalBox(42, 30, 12, 3, Charcoal);
+                    LocalBox(44, 31, 8, 1, HazardY);
+                    break;
+            }
+
+            // Re-assert helmet over gear overlaps
+            LocalDisc(48, 52, 12.5f, 11.5f, OrangeDeep, Outline);
+            LocalDisc(48, 52, 10.5f, 9.5f, Orange, null);
+            LocalDisc(48, 53, 7, 6.5f, OrangeHi, null);
+            LocalBox(46, 48, 4, 10, OrangeDeep);
+            LocalBox(47, 49, 2, 8, OrangeHi);
+            LocalBox(40, 50, 16, 2, accent);
+            Weather(tex, s, 38, 42, 20, 20, 19 + variant);
+            LocalBox(46, 60, 5, 4, Charcoal);
+            LocalBox(47, 61, 3, 2, Blue);
+            LocalDot(48, 61, BlueCore);
 
             tex.Apply();
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.45f), s);

@@ -18,6 +18,10 @@ namespace DeepCore.FreeMovement
         InvestigationFailure = 7,
         Injury = 8,
         PhysicalExhaustion = 9,
+        /// <summary>Gradual overtime / schedule pressure — not automatic violence.</summary>
+        OvertimePressure = 10,
+        /// <summary>Manager talk / intervene — modest temporary meter pressure.</summary>
+        ManagerCommunication = 11,
     }
 
     /// <summary>

@@ -18,6 +18,37 @@ namespace DeepCore.FreeMovement
         InsultedMe = 8,
         Apologized = 9,
         TookMySide = 10,
+        /// <summary>Observer was hurt by Target in a fight.</summary>
+        HurtBy = 11,
+        /// <summary>Observer saw Target in a serious fight.</summary>
+        WitnessedViolence = 12,
+        /// <summary>Observer was killed by Target (victim→killer).</summary>
+        KilledBy = 13,
+        /// <summary>Observer saw Target kill someone.</summary>
+        WitnessedDeath = 14,
+        // ——— Manager Communication V1 (observer = worker, target = ManagerId) ———
+        ManagerPraisedMe = 15,
+        ManagerPushedMeTooHard = 16,
+        ManagerGaveMeRecovery = 17,
+        ManagerCriticizedMe = 18,
+        ManagerSupportedMe = 19,
+        ManagerTookTheirSide = 20,
+        ManagerStoppedFight = 21,
+        ManagerIgnoredConflict = 22,
+        // ——— Debris / Collapse V1 ———
+        SurvivedCollapse = 23,
+        WasTrapped = 24,
+        RescuedByWorker = 25,
+        FailedToReachWorker = 26,
+        WitnessedSeriousAccident = 27,
+    }
+
+    /// <summary>Persistence weight — Major survives longest; Ordinary decays fastest.</summary>
+    public enum SocialMemorySignificance : byte
+    {
+        Ordinary = 0,
+        Significant = 1,
+        Major = 2,
     }
 
     /// <summary>One directional memory entry (Observer remembers Target).</summary>
@@ -32,7 +63,19 @@ namespace DeepCore.FreeMovement
         public int TargetId;
         /// <summary>Loose encounter fingerprint (shift + ids + action) — not a live object ref.</summary>
         public string SourceRef;
-        public bool Major;
+        public SocialMemorySignificance Significance;
+
+        /// <summary>Compat: true when Significance is Major.</summary>
+        public bool Major
+        {
+            get => Significance == SocialMemorySignificance.Major;
+            set
+            {
+                if (value) Significance = SocialMemorySignificance.Major;
+                else if (Significance == SocialMemorySignificance.Major)
+                    Significance = SocialMemorySignificance.Significant;
+            }
+        }
 
         public float AgeHours(float nowGameHours) =>
             Mathf.Max(0f, nowGameHours - GameTime);
@@ -48,7 +91,13 @@ namespace DeepCore.FreeMovement
         public const float MeaningfulRelAbs = 1.0f;
         public const float MeaningfulFrAbs = 2.0f;
         public const float MeaningfulMoAbs = 1.4f;
+        public const float SignificantStrengthMin = 0.50f;
         public const float MajorStrengthMin = 0.65f;
+
+        /// <summary>Decay / game-hour by significance (ordinary decays fastest).</summary>
+        public const float DecayOrdinary = 0.022f;
+        public const float DecaySignificant = 0.006f;
+        public const float DecayMajor = 0.0012f;
 
         /// <summary>key: observer&lt;&lt;32|target → list newest/strongest retained.</summary>
         readonly Dictionary<long, List<SocialMemoryEntry>> _byPair = new(64);
@@ -87,8 +136,10 @@ namespace DeepCore.FreeMovement
 
         public void Add(SocialMemoryEntry entry)
         {
-            if (entry == null || entry.ObserverId <= 0 || entry.TargetId <= 0) return;
-            if (entry.ObserverId == entry.TargetId) return;
+            if (entry == null || entry.ObserverId <= 0) return;
+            bool mgrTarget = entry.TargetId == ManagerRelationshipStore.ManagerId;
+            if (!mgrTarget && entry.TargetId <= 0) return;
+            if (!mgrTarget && entry.ObserverId == entry.TargetId) return;
             entry.Strength = Mathf.Clamp01(entry.Strength);
             long k = Key(entry.ObserverId, entry.TargetId);
             if (!_byPair.TryGetValue(k, out var list))
@@ -97,7 +148,7 @@ namespace DeepCore.FreeMovement
                 _byPair[k] = list;
             }
 
-            // Merge same type: keep stronger / refresh time
+            // Merge same type: keep stronger / refresh time; promote significance
             for (int i = 0; i < list.Count; i++)
             {
                 if (list[i].Type != entry.Type) continue;
@@ -107,7 +158,8 @@ namespace DeepCore.FreeMovement
                     list[i].GameTime = entry.GameTime;
                     list[i].Context = entry.Context;
                     list[i].SourceRef = entry.SourceRef;
-                    list[i].Major = entry.Major || list[i].Major;
+                    if (entry.Significance > list[i].Significance)
+                        list[i].Significance = entry.Significance;
                 }
                 else if (entry.GameTime > list[i].GameTime)
                 {
@@ -116,6 +168,8 @@ namespace DeepCore.FreeMovement
                     list[i].GameTime = entry.GameTime;
                     list[i].Context = entry.Context;
                     list[i].SourceRef = entry.SourceRef;
+                    if (entry.Significance > list[i].Significance)
+                        list[i].Significance = entry.Significance;
                 }
                 Trim(list);
                 return;
@@ -123,6 +177,8 @@ namespace DeepCore.FreeMovement
 
             list.Add(entry);
             Trim(list);
+            if (entry.Significance == SocialMemorySignificance.Major)
+                NicknameEvidenceStore.Instance.ObserveMajorSocialMemory(entry);
         }
 
         /// <summary>Audit/DEV: append without type-merge so retention cap can be exercised.</summary>
@@ -143,9 +199,11 @@ namespace DeepCore.FreeMovement
         static void Trim(List<SocialMemoryEntry> list)
         {
             if (list.Count <= MaxPerTarget) return;
-            // Keep strongest, then most recent
+            // Prefer higher significance, then strength, then recency
             list.Sort((a, b) =>
             {
+                int s = ((byte)b.Significance).CompareTo((byte)a.Significance);
+                if (s != 0) return s;
                 int c = b.Strength.CompareTo(a.Strength);
                 if (c != 0) return c;
                 return b.GameTime.CompareTo(a.GameTime);
@@ -154,7 +212,7 @@ namespace DeepCore.FreeMovement
                 list.RemoveAt(list.Count - 1);
         }
 
-        /// <summary>Light strength decay for weak non-major memories. No complex forgetting.</summary>
+        /// <summary>Significance-weighted decay. Major persists much longer; ordinary fades.</summary>
         public void TickDecay(float gameHoursDelta)
         {
             if (gameHoursDelta <= 0f) return;
@@ -164,9 +222,15 @@ namespace DeepCore.FreeMovement
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     var e = list[i];
-                    float rate = e.Major ? 0.002f : (e.Strength >= 0.55f ? 0.008f : 0.02f);
+                    float rate = e.Significance switch
+                    {
+                        SocialMemorySignificance.Major => DecayMajor,
+                        SocialMemorySignificance.Significant => DecaySignificant,
+                        _ => DecayOrdinary,
+                    };
                     e.Strength = Mathf.Max(0f, e.Strength - rate * gameHoursDelta);
-                    if (e.Strength < 0.04f && !e.Major)
+                    // Majors never purge from decay alone; significant/ordinary may.
+                    if (e.Strength < 0.04f && e.Significance != SocialMemorySignificance.Major)
                         list.RemoveAt(i);
                 }
             }
@@ -180,11 +244,22 @@ namespace DeepCore.FreeMovement
                 into.Add(src[i]);
             into.Sort((a, b) =>
             {
+                int s = ((byte)b.Significance).CompareTo((byte)a.Significance);
+                if (s != 0) return s;
                 int c = b.Strength.CompareTo(a.Strength);
                 return c != 0 ? c : b.GameTime.CompareTo(a.GameTime);
             });
             while (into.Count > max)
                 into.RemoveAt(into.Count - 1);
+        }
+
+        public static SocialMemorySignificance ClassifySignificance(float strength, bool forceMajor)
+        {
+            if (forceMajor || strength >= MajorStrengthMin)
+                return SocialMemorySignificance.Major;
+            if (strength >= SignificantStrengthMin)
+                return SocialMemorySignificance.Significant;
+            return SocialMemorySignificance.Ordinary;
         }
     }
 
@@ -405,7 +480,7 @@ namespace DeepCore.FreeMovement
                 GameTime = gameHours,
                 Context = ctx,
                 SourceRef = src,
-                Major = major || strength >= SocialMemoryStore.MajorStrengthMin,
+                Significance = SocialMemoryStore.ClassifySignificance(strength, major),
             });
         }
     }

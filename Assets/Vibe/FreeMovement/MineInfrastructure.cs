@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 namespace DeepCore.FreeMovement
 {
@@ -37,6 +38,8 @@ namespace DeepCore.FreeMovement
         readonly List<Vector2> _lanternWorld = new(32);
         readonly List<Vector2Int> _supportCells = new(48);
         readonly List<Vector2> _supportWorld = new(48);
+        readonly List<float> _supportQuality = new(48);
+        readonly List<float> _supportCondition = new(48);
         readonly Dictionary<long, float> _excavateHours = new(512);
         readonly List<Vector2Int> _proposedScratch = new(64);
         readonly List<Vector2Int> _corridor = new(1024);
@@ -48,6 +51,7 @@ namespace DeepCore.FreeMovement
         Transform _lanternRoot;
         Transform _supportRoot;
         Sprite _pillarSprite;
+        Sprite _pillarBulbSprite;
         FreeWorkerController _excavator;
         Vector2 _dropWorld;
         bool _hasDrop;
@@ -84,6 +88,7 @@ namespace DeepCore.FreeMovement
             if (lanternRoot != null && lanternRoot.parent != null)
                 _supportRoot.SetParent(lanternRoot.parent, false);
             _pillarSprite = MakePillarSprite();
+            _pillarBulbSprite = MakePillarBulbSprite();
             _world.RegionChanged += OnRegionChanged;
         }
 
@@ -478,7 +483,7 @@ namespace DeepCore.FreeMovement
             return NearestSupportDist(world) >= need * 0.9f;
         }
 
-        public bool TryBuildSupport(int x, int y)
+        public bool TryBuildSupport(int x, int y, float quality01 = 0.8f)
         {
             Vector2Int left, right;
             if (_hasPendingPair)
@@ -496,9 +501,39 @@ namespace DeepCore.FreeMovement
             Vector2 mid = (_world.CellCenter(left.x, left.y) + _world.CellCenter(right.x, right.y)) * 0.5f;
             _supportCells.Add(new Vector2Int(x, y));
             _supportWorld.Add(mid);
+            _supportQuality.Add(Mathf.Clamp(quality01, 0.35f, 1.15f));
+            _supportCondition.Add(1f);
             SpawnPillarVisual(left.x, left.y);
             SpawnPillarVisual(right.x, right.y);
             return true;
+        }
+
+        /// <summary>Quality of nearest support (0 if none). Used by collapse stability.</summary>
+        public float NearestSupportQuality01(Vector2 worldPos)
+        {
+            if (_supportWorld.Count == 0) return 0f;
+            float best = float.MaxValue;
+            int bestI = -1;
+            for (int i = 0; i < _supportWorld.Count; i++)
+            {
+                float d = Vector2.Distance(_supportWorld[i], worldPos);
+                if (d < best) { best = d; bestI = i; }
+            }
+            if (bestI < 0 || bestI >= _supportQuality.Count) return 0.75f;
+            float cond = bestI < _supportCondition.Count ? _supportCondition[bestI] : 1f;
+            return Mathf.Clamp01(_supportQuality[bestI] * cond);
+        }
+
+        public void DamageSupportConditionNear(Vector2 epicenter, float amount)
+        {
+            if (amount <= 0f) return;
+            float r2 = (SupportRadiusWorld * 2.2f) * (SupportRadiusWorld * 2.2f);
+            for (int i = 0; i < _supportWorld.Count; i++)
+            {
+                if ((_supportWorld[i] - epicenter).sqrMagnitude > r2) continue;
+                if (i >= _supportCondition.Count) continue;
+                _supportCondition[i] = Mathf.Clamp(_supportCondition[i] - amount, 0.25f, 1f);
+            }
         }
 
         bool TryResolvePillarPair(Vector2Int station, out Vector2Int left, out Vector2Int right)
@@ -720,7 +755,9 @@ namespace DeepCore.FreeMovement
                 float d2 = (_supportWorld[i] - w).sqrMagnitude;
                 if (d2 > r2) continue;
                 float d = Mathf.Sqrt(d2);
-                relief += 5.5f * (1f - d / r);
+                float q = i < _supportQuality.Count ? _supportQuality[i] : 0.8f;
+                float cond = i < _supportCondition.Count ? _supportCondition[i] : 1f;
+                relief += 5.5f * (1f - d / r) * Mathf.Clamp(q * cond, 0.3f, 1.2f);
             }
             return relief;
         }
@@ -753,6 +790,41 @@ namespace DeepCore.FreeMovement
             sr.sortingOrder = 9;
             sr.color = Color.white;
             DigVisualKit.ApplyLit(sr);
+
+            // Tiny work bulb on the open side — cozy accent, not corridor lighting
+            AttachPillarBulb(go.transform, nudge);
+        }
+
+        void AttachPillarBulb(Transform pillar, Vector2 wallNudge)
+        {
+            if (pillar == null || _pillarBulbSprite == null) return;
+
+            // Mount toward tunnel (opposite wall), slightly outside the post rim
+            Vector2 open = wallNudge.sqrMagnitude > 0.01f
+                ? -wallNudge.normalized
+                : Vector2.down;
+            var bulb = new GameObject("WorkBulb");
+            bulb.transform.SetParent(pillar, false);
+            bulb.transform.localPosition = new Vector3(open.x * 0.38f, open.y * 0.38f, 0f);
+            bulb.transform.localScale = Vector3.one * 0.22f;
+
+            var bsr = bulb.AddComponent<SpriteRenderer>();
+            bsr.sprite = _pillarBulbSprite;
+            bsr.sortingOrder = 10;
+            var unlit = Shader.Find("Sprites/Default");
+            if (unlit != null) bsr.sharedMaterial = new Material(unlit);
+            bsr.color = new Color(1f, 0.82f, 0.48f, 0.92f);
+
+            var light = bulb.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(light,
+                new Color(1f, 0.72f, 0.38f),
+                intensity: 0.28f,
+                outer: 0.72f,
+                inner: 0.04f,
+                shadows: false,
+                falloff: 0.82f);
+
+            bulb.AddComponent<PillarBulbFlicker>().Bind(light, bsr, 0.28f);
         }
 
         /// <summary>
@@ -902,6 +974,40 @@ namespace DeepCore.FreeMovement
                 else if (n < 0.18f) tex.SetPixel(x, y, Color.Lerp(c, black, 0.25f));
             }
 
+            // Tiny amber work-bulb mark on the collar (top-down fixture cue)
+            Disc(cx + 9.5f, cy - 2f, 1.6f, 1.6f, outline, null);
+            Disc(cx + 9.5f, cy - 2f, 1.15f, 1.15f, new Color(1f, 0.78f, 0.35f), null);
+            Dot(Mathf.RoundToInt(cx + 9.5f), Mathf.RoundToInt(cy - 2f), new Color(1f, 0.92f, 0.65f));
+
+            tex.Apply(false, true);
+            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+        }
+
+        /// <summary>Very small warm glass blob for pillar work lights.</summary>
+        static Sprite MakePillarBulbSprite()
+        {
+            const int s = 12;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            float cx = (s - 1) * 0.5f, cy = (s - 1) * 0.5f;
+            for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++)
+            {
+                float dx = (x - cx) / 4.2f;
+                float dy = (y - cy) / 4.2f;
+                float d = dx * dx + dy * dy;
+                if (d > 1f)
+                {
+                    tex.SetPixel(x, y, Color.clear);
+                    continue;
+                }
+                float t = 1f - d;
+                var c = Color.Lerp(
+                    new Color(0.85f, 0.45f, 0.12f, 0.55f),
+                    new Color(1f, 0.95f, 0.7f, 1f),
+                    t * t);
+                if (d > 0.72f) c = Color.Lerp(c, new Color(0.15f, 0.1f, 0.05f, 0.9f), 0.45f);
+                tex.SetPixel(x, y, c);
+            }
             tex.Apply(false, true);
             return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
         }
@@ -921,5 +1027,71 @@ namespace DeepCore.FreeMovement
 
         static long Key(int x, int y) => ((long)x << 32) ^ (uint)y;
         bool InBounds(int x, int y) => x >= 0 && y >= 0 && x < _w && y < _h;
+    }
+
+    /// <summary>
+    /// Pillar work-bulb: mostly steady warm glow; rare short flickers for mine atmosphere.
+    /// </summary>
+    public sealed class PillarBulbFlicker : MonoBehaviour
+    {
+        Light2D _light;
+        SpriteRenderer _bulb;
+        float _baseIntensity;
+        Color _baseColor;
+        float _nextFlickerIn;
+        float _flickerLeft;
+        float _phase;
+
+        public void Bind(Light2D light, SpriteRenderer bulb, float baseIntensity)
+        {
+            _light = light;
+            _bulb = bulb;
+            _baseIntensity = baseIntensity;
+            _baseColor = bulb != null ? bulb.color : Color.white;
+            _phase = Random.Range(0f, 100f);
+            ScheduleNext();
+        }
+
+        void ScheduleNext()
+        {
+            // Rare: roughly every 9–28s of real time
+            _nextFlickerIn = Random.Range(9f, 28f);
+            _flickerLeft = 0f;
+        }
+
+        void Update()
+        {
+            if (_light == null) return;
+            float dt = Time.deltaTime;
+            _phase += dt;
+
+            // Very gentle breath so it doesn't look frozen — far quieter than CosyLantern
+            float breath = 1f + 0.025f * Mathf.Sin(_phase * 0.85f + 0.4f);
+            float mul = breath;
+
+            if (_flickerLeft > 0f)
+            {
+                _flickerLeft -= dt;
+                // Brief dip / stutter, not a disco
+                float w = Mathf.PingPong(_flickerLeft * 22f, 1f);
+                mul *= Mathf.Lerp(0.35f, 0.92f, w);
+                if (_flickerLeft <= 0f)
+                    ScheduleNext();
+            }
+            else
+            {
+                _nextFlickerIn -= dt;
+                if (_nextFlickerIn <= 0f)
+                    _flickerLeft = Random.Range(0.08f, 0.22f);
+            }
+
+            _light.intensity = _baseIntensity * mul;
+            if (_bulb != null)
+            {
+                var c = _baseColor;
+                c.a = _baseColor.a * Mathf.Clamp01(0.72f + 0.28f * mul);
+                _bulb.color = c;
+            }
+        }
     }
 }

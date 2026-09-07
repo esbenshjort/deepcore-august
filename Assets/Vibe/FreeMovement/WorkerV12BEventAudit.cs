@@ -223,9 +223,9 @@ namespace DeepCore.FreeMovement
                     runner.AuditWorkerState(1).Frustration > 0f
                     && runner.AuditWorkerState(1).Frustration < 70f);
 
-                // L — no Social Aura types in this assembly slice (string scan of loaded type names)
+                // L — Social Aura types are intentional (Stage 0+)
                 log.AppendLine();
-                log.AppendLine("## L. No Social Aura");
+                log.AppendLine("## L. Social Aura present (intentional)");
                 bool auraType = false;
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
@@ -235,8 +235,7 @@ namespace DeepCore.FreeMovement
                     for (int i = 0; i < types.Length; i++)
                     {
                         string n = types[i].Name;
-                        if (n.IndexOf("SocialAura", StringComparison.OrdinalIgnoreCase) >= 0
-                            || n.IndexOf("InteractionPressure", StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (n.IndexOf("SocialAura", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
                             auraType = true;
                             break;
@@ -244,7 +243,7 @@ namespace DeepCore.FreeMovement
                     }
                     if (auraType) break;
                 }
-                Check("No SocialAura / InteractionPressure types", !auraType);
+                Check("SocialAura types present (Stage 0+ locked in)", auraType);
 
                 // Daytime decay smoke
                 log.AppendLine();

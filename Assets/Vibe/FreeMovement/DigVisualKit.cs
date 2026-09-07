@@ -37,6 +37,18 @@ namespace DeepCore.FreeMovement
             sr.sharedMaterial = LitMaterial;
         }
 
+        static Material _unlit;
+        public static void ApplyUnlit(SpriteRenderer sr)
+        {
+            if (sr == null) return;
+            if (_unlit == null)
+            {
+                var sh = Shader.Find("Sprites/Default");
+                if (sh != null) _unlit = new Material(sh);
+            }
+            if (_unlit != null) sr.sharedMaterial = _unlit;
+        }
+
         public static Sprite Pixel
         {
             get
@@ -178,6 +190,159 @@ namespace DeepCore.FreeMovement
                     if (goldN >= 3 && Hash(x * 9 + seed, y * 3) > 0.78f)
                         rock = Color.Lerp(rock, goldSpeck, 0.45f);
                     if (goldN >= 4 && Hash(x * 13 + seed, y * 17) > 0.9f)
+                        rock = Color.Lerp(rock, goldSpeck, 0.5f);
+                }
+
+                int diaN = diamondGrade;
+                if (diaN > 0 && !isOutline)
+                {
+                    float t = diaN / 4f;
+                    rock = Color.Lerp(rock, diaDeep, 0.18f + t * 0.55f);
+                    float facet = Hash(x * 17 + seed, y * 23);
+                    if (facet > 0.78f - t * 0.4f)
+                        rock = Color.Lerp(rock, diaMid, 0.45f + t * 0.4f);
+                    if (facet > 0.9f - t * 0.25f)
+                        rock = Color.Lerp(rock, diaHi, 0.55f + t * 0.35f);
+                    if (diaN >= 2 && Hash(x * 29 + seed, y * 7) > 0.88f)
+                        rock = Color.Lerp(rock, diaFlash, 0.65f);
+                    if (diaN >= 3 && Hash(x * 41 + seed, y * 13) > 0.86f)
+                        rock = Color.Lerp(rock, diaPink, 0.4f);
+                }
+
+                rock.a = 1f;
+                tex.SetPixel(x, y, rock);
+            }
+
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+        }
+
+        /// <summary>
+        /// Floor rubble — irregular multi-lobe chunk so piles don't read as dug wall tiles.
+        /// Same warm industrial palette as <see cref="MakeWallChunk"/>.
+        /// </summary>
+        public static Sprite MakeLooseRockChunk(byte goldGrade, int bedrockCount, int seed,
+            byte diamondGrade = 0)
+        {
+            const int s = 32;
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+            Clear(tex, s);
+
+            Color outline = new(0.05f, 0.03f, 0.02f, 1f);
+            Color shade = new(0.14f, 0.09f, 0.05f, 1f);
+            Color mid = new(0.30f, 0.19f, 0.10f, 1f);
+            Color body = new(0.38f, 0.24f, 0.13f, 1f);
+            Color warm = new(0.48f, 0.32f, 0.16f, 1f);
+            Color lit = new(0.62f, 0.42f, 0.22f, 1f);
+            Color hi = new(0.78f, 0.55f, 0.30f, 1f);
+
+            if (bedrockCount >= 2)
+            {
+                mid = Color.Lerp(mid, new Color(0.12f, 0.12f, 0.13f), 0.35f);
+                body = Color.Lerp(body, new Color(0.16f, 0.16f, 0.17f), 0.35f);
+                warm = Color.Lerp(warm, new Color(0.22f, 0.22f, 0.24f), 0.3f);
+            }
+
+            Color goldC = new(220 / 255f, 160 / 255f, 42 / 255f);
+            Color goldBright = new(255 / 255f, 210 / 255f, 70 / 255f);
+            Color goldSpeck = new(255 / 255f, 235 / 255f, 140 / 255f);
+            Color diaDeep = new(40 / 255f, 90 / 255f, 140 / 255f);
+            Color diaMid = new(120 / 255f, 190 / 255f, 230 / 255f);
+            Color diaHi = new(210 / 255f, 240 / 255f, 255 / 255f);
+            Color diaFlash = new(255 / 255f, 250 / 255f, 255 / 255f);
+            Color diaPink = new(220 / 255f, 170 / 255f, 210 / 255f);
+
+            float ox = (seed % 97) * 0.19f;
+            float oy = (seed % 53) * 0.27f;
+            Vector2 light = new(-0.55f, 0.75f);
+
+            // 2–3 irregular lobes — breaks the square wall-tile silhouette
+            int lobes = 2 + (seed & 1);
+            var lobeCx = new float[3];
+            var lobeCy = new float[3];
+            var lobeRx = new float[3];
+            var lobeRy = new float[3];
+            float ang0 = (seed % 360) * Mathf.Deg2Rad;
+            for (int i = 0; i < lobes; i++)
+            {
+                float a = ang0 + i * (Mathf.PI * 2f / lobes) + Hash(seed + i * 17, i * 9) * 0.9f;
+                float rad = 3.2f + Hash(seed + i * 31, 40 + i) * 4.5f;
+                lobeCx[i] = (s - 1) * 0.5f + Mathf.Cos(a) * rad;
+                lobeCy[i] = (s - 1) * 0.5f + Mathf.Sin(a) * rad * 0.85f;
+                lobeRx[i] = 7.5f + Hash(seed + i * 7, 11) * 5.5f;
+                lobeRy[i] = 5.5f + Hash(seed + i * 13, 19) * 5.0f;
+            }
+
+            for (int y = 0; y < s; y++)
+            for (int x = 0; x < s; x++)
+            {
+                float n = Mathf.PerlinNoise(x * 0.2f + ox, y * 0.2f + oy);
+                float n2 = Mathf.PerlinNoise(x * 0.55f + ox + 3f, y * 0.55f + oy);
+                float n3 = Mathf.PerlinNoise(x * 1.05f + oy, y * 1.05f + ox);
+
+                float best = 99f;
+                float wx = 0f, wy = 0f;
+                for (int i = 0; i < lobes; i++)
+                {
+                    float dx = (x - lobeCx[i]) / Mathf.Max(0.01f, lobeRx[i]);
+                    float dy = (y - lobeCy[i]) / Mathf.Max(0.01f, lobeRy[i]);
+                    // Squircle + noise → jagged rock edges
+                    float d = Mathf.Pow(Mathf.Abs(dx), 1.65f) + Mathf.Pow(Mathf.Abs(dy), 1.65f);
+                    d = Mathf.Sqrt(Mathf.Max(0f, d));
+                    d += (n - 0.5f) * 0.34f;
+                    d += (n2 - 0.5f) * 0.22f;
+                    d += Mathf.Abs(Mathf.Sin(dx * 7.1f + n3 * 5f)) * 0.08f;
+                    d += Mathf.Abs(Mathf.Cos(dy * 6.2f - n * 4f)) * 0.07f;
+                    if (d < best)
+                    {
+                        best = d;
+                        wx = dx;
+                        wy = dy;
+                    }
+                }
+
+                if (best > 1.05f) continue;
+
+                float edge = Mathf.Clamp01((1.05f - best) * 3.2f);
+                bool isOutline = edge < 0.36f;
+
+                Vector2 grad = new(
+                    Mathf.PerlinNoise(x * 0.38f + ox + 1f, y * 0.38f + oy) - 0.5f,
+                    Mathf.PerlinNoise(x * 0.38f + ox, y * 0.38f + oy + 2f) - 0.5f);
+                grad += new Vector2(-wx, -wy) * 0.4f;
+                if (grad.sqrMagnitude > 0.0001f) grad.Normalize();
+                float ndot = Vector2.Dot(grad, light);
+
+                Color rock;
+                if (isOutline)
+                    rock = outline;
+                else if (ndot > 0.35f)
+                    rock = Color.Lerp(warm, lit, Mathf.Clamp01((ndot - 0.35f) / 0.45f));
+                else if (ndot > 0.05f)
+                    rock = Color.Lerp(body, warm, (ndot - 0.05f) / 0.3f);
+                else if (ndot > -0.25f)
+                    rock = Color.Lerp(shade, mid, (ndot + 0.25f) / 0.3f);
+                else
+                    rock = Color.Lerp(outline, shade, 0.45f);
+
+                if (!isOutline && Hash(x * 3 + seed, y * 7) > 0.8f)
+                    rock = Color.Lerp(rock, shade, 0.5f);
+                if (!isOutline && ndot > 0.5f && Hash(x * 11 + seed, y * 5) > 0.86f)
+                    rock = Color.Lerp(rock, hi, 0.45f);
+                // Fracture cracks
+                if (!isOutline && Hash(x * 19 + seed, y * 23) > 0.93f)
+                    rock = Color.Lerp(rock, outline, 0.55f);
+
+                int goldN = goldGrade;
+                if (goldN > 0 && !isOutline)
+                {
+                    // Flecks / veins — not a solid gold disc
+                    float t = goldN / 4f;
+                    if (Hash(x * 5 + seed, y * 11) > 0.78f - t * 0.28f)
+                        rock = Color.Lerp(rock, goldC, 0.35f + t * 0.4f);
+                    if (Hash(x * 9 + seed, y * 3) > 0.86f - t * 0.2f)
+                        rock = Color.Lerp(rock, goldBright, 0.4f + t * 0.35f);
+                    if (goldN >= 3 && Hash(x * 13 + seed, y * 17) > 0.9f)
                         rock = Color.Lerp(rock, goldSpeck, 0.5f);
                 }
 

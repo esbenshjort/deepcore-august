@@ -80,6 +80,8 @@ namespace DeepCore.FreeMovement
             if (host == null || host.AssignedWorker == null) return JobDemandProfile.Idle;
             if (host.WorkMode == ProspectorWorkMode.Investigate)
             {
+                if (host.Investigation == null)
+                    return new JobDemandProfile(0.1f, 0.25f, 0.30f, "INVESTIGATE");
                 var st = host.Investigation.State;
                 switch (st)
                 {
@@ -149,6 +151,20 @@ namespace DeepCore.FreeMovement
             if (host.IsEnRoute)
                 return new JobDemandProfile(0.40f, 0.20f, 0.30f, "EN_ROUTE");
             return new JobDemandProfile(0.05f, 0.08f, 0.08f, "ENG_IDLE");
+        }
+
+        public static JobDemandProfile ForSteward(StewardPerson host)
+        {
+            if (host == null || host.AssignedWorker == null) return JobDemandProfile.Idle;
+            return host.WorkKind switch
+            {
+                StewardWorkKind.PreparingMeal => new JobDemandProfile(0.25f, 0.35f, 0.45f, "PREP_MEAL"),
+                StewardWorkKind.TendingWounds => new JobDemandProfile(0.20f, 0.40f, 0.50f, "TEND"),
+                StewardWorkKind.CleaningCamp => new JobDemandProfile(0.40f, 0.15f, 0.25f, "CLEAN"),
+                StewardWorkKind.AfterMealCleanup => new JobDemandProfile(0.35f, 0.12f, 0.20f, "CLEANUP"),
+                StewardWorkKind.KitchenDuty => new JobDemandProfile(0.30f, 0.25f, 0.35f, "KITCHEN"),
+                _ => new JobDemandProfile(0.08f, 0.08f, 0.10f, "STEWARD_IDLE"),
+            };
         }
     }
 

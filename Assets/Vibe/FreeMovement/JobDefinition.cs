@@ -147,6 +147,27 @@ namespace DeepCore.FreeMovement
             },
             relevantStatsAreProvisional: true);
 
+        /// <summary>
+        /// Steward — camp meal, hygiene, wound care.
+        /// Live: CampMealSystem + StewardWoundCare + StewardPerson hygiene push.
+        /// </summary>
+        static readonly JobDefinition StewardDef = new(
+            JobType.Steward,
+            "Steward",
+            "body.steward",
+            new[]
+            {
+                WorkerStatId.Chemistry,
+                WorkerStatId.Finesse,
+                WorkerStatId.Focus,
+                WorkerStatId.WorkRate,
+                WorkerStatId.Composure,
+                WorkerStatId.Empathy,
+                WorkerStatId.Recovery,
+                WorkerStatId.Logistics,
+                WorkerStatId.SafetyProtocol,
+            });
+
         static readonly Dictionary<JobType, JobDefinition> ByType = new()
         {
             { JobType.Unassigned, UnassignedDef },
@@ -155,6 +176,7 @@ namespace DeepCore.FreeMovement
             { JobType.Hauling, HaulingDef },
             { JobType.Refining, RefiningDef },
             { JobType.Engineering, EngineeringDef },
+            { JobType.Steward, StewardDef },
         };
 
         public static JobDefinition Get(JobType job) =>
@@ -210,6 +232,7 @@ namespace DeepCore.FreeMovement
             JobType.Hauling,
             JobType.Refining,
             JobType.Engineering,
+            JobType.Steward,
         };
     }
 }

@@ -51,6 +51,8 @@ namespace DeepCore.FreeMovement
             WorkerStateEventType.RepeatedFailure => 0.15f,
             WorkerStateEventType.ProgressSuccess => 0.04f,
             WorkerStateEventType.PhysicalExhaustion => 0.5f,
+            WorkerStateEventType.OvertimePressure => 0.35f,
+            WorkerStateEventType.ManagerCommunication => 0.25f,
             WorkerStateEventType.EquipmentProblem => 0.25f,
             WorkerStateEventType.EquipmentRecovered => 0.1f,
             WorkerStateEventType.Discovery => 0.05f,
@@ -94,24 +96,30 @@ namespace DeepCore.FreeMovement
             int determination = stats != null ? stats.Get(WorkerStatId.Determination) : WorkerStats.Baseline;
             int composure = stats != null ? stats.Get(WorkerStatId.Composure) : WorkerStats.Baseline;
             int focus = stats != null ? stats.Get(WorkerStatId.Focus) : WorkerStats.Baseline;
+            int tolerance = stats != null ? stats.Get(WorkerStatId.Tolerance) : WorkerStats.Baseline;
 
             switch (e.EventType)
             {
                 case WorkerStateEventType.WorkBlocked:
-                    ApplyFrustrationGain(st, BaseGain(e.Magnitude), determination, composure, acute: false);
+                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * WorkBlockedMul,
+                        determination, composure, tolerance, acute: false, compound: true);
                     break;
 
                 case WorkerStateEventType.RepeatedFailure:
-                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.25f, determination, composure, acute: true);
+                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * RepeatedFailureMul,
+                        determination, composure, tolerance, acute: true, compound: true);
                     if (e.Magnitude >= 6f)
                         st.Morale = st.Morale - Mathf.Clamp(0.4f + e.Magnitude * 0.05f, 0.4f, 2.5f);
                     break;
 
                 case WorkerStateEventType.ProgressSuccess:
                 {
-                    float relief = BaseGain(e.Magnitude) + focus * 0.05f;
-                    // Frequent micro-progress must not erase larger setback residue.
-                    relief = Mathf.Min(relief * 0.28f, 0.55f);
+                    // Routine micro-progress: soft pressure valve only — cannot erase a bad day.
+                    float relief = BaseGain(e.Magnitude) + focus * 0.04f;
+                    relief = Mathf.Min(relief * ProgressSuccessReliefScale, ProgressSuccessReliefCap);
+                    // Already-high frustration resists small wins
+                    if (st.Frustration >= HighFrustrationThreshold)
+                        relief *= ProgressSuccessHighFrustScale;
                     st.ReduceFrustration(relief);
                     break;
                 }
@@ -120,9 +128,11 @@ namespace DeepCore.FreeMovement
                 case WorkerStateEventType.Discovery:
                 {
                     float relief = BaseGain(e.Magnitude) + focus * 0.05f;
+                    // Meaningful wins still cut pressure hard
+                    if (st.Frustration >= HighFrustrationThreshold)
+                        relief *= 0.85f;
                     st.ReduceFrustration(relief);
                     float moraleGain = Mathf.Clamp(1.2f + e.Magnitude * 0.15f, 1.2f, 5f);
-                    // Determination slightly amplifies positive outlook
                     moraleGain *= 0.85f + determination * 0.015f;
                     st.Morale = st.Morale + moraleGain;
                     st.FocusState = Mathf.Lerp(st.FocusState, 70f, 0.08f);
@@ -130,7 +140,8 @@ namespace DeepCore.FreeMovement
                 }
 
                 case WorkerStateEventType.EquipmentProblem:
-                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.1f, determination, composure, acute: true);
+                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.45f,
+                        determination, composure, tolerance, acute: true, compound: true);
                     break;
 
                 case WorkerStateEventType.EquipmentRecovered:
@@ -139,7 +150,8 @@ namespace DeepCore.FreeMovement
                     break;
 
                 case WorkerStateEventType.Injury:
-                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.15f, determination, composure, acute: true);
+                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.2f,
+                        determination, composure, tolerance, acute: true, compound: false);
                     if (e.Magnitude >= 15f || st.NeedsCare)
                         st.Morale = st.Morale - Mathf.Clamp(1.5f + e.Magnitude * 0.04f, 1.5f, 6f);
                     else
@@ -149,11 +161,48 @@ namespace DeepCore.FreeMovement
                 case WorkerStateEventType.PhysicalExhaustion:
                     st.MentalFatigue = st.MentalFatigue + Mathf.Clamp(e.Magnitude * 0.35f, 1f, 6f);
                     st.FocusState = st.FocusState - Mathf.Clamp(e.Magnitude * 0.25f, 1f, 5f);
-                    ApplyFrustrationGain(st, Mathf.Max(0.5f, e.Magnitude * 0.2f), determination, composure, acute: false);
+                    ApplyFrustrationGain(st, Mathf.Max(0.5f, e.Magnitude * 0.25f),
+                        determination, composure, tolerance, acute: false, compound: false);
+                    break;
+
+                case WorkerStateEventType.OvertimePressure:
+                    // Gradual — Soul traits already scaled magnitude at emit site.
+                    st.MentalFatigue = st.MentalFatigue + Mathf.Clamp(e.Magnitude * 0.55f, 0.2f, 4f);
+                    st.FocusState = st.FocusState - Mathf.Clamp(e.Magnitude * 0.35f, 0.15f, 3.5f);
+                    ApplyFrustrationGain(st, Mathf.Max(0.2f, e.Magnitude * 0.45f),
+                        determination, composure, tolerance, acute: false, compound: true);
+                    if (e.Magnitude >= 1.2f)
+                        st.Morale = st.Morale - Mathf.Clamp(e.Magnitude * 0.12f, 0.15f, 1.8f);
+                    break;
+
+                case WorkerStateEventType.ManagerCommunication:
+                    // Modest / temporary — Source encodes reaction; magnitude set by ManagerComm.
+                    // Positive-ish (small mag, praise/encourage path): slight focus/morale lift.
+                    // Harsh path: frustration up, focus down. Never a large buff.
+                    if (e.Magnitude <= 0.7f)
+                    {
+                        st.FocusState = st.FocusState + Mathf.Clamp(e.Magnitude * 0.55f, 0.15f, 2.2f);
+                        st.Morale = st.Morale + Mathf.Clamp(e.Magnitude * 0.35f, 0.1f, 1.6f);
+                        st.Frustration = st.Frustration - Mathf.Clamp(e.Magnitude * 0.25f, 0.1f, 1.4f);
+                    }
+                    else if (e.Magnitude <= 1.15f)
+                    {
+                        st.FocusState = st.FocusState - Mathf.Clamp(e.Magnitude * 0.2f, 0.1f, 1.5f);
+                        ApplyFrustrationGain(st, Mathf.Max(0.2f, e.Magnitude * 0.3f),
+                            determination, composure, tolerance, acute: false, compound: false);
+                    }
+                    else
+                    {
+                        st.FocusState = st.FocusState - Mathf.Clamp(e.Magnitude * 0.35f, 0.2f, 2.5f);
+                        st.Morale = st.Morale - Mathf.Clamp(e.Magnitude * 0.2f, 0.15f, 2f);
+                        ApplyFrustrationGain(st, Mathf.Max(0.4f, e.Magnitude * 0.4f),
+                            determination, composure, tolerance, acute: true, compound: true);
+                    }
                     break;
 
                 case WorkerStateEventType.InvestigationFailure:
-                    ApplyFrustrationGain(st, BaseGain(e.Magnitude), determination, composure, acute: false);
+                    ApplyFrustrationGain(st, BaseGain(e.Magnitude) * 1.4f,
+                        determination, composure, tolerance, acute: false, compound: true);
                     st.Morale = st.Morale - Mathf.Clamp(0.5f + e.Magnitude * 0.06f, 0.5f, 3f);
                     break;
             }
@@ -167,24 +216,42 @@ namespace DeepCore.FreeMovement
                 DeltaFocusState = st.FocusState - fsBefore,
             };
             wr.EventHistory.Add(record);
+            FrustrationDevLog.Observe(wr, e, record);
             return record;
         }
+
+        public const float WorkBlockedMul = 1.65f;
+        public const float RepeatedFailureMul = 2.15f;
+        public const float ProgressSuccessReliefScale = 0.14f;
+        public const float ProgressSuccessReliefCap = 0.28f;
+        public const float ProgressSuccessHighFrustScale = 0.40f;
+        public const float HighFrustrationThreshold = 40f;
+        /// <summary>How strongly existing Frustration compounds the next setback (0..1 scale).</summary>
+        public const float CompoundPerFrustration = 0.018f;
+        public const float CompoundMax = 1.1f;
 
         static float BaseGain(float magnitude) => Mathf.Max(0.25f, magnitude);
 
         /// <summary>
-        /// Determination resists setback gain; Composure dampens acute spikes.
-        /// Mirrors Excavator obstruction: Max(0.5, base − Determination×0.10).
+        /// Determination + Tolerance resist setback gain; Composure dampens acute spikes.
+        /// Compound: already-frustrated workers feel repeated problems harder (not passive drift).
         /// </summary>
         static void ApplyFrustrationGain(
-            WorkerState st, float baseGain, int determination, int composure, bool acute)
+            WorkerState st, float baseGain, int determination, int composure, int tolerance,
+            bool acute, bool compound)
         {
-            float resistance = determination * 0.10f;
-            float gained = Mathf.Max(0.5f, baseGain - resistance);
+            // Soul under pressure — stronger resist than pre-tuning (was Det×0.10 Tol×0.08 Comp×0.06)
+            float resistance = determination * 0.14f + tolerance * 0.12f;
+            float gained = Mathf.Max(0.55f, baseGain - resistance);
             if (acute)
             {
-                float composureCut = composure * 0.06f;
-                gained = Mathf.Max(0.35f, gained - composureCut);
+                float composureCut = composure * 0.09f;
+                gained = Mathf.Max(0.4f, gained - composureCut);
+            }
+            if (compound && st.Frustration > 0f)
+            {
+                float mul = 1f + Mathf.Min(CompoundMax, st.Frustration * CompoundPerFrustration);
+                gained *= mul;
             }
             st.AddFrustration(gained);
         }
@@ -212,7 +279,10 @@ namespace DeepCore.FreeMovement
             if (!_gate.TryAdmit(e)) return null;
             var wr = _resolve?.Invoke(e.WorkerId);
             if (wr == null) return null;
-            return WorkerStateEventProcessor.Apply(e, wr);
+            var rec = WorkerStateEventProcessor.Apply(e, wr);
+            if (rec != null)
+                NicknameEvidenceStore.Instance.ObserveEvent(e);
+            return rec;
         }
 
         /// <summary>Bypass spam gate — audits / forced story beats.</summary>
@@ -223,7 +293,10 @@ namespace DeepCore.FreeMovement
                 e.GameHours = WorkerStateClock.GameHours;
             var wr = _resolve?.Invoke(e.WorkerId);
             if (wr == null) return null;
-            return WorkerStateEventProcessor.Apply(e, wr);
+            var rec = WorkerStateEventProcessor.Apply(e, wr);
+            if (rec != null)
+                NicknameEvidenceStore.Instance.ObserveEvent(e);
+            return rec;
         }
 
         public void ClearGate() => _gate.Clear();
@@ -233,7 +306,7 @@ namespace DeepCore.FreeMovement
     public static class WorkerStateDaytimeRecovery
     {
         /// <summary>Frustration points removed per game-hour when idle of pressure.</summary>
-        public const float FrustrationDecayPerGameHour = 0.18f;
+        public const float FrustrationDecayPerGameHour = 0.12f;
 
         /// <summary>FocusState lerp toward baseline per game-hour.</summary>
         public const float FocusStateLerpPerGameHour = 0.06f;

@@ -1,5 +1,5 @@
 # Social Memory V1 Audit
-Generated: 2026-09-03 08:02:53
+Generated: 2026-09-03 09:08:49
 
 Scope: directional memories from meaningful encounters only.
 No Trust/Warmth/Hostility formula changes. No encounter frequency changes.
@@ -35,13 +35,19 @@ PASS | MaxEncountersPerWorkerPerShift still 3
 PASS | Resolve still returns encounter log
 PASS | Memory TotalEntries is independent counter
 
+## 7. Significance tiers (Ordinary / Significant / Major)
+PASS | MaxPerTarget unchanged at 12
+PASS | Major survives 80h decay — str=0.60
+PASS | Major retains more strength than Significant after same decay — maj=0.60 sig=0.22
+PASS | Significant retains more than Ordinary (or Ordinary purged) — sig=0.22 ordAlive=False ord=0.00
+PASS | ClassifySignificance maps strength bands
+PASS | Under cap pressure, Major memories preferred — majors=3 count=12
+
 ## Summary
-PASS 19 / FAIL 0
+PASS 25 / FAIL 0
 INVARIANT: PASS
 
 ## Files
-- Assets/Vibe/FreeMovement/SocialMemory.cs (new)
-- Assets/Vibe/FreeMovement/SocialAuraStage0Encounter.cs (hook Record)
-- Assets/Vibe/FreeMovement/SocialAuraLive.cs (hook Record + overnight decay)
-- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV UI)
+- Assets/Vibe/FreeMovement/SocialMemory.cs (significance tiers + decay)
+- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV significance)
 - Assets/Vibe/FreeMovement/SocialMemoryV1Audit.cs (this audit)

@@ -20,10 +20,10 @@ namespace DeepCore.FreeMovement
         static readonly Color MetalDeep = new(0.28f, 0.3f, 0.33f);
         static readonly Color HazardY = new(0.95f, 0.82f, 0.12f);
         static readonly Color Outline = new(0.02f, 0.02f, 0.03f);
-        static readonly Color Green = new(0.3f, 0.95f, 0.4f);
-        static readonly Color GreenCore = new(0.75f, 1f, 0.8f);
-        static readonly Color Cyan = new(0.3f, 0.85f, 0.95f);
-        static readonly Color CyanDeep = new(0.12f, 0.35f, 0.42f);
+        static readonly Color Green = new(0.35f, 1f, 0.48f);
+        static readonly Color GreenCore = new(0.82f, 1f, 0.88f);
+        static readonly Color Cyan = new(0.35f, 0.92f, 1f);
+        static readonly Color CyanDeep = new(0.15f, 0.42f, 0.52f);
         static readonly Color Gold = new(0.95f, 0.72f, 0.18f);
         static readonly Color GoldHi = new(1f, 0.9f, 0.4f);
         static readonly Color Canvas = new(0.48f, 0.36f, 0.2f);
@@ -47,6 +47,10 @@ namespace DeepCore.FreeMovement
         static Sprite _aircon;
         static Sprite _powerCable;
         static Sprite _powerBox;
+        static Sprite _toiletStall;
+        static Sprite _toiletTank;
+        static Sprite _toiletVent;
+        static Sprite _toiletSign;
         static Sprite _padRock, _padGold, _padRefined, _padDirt, _padDiamond, _padRefinedDia;
         static Sprite _labelRock, _labelGold, _labelRefined, _labelDirt, _labelDiamond, _labelRefinedDia;
 
@@ -758,6 +762,167 @@ namespace DeepCore.FreeMovement
                 tex.Apply();
                 _crate = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
                 return _crate;
+            }
+        }
+
+        public static Sprite ToiletStall
+        {
+            get
+            {
+                if (_toiletStall != null) return _toiletStall;
+                const int s = 36;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                // Compact metal stall booth
+                Box(tex, s, s, 4, 2, 28, 30, Outline);
+                Box(tex, s, s, 5, 3, 26, 28, Charcoal);
+                Box(tex, s, s, 7, 5, 22, 24, MetalDeep);
+                Box(tex, s, s, 8, 6, 10, 22, Metal); // door panel
+                Box(tex, s, s, 9, 14, 2, 6, Charcoal); // handle slot
+                Dot(tex, s, s, 18, 16, MetalHi);
+                HazardDiag(tex, s, s, 20, 6, 8, 4);
+                Bolt(tex, s, s, 7, 7);
+                Bolt(tex, s, s, 26, 7);
+                Bolt(tex, s, s, 7, 28);
+                Bolt(tex, s, s, 26, 28);
+                Weather(tex, s, s, 4, 2, 28, 30, 9);
+                tex.Apply();
+                _toiletStall = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.35f), s);
+                return _toiletStall;
+            }
+        }
+
+        public static Sprite ToiletTank
+        {
+            get
+            {
+                if (_toiletTank != null) return _toiletTank;
+                const int s = 22;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                Box(tex, s, s, 2, 2, 18, 16, Outline);
+                Box(tex, s, s, 3, 3, 16, 14, Metal);
+                Box(tex, s, s, 5, 5, 12, 8, MetalDeep);
+                Box(tex, s, s, 4, 14, 14, 2, OrangeDeep);
+                Disc(tex, s, s, 11, 9, 3, 2, CyanDeep, Cyan);
+                Weather(tex, s, s, 2, 2, 18, 16, 5);
+                tex.Apply();
+                _toiletTank = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+                return _toiletTank;
+            }
+        }
+
+        public static Sprite ToiletVent
+        {
+            get
+            {
+                if (_toiletVent != null) return _toiletVent;
+                const int s = 16;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                Box(tex, s, s, 5, 1, 6, 13, Outline);
+                Box(tex, s, s, 6, 2, 4, 11, MetalHi);
+                Box(tex, s, s, 4, 12, 8, 3, Charcoal);
+                for (int i = 0; i < 4; i++)
+                    Box(tex, s, s, 7, 3 + i * 2, 2, 1, Charcoal);
+                tex.Apply();
+                _toiletVent = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.1f), s);
+                return _toiletVent;
+            }
+        }
+
+        public static Sprite ToiletSign
+        {
+            get
+            {
+                if (_toiletSign != null) return _toiletSign;
+                const int s = 14;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                Box(tex, s, s, 1, 1, 12, 12, Outline);
+                Box(tex, s, s, 2, 2, 10, 10, Charcoal);
+                Box(tex, s, s, 3, 3, 8, 8, HazardY);
+                // Simple WC glyph
+                Box(tex, s, s, 4, 5, 2, 5, Black);
+                Box(tex, s, s, 8, 5, 2, 5, Black);
+                Box(tex, s, s, 5, 9, 4, 1, Black);
+                tex.Apply();
+                _toiletSign = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+                return _toiletSign;
+            }
+        }
+
+        static Sprite _analysisTable;
+        static Sprite _analysisMap;
+
+        /// <summary>Round industrial field-analysis table (gunmetal + orange bolts).</summary>
+        public static Sprite AnalysisTable
+        {
+            get
+            {
+                if (_analysisTable != null) return _analysisTable;
+                const int s = 48;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                Disc(tex, s, s, 24, 24, 20, 20, Outline, null);
+                Disc(tex, s, s, 24, 24, 18.5f, 18.5f, Charcoal, null);
+                Disc(tex, s, s, 24, 24, 16.5f, 16.5f, MetalDeep, null);
+                Disc(tex, s, s, 24, 24, 15f, 15f, new Color(0.22f, 0.24f, 0.27f), null);
+                // Rim band
+                for (int a = 0; a < 32; a++)
+                {
+                    float ang = a * Mathf.PI * 2f / 32f;
+                    int x = Mathf.RoundToInt(24 + Mathf.Cos(ang) * 17.2f);
+                    int y = Mathf.RoundToInt(24 + Mathf.Sin(ang) * 17.2f);
+                    Dot(tex, s, s, x, y, a % 4 == 0 ? Orange : Metal);
+                }
+                // Pedestal hint
+                Box(tex, s, s, 20, 6, 8, 5, Outline);
+                Box(tex, s, s, 21, 7, 6, 3, Charcoal);
+                Bolt(tex, s, s, 12, 30);
+                Bolt(tex, s, s, 36, 30);
+                Bolt(tex, s, s, 18, 14);
+                Bolt(tex, s, s, 30, 14);
+                Weather(tex, s, s, 8, 8, 32, 32, 7);
+                tex.Apply();
+                _analysisTable = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.45f), s);
+                return _analysisTable;
+            }
+        }
+
+        /// <summary>
+        /// Compact tactical map surface — cyan grid / zone language only (decoration, not a second scan system).
+        /// </summary>
+        public static Sprite AnalysisMapSurface
+        {
+            get
+            {
+                if (_analysisMap != null) return _analysisMap;
+                const int s = 32;
+                var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
+                Clear(tex, s, s);
+                Disc(tex, s, s, 16, 16, 13, 13, new Color(0.06f, 0.1f, 0.12f, 0.92f), null);
+                Disc(tex, s, s, 16, 16, 12, 12, new Color(0.04f, 0.08f, 0.1f, 0.95f), null);
+                // Grid
+                for (int i = 5; i <= 27; i += 4)
+                {
+                    for (int t = 5; t <= 27; t++)
+                    {
+                        if ((t - 16) * (t - 16) + (i - 16) * (i - 16) > 130) continue;
+                        Dot(tex, s, s, i, t, CyanDeep);
+                        Dot(tex, s, s, t, i, CyanDeep);
+                    }
+                }
+                // Soft zone blobs (tactical silhouette language)
+                Disc(tex, s, s, 12, 18, 3.2f, 2.4f, new Color(Cyan.r, Cyan.g, Cyan.b, 0.35f), null);
+                Disc(tex, s, s, 20, 13, 2.6f, 2.2f, new Color(0.95f, 0.72f, 0.2f, 0.28f), null);
+                // Crosshair
+                Box(tex, s, s, 15, 8, 2, 16, new Color(Cyan.r, Cyan.g, Cyan.b, 0.45f));
+                Box(tex, s, s, 8, 15, 16, 2, new Color(Cyan.r, Cyan.g, Cyan.b, 0.45f));
+                Dot(tex, s, s, 16, 16, Cyan);
+                tex.Apply();
+                _analysisMap = Sprite.Create(tex, new Rect(0, 0, s, s), new Vector2(0.5f, 0.5f), s);
+                return _analysisMap;
             }
         }
     }

@@ -86,14 +86,18 @@ namespace DeepCore.FreeMovement
         void BuildPool(int n)
         {
             EnsureSprites();
-            _puffs = new Puff[n];
-            for (int i = 0; i < n; i++)
+            // Clear any leftover children (domain reload / re-init)
+            for (int c = transform.childCount - 1; c >= 0; c--)
+                Destroy(transform.GetChild(c).gameObject);
+
+            _puffs = new Puff[Mathf.Max(4, n)];
+            for (int i = 0; i < _puffs.Length; i++)
             {
                 var go = new GameObject($"Puff{i}");
                 go.transform.SetParent(transform, false);
                 var sr = go.AddComponent<SpriteRenderer>();
                 sr.sprite = _puffSprite;
-                sr.sharedMaterial = _unlit;
+                if (_unlit != null) sr.sharedMaterial = _unlit;
                 sr.sortingOrder = _sort;
                 sr.color = Color.clear;
                 go.SetActive(false);
@@ -101,8 +105,20 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        void OnEnable()
+        {
+            if (_puffs == null || _puffs.Length == 0)
+                BuildPool(28);
+        }
+
         void Update()
         {
+            if (_puffs == null || _puffs.Length == 0)
+            {
+                BuildPool(28);
+                if (_puffs == null) return;
+            }
+
             float dt = Time.deltaTime;
             if (_emitting && _burst > 0.02f)
             {
@@ -122,8 +138,14 @@ namespace DeepCore.FreeMovement
             {
                 if (!_puffs[i].Alive) continue;
                 ref var p = ref _puffs[i];
+                if (p.Tr == null || p.Sr == null)
+                {
+                    p.Alive = false;
+                    continue;
+                }
+
                 p.Age += dt;
-                float u = Mathf.Clamp01(p.Age / p.Life);
+                float u = Mathf.Clamp01(p.Age / Mathf.Max(0.01f, p.Life));
                 if (u >= 1f)
                 {
                     p.Alive = false;
@@ -158,6 +180,8 @@ namespace DeepCore.FreeMovement
 
         void EmitOne()
         {
+            if (_puffs == null || _puffs.Length == 0) return;
+
             int slot = -1;
             for (int i = 0; i < _puffs.Length; i++)
             {
@@ -166,6 +190,8 @@ namespace DeepCore.FreeMovement
             if (slot < 0) return;
 
             ref var p = ref _puffs[slot];
+            if (p.Tr == null || p.Sr == null) return;
+
             float jitter = Random.Range(-_spread, _spread);
             Vector2 perp = new(-_dir.y, _dir.x);
             p.Origin = perp * jitter + _dir * Random.Range(-0.02f, 0.02f);

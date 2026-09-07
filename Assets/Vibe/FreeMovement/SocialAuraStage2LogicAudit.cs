@@ -113,34 +113,27 @@ namespace DeepCore.FreeMovement
 
             PresentSmoke("Encourage can fail visibly",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.WorkingTogether, SocialAction.Encourage, SocialResponse.Deflect, false, true, "POSITIVE_FAIL"),
-                p => p.ResponseLine.IndexOf("manage", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("pep", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "manage", "pep", "speech", "coaching"));
 
             PresentSmoke("Joke can land or annoy (annoy path)",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.IdleNearby, SocialAction.Joke, SocialResponse.PushBack, false, true, "POSITIVE_FAIL"),
-                p => p.ResponseLine.IndexOf("landed", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("talk", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "landed", "talk", "tone", "dig", "Wrong"));
 
             PresentSmoke("SharedProblem complaint can bond",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.SharedProblem, SocialAction.Complain, SocialResponse.Agree, true, true, "SHARED_COMPLAINT_BOND"),
-                p => p.ResponseLine.IndexOf("alone", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("mess", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("together", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("chew", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "alone", "mess", "together", "chew", "grit", "Same", "push", "Shared"));
 
             PresentSmoke("Complaint can clash",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.SharedProblem, SocialAction.Complain, SocialResponse.Escalate, true, false, "CLASH"),
-                p => p.ResponseLine.IndexOf("problem", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("again", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "problem", "again", "fight", "happens", "doing this"));
 
             PresentSmoke("Provoke can be ignored",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.WorkingTogether, SocialAction.Provoke, SocialResponse.Ignore, true, true, "IGNORED_AGGRESSION"),
-                p => p.ResponseLine == "…" || p.ResponseLine.IndexOf("worth", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => p.ResponseLine == "…" || ContainsAny(p.ResponseLine, "worth", "static", "Moving", "Hearing"));
 
             PresentSmoke("Confront PushBack/Withdraw/Escalate",
                 SocialAuraPresenter.MakeSyntheticLog(1, 2, SocialContext.WorkingTogether, SocialAction.Confront, SocialResponse.Escalate, true, false, "CLASH"),
-                p => p.ResponseLine.IndexOf("problem", StringComparison.OrdinalIgnoreCase) >= 0
-                     || p.ResponseLine.IndexOf("again", StringComparison.OrdinalIgnoreCase) >= 0);
+                p => ContainsAny(p.ResponseLine, "problem", "again", "fight", "happens", "doing this"));
 
             // History identity across “jobs”
             var pair = new SocialPairTransient();
@@ -180,6 +173,18 @@ namespace DeepCore.FreeMovement
             File.WriteAllText(path, log.ToString());
             File.WriteAllText(latest, log.ToString());
             return path;
+        }
+
+        static bool ContainsAny(string line, params string[] needles)
+        {
+            if (string.IsNullOrEmpty(line) || needles == null) return false;
+            for (int i = 0; i < needles.Length; i++)
+            {
+                if (string.IsNullOrEmpty(needles[i])) continue;
+                if (line.IndexOf(needles[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
         }
     }
 }

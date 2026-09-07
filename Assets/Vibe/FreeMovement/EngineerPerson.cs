@@ -69,7 +69,6 @@ namespace DeepCore.FreeMovement
         Vector2Int _jobCell;
         Vector2 _jobWorld;
         bool _hasJobTarget;
-        bool _jobIsLantern;
         bool _jobIsCriticalSupport;
         EngineerWorkKind _workKind = EngineerWorkKind.NoWorkNeeded;
         string _debugStatus = "NO WORK NEEDED";
@@ -207,6 +206,23 @@ namespace DeepCore.FreeMovement
         public void BindCooperation(Func<CooperationAssessment> eval) => _coopEval = eval;
         public void SetPost(Vector2 post) => _post = post;
 
+        /// <summary>SpatialGeometry + Mechanics + Focus; fatigue softens — never random failure.</summary>
+        public float SupportBuildQuality01()
+        {
+            var wr = _assignedWorker;
+            if (wr?.Stats == null) return 0.75f;
+            float spatial = wr.Stats.Get(WorkerStatId.SpatialGeometry) / 20f;
+            float mech = wr.Stats.Get(WorkerStatId.Mechanics) / 20f;
+            float focus = wr.Stats.Get(WorkerStatId.Focus) / 20f;
+            float q = spatial * 0.45f + mech * 0.35f + focus * 0.20f;
+            if (wr.State != null)
+            {
+                if (wr.State.ExhaustionLatched) q *= 0.82f;
+                if (wr.State.MentalFatigue > 70f) q *= 0.90f;
+            }
+            return Mathf.Clamp(q * 1.05f, 0.40f, 1.12f);
+        }
+
         public CooperationAssessment ActiveRepairCoop => _activeRepairCoop;
         public float RepairDispatchSpeedMul => _repairDispatchSpeedMul;
 
@@ -298,16 +314,42 @@ namespace DeepCore.FreeMovement
                         OnRepairInterrupted?.Invoke();
                         _state = State.ReturnToPost;
                         _nav?.Invalidate();
+                        _repairStrandTimer = 0f;
                         break;
                     }
                     if (FollowTo(RepairStandPoint(), MoveSpeed * _repairDispatchSpeedMul))
+                    {
+                        _repairStrandTimer = 0f;
                         BeginRepair();
+                    }
+                    else if (_nav != null && _nav.Stranded)
+                    {
+                        _repairStrandTimer += Time.deltaTime;
+                        // Path blocked (debris / jam) — still reach the machine for V1 repair
+                        if (_repairStrandTimer >= 2.5f)
+                        {
+                            SoftTeleport(RepairStandPoint());
+                            _nav.Invalidate();
+                            _repairStrandTimer = 0f;
+                            DigHoodLog.Push("REPAIR | Engineer soft-arrived at overheated excavator (path stranded)");
+                            BeginRepair();
+                        }
+                    }
+                    else
+                        _repairStrandTimer = 0f;
                     break;
 
                 case State.Repairing:
                     SetStatus("REPAIRING");
                     _repairTimer -= Time.deltaTime;
                     FaceDir((RepairStandPoint() - Position).normalized);
+                    // Brief tool sparks while wrenching — reuse equipment spark language
+                    if (Time.frameCount % 7 == 0)
+                    {
+                        Vector2 tip = Position + (RepairStandPoint() - Position).normalized * 0.2f;
+                        EquipmentSparkFx.SpawnRepair(
+                            transform.parent != null ? transform.parent : transform, tip, count: 2);
+                    }
                     if (_repairTimer > 0f) break;
                     FinishRepair();
                     break;
@@ -382,9 +424,6 @@ namespace DeepCore.FreeMovement
                 _evalLanternDebug = "LANTERN | no infra";
             }
 
-            DigHoodLog.Push(_evalSupportDebug);
-            DigHoodLog.Push(_evalLanternDebug);
-
             // 1) Critical tunnel support
             if (critOk)
             {
@@ -399,7 +438,6 @@ namespace DeepCore.FreeMovement
                 _jobCell = lan;
                 _jobWorld = _world.CellCenter(lan.x, lan.y);
                 _hasJobTarget = true;
-                _jobIsLantern = true;
                 _workKind = EngineerWorkKind.DarkAreaFound;
                 SetStatus("DARK AREA FOUND");
                 _state = State.WalkingToLantern;
@@ -413,7 +451,6 @@ namespace DeepCore.FreeMovement
             {
                 prevOk = _infra.TryPickNextSupportCell(from, criticalOnly: false, out prev, out prevScore);
                 _evalSupportDebug = _infra.LastSupportEvalDebug;
-                DigHoodLog.Push(_evalSupportDebug);
             }
 
             if (prevOk)
@@ -434,7 +471,6 @@ namespace DeepCore.FreeMovement
             _jobCell = cell;
             _jobWorld = _world.CellCenter(cell.x, cell.y);
             _hasJobTarget = true;
-            _jobIsLantern = false;
             _jobIsCriticalSupport = critical;
             _workKind = EngineerWorkKind.SupportNeeded;
             SetStatus("SUPPORT NEEDED");
@@ -478,9 +514,10 @@ namespace DeepCore.FreeMovement
             _buildHoursLeft -= gameHoursDelta;
             if (_buildHoursLeft > 0f) return;
 
-            if (_infra != null && _infra.TryBuildSupport(_jobCell.x, _jobCell.y))
+            if (_infra != null && _infra.TryBuildSupport(_jobCell.x, _jobCell.y, SupportBuildQuality01()))
                 DigHoodLog.Push($"ENGINEER | support ({_jobCell.x},{_jobCell.y})"
-                    + (_jobIsCriticalSupport ? " CRITICAL" : ""));
+                    + (_jobIsCriticalSupport ? " CRITICAL" : "")
+                    + $" Q={SupportBuildQuality01():0.00}");
 
             FinishInfraJob();
         }
@@ -490,7 +527,6 @@ namespace DeepCore.FreeMovement
             _state = State.IdleAtPost;
             _workKind = EngineerWorkKind.Idle;
             _hasJobTarget = false;
-            _jobIsLantern = false;
             SetStatus("NO WORK NEEDED");
             _evaluateCooldown = 0.2f;
         }
@@ -498,7 +534,6 @@ namespace DeepCore.FreeMovement
         void AbortInfraJob()
         {
             _buildHoursLeft = 0f;
-            _jobIsLantern = false;
             _hasJobTarget = false;
             if (_state == State.Evaluating
                 || _state == State.WalkingToLantern
@@ -510,6 +545,8 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        float _repairStrandTimer;
+
         void BeginDispatch()
         {
             AbortInfraJob();
@@ -517,6 +554,7 @@ namespace DeepCore.FreeMovement
             _workKind = EngineerWorkKind.RepairEnRoute;
             SetStatus("REPAIRING");
             _nav?.Invalidate();
+            _repairStrandTimer = 0f;
             RefreshRepairCoop();
             OnRepairDispatched?.Invoke(_activeRepairCoop);
             if (!_announcedDispatch)
@@ -545,7 +583,12 @@ namespace DeepCore.FreeMovement
         {
             int excavOpId = _excavator != null ? _excavator.AssignedWorkerId : 0;
             if (_excavator != null && _excavator.IsOverheated)
+            {
                 _excavator.ClearOverheatByEngineer();
+                EquipmentSparkFx.SpawnRestart(
+                    transform.parent != null ? transform.parent : transform,
+                    _excavator.Position);
+            }
 
             const float baseRecoverMag = 4f;
             float recoverMul = 1f;
@@ -640,10 +683,15 @@ namespace DeepCore.FreeMovement
                 return true;
             }
 
+            float bias = moveSpeed / WorkerPhysicalProfile.ReferenceWalkSpeed;
+            float personSpeed = WorkerLocomotion.WalkSpeedAt(
+                _assignedWorker, _world, from, BodyRadius,
+                roleBias: bias, carriedLoad01: 0f, isMoving: true);
+
             return _nav.Follow(
                 from,
                 goal,
-                moveSpeed,
+                personSpeed,
                 BodyRadius,
                 face: FaceDir,
                 tryStep: TryStep);

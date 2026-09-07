@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 namespace DeepCore.FreeMovement
 {
@@ -43,6 +44,7 @@ namespace DeepCore.FreeMovement
         IndustrialSteamPlume _steamMain;
         IndustrialSteamPlume _steamSide;
         SpriteRenderer _powerLamp;
+        Light2D _powerLampLight;
         OreShimmer _cellShimmer;
 
         public Phase CurrentPhase => _phase;
@@ -87,6 +89,28 @@ namespace DeepCore.FreeMovement
             hoodSr.sortingOrder = 26; // above cell while under
             DigVisualKit.ApplyLit(hoodSr);
             hood.transform.localScale = Vector3.one * 0.52f;
+
+            // Cyan viewing-slit glow on the washer hood
+            var hoodGlow = new GameObject("HoodCyanGlow");
+            hoodGlow.transform.SetParent(go.transform, false);
+            hoodGlow.transform.localPosition = new Vector3(0f, 0.22f, 0f);
+            var hoodLight = hoodGlow.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(hoodLight,
+                new Color(0.3f, 0.9f, 1f),
+                intensity: 0.55f,
+                outer: 0.55f,
+                inner: 0.03f,
+                shadows: false,
+                falloff: 0.78f);
+            var unlitHood = Shader.Find("Sprites/Default");
+            var hoodHalo = new GameObject("HoodHalo");
+            hoodHalo.transform.SetParent(hoodGlow.transform, false);
+            hoodHalo.transform.localScale = Vector3.one * 0.35f;
+            var hhsr = hoodHalo.AddComponent<SpriteRenderer>();
+            hhsr.sprite = DigVisualKit.LanternGlow;
+            hhsr.sortingOrder = 25;
+            if (unlitHood != null) hhsr.sharedMaterial = new Material(unlitHood);
+            hhsr.color = new Color(0.25f, 0.85f, 1f, 0.35f);
 
             var cellGo = new GameObject("CellInMachine");
             cellGo.transform.SetParent(go.transform, false);
@@ -151,10 +175,30 @@ namespace DeepCore.FreeMovement
             var psr = power.AddComponent<SpriteRenderer>();
             psr.sprite = DigVisualKit.Pixel;
             psr.sortingOrder = 27;
-            DigVisualKit.ApplyLit(psr);
+            var unlit = Shader.Find("Sprites/Default");
+            if (unlit != null) psr.sharedMaterial = new Material(unlit);
             power.transform.localScale = Vector3.one * 0.055f;
             psr.color = new Color(0.15f, 0.2f, 0.22f, 0.6f);
             wm._powerLamp = psr;
+
+            var halo = new GameObject("PowerLampHalo");
+            halo.transform.SetParent(power.transform, false);
+            halo.transform.localScale = Vector3.one * 3.2f;
+            var hsr = halo.AddComponent<SpriteRenderer>();
+            hsr.sprite = DigVisualKit.LanternGlow;
+            hsr.sortingOrder = 26;
+            if (unlit != null) hsr.sharedMaterial = new Material(unlit);
+            hsr.color = new Color(0.2f, 1f, 0.4f, 0f);
+
+            var pl = power.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(pl,
+                new Color(0.3f, 1f, 0.45f),
+                intensity: 0f,
+                outer: 0.55f,
+                inner: 0.02f,
+                shadows: false,
+                falloff: 0.75f);
+            wm._powerLampLight = pl;
 
             return wm;
         }
@@ -259,13 +303,30 @@ namespace DeepCore.FreeMovement
                 if (on)
                 {
                     float pulse = 0.65f + 0.35f * Mathf.Sin(Time.time * 8f);
-                    _powerLamp.color = new Color(0.25f, 0.95f, 0.45f, pulse);
-                    _powerLamp.transform.localScale = Vector3.one * (0.05f + 0.02f * burst);
+                    _powerLamp.color = new Color(0.3f, 1f, 0.5f, pulse);
+                    _powerLamp.transform.localScale = Vector3.one * (0.055f + 0.02f * burst);
+                    var halo = _powerLamp.transform.Find("PowerLampHalo");
+                    if (halo != null)
+                    {
+                        var hsr = halo.GetComponent<SpriteRenderer>();
+                        if (hsr != null)
+                            hsr.color = new Color(0.2f, 1f, 0.4f, 0.35f + 0.25f * pulse);
+                    }
+                    if (_powerLampLight != null)
+                        _powerLampLight.intensity = 0.45f + 0.25f * pulse;
                 }
                 else
                 {
                     _powerLamp.color = new Color(0.15f, 0.2f, 0.22f, 0.55f);
                     _powerLamp.transform.localScale = Vector3.one * 0.05f;
+                    var halo = _powerLamp.transform.Find("PowerLampHalo");
+                    if (halo != null)
+                    {
+                        var hsr = halo.GetComponent<SpriteRenderer>();
+                        if (hsr != null) hsr.color = new Color(0.2f, 1f, 0.4f, 0f);
+                    }
+                    if (_powerLampLight != null)
+                        _powerLampLight.intensity = 0f;
                 }
             }
         }

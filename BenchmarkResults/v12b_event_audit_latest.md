@@ -1,6 +1,6 @@
 # V1.2B Person-Targeted Worker State Events Audit
 
-Generated: 2026-09-01 21:50:32
+Generated: 2026-09-03 09:08:18
 
 ## A. Person targeting
 PASS | Emit to Lewis applied — dFr=4
@@ -52,8 +52,8 @@ PASS | Spam gate blocks rapid identical WorkBlocked — admitted=1
 ## K. Sleep recovery after events
 PASS | Sleep still partially relieves Frustration
 
-## L. No Social Aura
-PASS | No SocialAura / InteractionPressure types
+## L. Social Aura present (intentional)
+PASS | SocialAura types present (Stage 0+ locked in)
 
 ## Daytime decay
 PASS | Daytime Frustration decay

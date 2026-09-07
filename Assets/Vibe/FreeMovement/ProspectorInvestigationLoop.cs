@@ -51,7 +51,6 @@ namespace DeepCore.FreeMovement
         bool _hasDesk;
         Vector2 _tripStand;
         bool _hasTripStand;
-        bool _consultStarted;
         /// <summary>PROTOTYPE: nearest loose pile — not provenance-linked to the anomaly.</summary>
         LoosePile _prototypeLoosePile;
 
@@ -105,11 +104,14 @@ namespace DeepCore.FreeMovement
             || _state == ProspectorInvestigationState.Analysing;
 
         float MinHoursBetweenTrips =>
-            ProspectorScanFormulas.UseTestingScanDurations ? 0.35f : 2.2f;
+            ProspectorScanFormulas.UseTestingScanDurations ? 0.12f : 2.2f;
         float InspectDwellHours =>
-            ProspectorScanFormulas.UseTestingScanDurations ? 0.35f : 1.15f;
+            ProspectorScanFormulas.UseTestingScanDurations ? 0.08f : 1.15f;
+        /// <summary>Refiner consult — keep short so investigation stays in motion.</summary>
         float ConsultDwellHours =>
-            ProspectorScanFormulas.UseTestingScanDurations ? 0.55f : 1.4f;
+            ProspectorScanFormulas.UseTestingScanDurations
+                ? ProspectorScanFormulas.TestingConsultDwellHours
+                : ProspectorScanFormulas.ProductionConsultDwellHours;
 
         public string PlayerWorkLabel
         {
@@ -174,7 +176,6 @@ namespace DeepCore.FreeMovement
             _focusScanId = -1;
             _dwellHours = 0f;
             _hasTripStand = false;
-            _consultStarted = false;
             _prototypeLoosePile = null;
             EndRefinerConsultation();
         }
@@ -379,7 +380,6 @@ namespace DeepCore.FreeMovement
         {
             _activeTripReason = ProspectorInvestigationReason.NeedRefinerConsultation;
             _hoursSinceTrip = 0f;
-            _consultStarted = false;
             a.SetNeed(
                 AnomalyInvestigationNeed.NeedRefinerConsultation,
                 ProspectorInvestigationPlanner.ReasonForNeed(
@@ -388,13 +388,21 @@ namespace DeepCore.FreeMovement
             var rf = _host.Refiner;
             if (rf != null)
             {
-                _tripStand = _host.FindInvestigationStandNear(rf.ConsultationMeetPoint, preferBehind: false);
+                Vector2 meet = _host.ConsultMeetWorld;
+                _tripStand = _host.FindInvestigationStandNear(
+                    _host.HasWorkstation ? _host.Workstation.ProspectorStand : meet,
+                    preferBehind: false);
                 _hasTripStand = true;
-                rf.RequestConsultation(rf.WorkPoint, ConsultDwellHours);
+                rf.RequestConsultation(
+                    _host.HasWorkstation ? _host.Workstation.RefinerStand : meet,
+                    ConsultDwellHours);
             }
             Enter(ProspectorInvestigationState.WalkingToRefiner,
                 ProspectorInvestigationReason.NeedRefinerConsultation, a.AnomalyId, a.ScanId);
-            DigHoodLog.Push($"PROSPECTOR | refiner consult → washer (#{a.AnomalyId:00})");
+            DigHoodLog.Push(
+                _host.HasWorkstation
+                    ? $"PROSPECTOR | refiner consult → analysis table (#{a.AnomalyId:00})"
+                    : $"PROSPECTOR | refiner consult → washer (#{a.AnomalyId:00})");
         }
 
         void TickWalkToExcavator()
@@ -465,13 +473,23 @@ namespace DeepCore.FreeMovement
 
             if (!_hasTripStand)
             {
-                _tripStand = _host.FindInvestigationStandNear(rf.ConsultationMeetPoint, preferBehind: false);
+                Vector2 meet = _host.ConsultMeetWorld;
+                _tripStand = _host.FindInvestigationStandNear(
+                    _host.HasWorkstation ? _host.Workstation.ProspectorStand : meet,
+                    preferBehind: false);
                 _hasTripStand = true;
-                rf.RequestConsultation(rf.WorkPoint, ConsultDwellHours);
+                rf.RequestConsultation(
+                    _host.HasWorkstation ? _host.Workstation.RefinerStand : meet,
+                    ConsultDwellHours);
             }
 
             if (!rf.IsInConsultation)
-                rf.RequestConsultation(rf.WorkPoint, ConsultDwellHours);
+            {
+                Vector2 meet = _host.ConsultMeetWorld;
+                rf.RequestConsultation(
+                    _host.HasWorkstation ? _host.Workstation.RefinerStand : meet,
+                    ConsultDwellHours);
+            }
 
             if (_host.InvestigationNavFollow(_tripStand, _host.InvestigationMoveSpeed))
             {
@@ -479,10 +497,10 @@ namespace DeepCore.FreeMovement
                     ProspectorInvestigationReason.NeedRefinerConsultation, _focusAnomalyId, _focusScanId);
                 _dwellHours = 0f;
                 _dwellNeeded = ConsultDwellHours;
-                _consultStarted = true;
                 rf.BeginDiscussion(_host.Position);
                 _host.FaceToward(rf.Position);
-                DigHoodLog.Push("PROSPECTOR | consulting Refiner — both paused");
+                _host.Workstation?.SetWorkActive(true);
+                DigHoodLog.Push("PROSPECTOR | consulting Refiner at analysis table");
             }
         }
 
@@ -556,7 +574,6 @@ namespace DeepCore.FreeMovement
 
             EndRefinerConsultation();
             _hasTripStand = false;
-            _consultStarted = false;
             DigHoodLog.Push("PROSPECTOR | consult done — both resume work");
             StartReturnToDesk();
         }
@@ -572,6 +589,10 @@ namespace DeepCore.FreeMovement
         void EndRefinerConsultation()
         {
             _host?.Refiner?.EndConsultation();
+            // Dim map if nobody left analysing at the table
+            if (_state != ProspectorInvestigationState.Analysing
+                && _state != ProspectorInvestigationState.ConsultingRefiner)
+                _host?.Workstation?.SetWorkActive(false);
         }
 
         void StartReturnToDesk()
@@ -580,6 +601,7 @@ namespace DeepCore.FreeMovement
             _activeTripReason = ProspectorInvestigationReason.ReturnToDesk;
             Enter(ProspectorInvestigationState.ReturningToAnalysis,
                 ProspectorInvestigationReason.ReturnToDesk, _focusAnomalyId, _focusScanId);
+            DigHoodLog.Push("PROSPECTOR | returning to analysis table");
         }
 
         void TickReturnToDesk()
@@ -603,15 +625,18 @@ namespace DeepCore.FreeMovement
             float dist = Vector2.Distance(_host.Position, desk);
             if (dist > 0.55f)
                 _host.InvestigationNavFollow(desk, _host.InvestigationMoveSpeed * 0.9f);
+            else
+                _host.Workstation?.SetWorkActive(true);
         }
 
         public Vector2 DeskWorldPosition => ResolveDesk();
 
         Vector2 ResolveDesk()
         {
+            // Camp analysis table is the investigation desk (not the field scanner).
+            if (_hasDesk) return _deskPos;
             if (_host.AssignedScanner != null)
                 return _host.AssignedScanner.Position;
-            if (_hasDesk) return _deskPos;
             var scan = _host.ScanHistory?.DisplayScan;
             if (scan != null) return scan.ScannerPosition;
             return _host.Position;

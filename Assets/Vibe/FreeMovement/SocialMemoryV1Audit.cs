@@ -210,16 +210,82 @@ namespace DeepCore.FreeMovement
             // Memory record is separate — relation Add happens inside RunExchange
             Check("Memory TotalEntries is independent counter", mem.TotalEntries >= 0);
 
+            // ——— Significance tiers ———
+            log.AppendLine();
+            log.AppendLine("## 7. Significance tiers (Ordinary / Significant / Major)");
+            Check("MaxPerTarget unchanged at 12", SocialMemoryStore.MaxPerTarget == 12);
+            var decayStore = new SocialMemoryStore();
+            decayStore.AuditForceAdd(new SocialMemoryEntry
+            {
+                ObserverId = 1, TargetId = 2, Type = SocialMemoryType.WorkedWellTogether,
+                Strength = 0.70f, GameTime = 0f,
+                Significance = SocialMemorySignificance.Ordinary
+            });
+            decayStore.AuditForceAdd(new SocialMemoryEntry
+            {
+                ObserverId = 1, TargetId = 2, Type = SocialMemoryType.HelpedMe,
+                Strength = 0.70f, GameTime = 0f,
+                Significance = SocialMemorySignificance.Significant
+            });
+            decayStore.AuditForceAdd(new SocialMemoryEntry
+            {
+                ObserverId = 1, TargetId = 2, Type = SocialMemoryType.SharedHardship,
+                Strength = 0.70f, GameTime = 0f,
+                Significance = SocialMemorySignificance.Major
+            });
+            // 80 game-hours of decay
+            decayStore.TickDecay(80f);
+            float ordStr = 0f, sigStr = 0f, majStr = 0f;
+            bool majAlive = false, ordAlive = false, sigAlive = false;
+            foreach (var e in decayStore.GetToward(1, 2))
+            {
+                if (e.Type == SocialMemoryType.WorkedWellTogether) { ordStr = e.Strength; ordAlive = true; }
+                if (e.Type == SocialMemoryType.HelpedMe) { sigStr = e.Strength; sigAlive = true; }
+                if (e.Type == SocialMemoryType.SharedHardship) { majStr = e.Strength; majAlive = true; }
+            }
+            Check("Major survives 80h decay", majAlive && majStr > 0.55f, $"str={majStr:0.00}");
+            Check("Major retains more strength than Significant after same decay",
+                majAlive && sigAlive && majStr > sigStr + 0.15f,
+                $"maj={majStr:0.00} sig={sigStr:0.00}");
+            Check("Significant retains more than Ordinary (or Ordinary purged)",
+                (sigAlive && (!ordAlive || sigStr > ordStr + 0.1f)),
+                $"sig={sigStr:0.00} ordAlive={ordAlive} ord={ordStr:0.00}");
+            Check("ClassifySignificance maps strength bands",
+                SocialMemoryStore.ClassifySignificance(0.4f, false) == SocialMemorySignificance.Ordinary
+                && SocialMemoryStore.ClassifySignificance(0.55f, false) == SocialMemorySignificance.Significant
+                && SocialMemoryStore.ClassifySignificance(0.7f, false) == SocialMemorySignificance.Major
+                && SocialMemoryStore.ClassifySignificance(0.3f, true) == SocialMemorySignificance.Major);
+
+            // Cap prefers majors under pressure
+            var capSig = new SocialMemoryStore();
+            for (int i = 0; i < 14; i++)
+            {
+                capSig.AuditForceAdd(new SocialMemoryEntry
+                {
+                    ObserverId = 9, TargetId = 8,
+                    Type = (SocialMemoryType)(i % 11),
+                    Strength = 0.35f + (i % 3) * 0.05f,
+                    GameTime = i,
+                    Significance = i < 3
+                        ? SocialMemorySignificance.Major
+                        : SocialMemorySignificance.Ordinary
+                });
+            }
+            int majorsKept = 0;
+            foreach (var e in capSig.GetToward(9, 8))
+                if (e.Significance == SocialMemorySignificance.Major) majorsKept++;
+            Check("Under cap pressure, Major memories preferred",
+                majorsKept >= 3 && capSig.GetToward(9, 8).Count == SocialMemoryStore.MaxPerTarget,
+                $"majors={majorsKept} count={capSig.GetToward(9, 8).Count}");
+
             log.AppendLine();
             log.AppendLine("## Summary");
             log.AppendLine($"PASS {pass} / FAIL {fail}");
             log.AppendLine(fail == 0 ? "INVARIANT: PASS" : "INVARIANT: FAIL");
             log.AppendLine();
             log.AppendLine("## Files");
-            log.AppendLine("- Assets/Vibe/FreeMovement/SocialMemory.cs (new)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/SocialAuraStage0Encounter.cs (hook Record)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/SocialAuraLive.cs (hook Record + overnight decay)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV UI)");
+            log.AppendLine("- Assets/Vibe/FreeMovement/SocialMemory.cs (significance tiers + decay)");
+            log.AppendLine("- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV significance)");
             log.AppendLine("- Assets/Vibe/FreeMovement/SocialMemoryV1Audit.cs (this audit)");
 
             string dir = outputDirectory;

@@ -336,36 +336,42 @@ namespace DeepCore.FreeMovement
             root.SetParent(parent, false);
             root.localPosition = Vector3.zero;
             yard.Root = root;
-            yard.DropPoint = center;
+            yard.DropPoint = center; // overwritten once wash bay is laid out
 
             var platform = new GameObject("Platform");
             platform.transform.SetParent(root, false);
-            platform.transform.localPosition = center + new Vector2(0.35f, -0.4f);
+            // Platform centers on the wash bay rather than empty pad space
+            platform.transform.localPosition = center + new Vector2(0.15f, -0.35f);
             var psr = platform.AddComponent<SpriteRenderer>();
             psr.sprite = YardVisualKit.YardPlatform;
             psr.sortingOrder = 10;
             DigVisualKit.ApplyLit(psr);
             platform.transform.localScale = Vector3.one * 2.85f;
 
-            // Layout:
-            //  [ROCK]   [WASHER]  [GOLD]   [DIAMOND]
-            //  [DIRT]             [R.GOLD] [R.DIA]
-            float xRock = -1.55f;
-            float xGold = 1.05f;
-            float xDia = 2.15f;
-            float yOre = 0.28f;
-            float yOut = -1.05f;
+            // Compact wash bay — piles hug the washer instead of spanning the whole pad.
+            //   [ROCK]  [GOLD]  [DIAMOND]     ← ore inputs (hauler / refiner pick)
+            //         [WASHER]
+            //   [DIRT]  [R.GOLD] [R.DIA]      ← wash outputs
+            Vector2 wash = center + new Vector2(-0.05f, -0.35f);
+            float xInL = -0.85f;
+            float xInC = 0.15f;
+            float xInR = 1.05f;
+            float yIn = 0.58f;
+            float yOut = -0.62f;
 
-            yard.Rock = Stockpile.Spawn(root, center + new Vector2(xRock, yOre), StockpileKind.Rock);
-            yard.Gold = Stockpile.Spawn(root, center + new Vector2(xGold, yOre), StockpileKind.Gold);
-            yard.Diamond = Stockpile.Spawn(root, center + new Vector2(xDia, yOre), StockpileKind.Diamond);
-            yard.Dirt = Stockpile.Spawn(root, center + new Vector2(xRock, yOut), StockpileKind.Dirt);
-            yard.RefinedGold = Stockpile.Spawn(root, center + new Vector2(xGold, yOut), StockpileKind.RefinedGold);
-            yard.RefinedDiamond = Stockpile.Spawn(root, center + new Vector2(xDia, yOut),
+            yard.Rock = Stockpile.Spawn(root, wash + new Vector2(xInL, yIn), StockpileKind.Rock);
+            yard.Gold = Stockpile.Spawn(root, wash + new Vector2(xInC, yIn), StockpileKind.Gold);
+            yard.Diamond = Stockpile.Spawn(root, wash + new Vector2(xInR, yIn), StockpileKind.Diamond);
+            yard.Dirt = Stockpile.Spawn(root, wash + new Vector2(xInL, yOut), StockpileKind.Dirt);
+            yard.RefinedGold = Stockpile.Spawn(root, wash + new Vector2(xInC, yOut), StockpileKind.RefinedGold);
+            yard.RefinedDiamond = Stockpile.Spawn(root, wash + new Vector2(xInR, yOut),
                 StockpileKind.RefinedDiamond);
 
-            yard.Washer = WashMachine.Spawn(root, center + new Vector2(-0.15f, -0.35f),
+            yard.Washer = WashMachine.Spawn(root, wash,
                 yard.RefinedGold, yard.Dirt, yard.RefinedDiamond);
+
+            // Hauler drop aims at the ore-input bay in front of the washer
+            yard.DropPoint = wash + new Vector2(xInC, yIn * 0.35f);
 
             return yard;
         }

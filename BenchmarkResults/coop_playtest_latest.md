@@ -1,5 +1,5 @@
 # Relationship Work Playtest Audit
-Generated: 2026-09-03 08:44:19
+Generated: 2026-09-03 09:09:34
 
 Scope: DEV tracker + SET TEST RELATIONSHIP presets. No sim formula changes.
 
@@ -16,6 +16,15 @@ PASS | Strained preset → Strained (not Grudge) — Strained
 PASS | Neutral preset clears pair memories + Neutral class — Neutral
 PASS | Cycle Neutral→Professional→Rivalry→Strained→Neutral — StrongProfessional→Rivalry→Strained→Neutral
 PASS | Preset Strong Professional Q > Strained Q — pro=0.60 strained=0.26
+PASS | All four presets produce distinct CooperationQuality — P=0.60 R=0.51 N=0.42 S=0.26
+PASS | Ordering: Professional > Rivalry > Strained — P=0.60 R=0.51 S=0.26
+PASS | Rivalry still competent (Q≥0.45) despite high Hostility — Q=0.51
+PASS | All preset dispatch/repair muls stay in bounds — P spd=1.02 dur=0.99
+
+## 2b. DEV preset isolation
+PASS | Preset Mara↔Viktor does not mutate Lewis→Mara axes — T=7.0 W=3.0 H=0.0 R=66.0
+PASS | Preset ClearPair does not wipe unrelated pair memories — count=1
+PASS | ApplyPreset is DEV-only API (not invoked by Evaluate)
 
 ## 3. Sim invariants unchanged
 PASS | Dispatch mul bounds unchanged
@@ -25,12 +34,9 @@ PASS | RepairSeconds still 2.6
 PASS | Memory MaxPerTarget still 12
 
 ## Summary
-PASS 15 / FAIL 0
+PASS 22 / FAIL 0
 INVARIANT: PASS
 
 ## Files
-- Assets/Vibe/FreeMovement/RelationshipWorkPlaytestTracker.cs (new)
-- Assets/Vibe/FreeMovement/SocialMemory.cs (ClearPair DEV helper)
-- Assets/Vibe/FreeMovement/EngineerPerson.cs (observation hooks)
-- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV UI + bind)
+- Assets/Vibe/FreeMovement/RelationshipWorkPlaytestTracker.cs
 - Assets/Vibe/FreeMovement/RelationshipWorkPlaytestAudit.cs (this audit)

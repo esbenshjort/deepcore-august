@@ -456,7 +456,7 @@ namespace DeepCore.FreeMovement
 
         void EnsureGlobalLight(float intensity)
         {
-            foreach (var l in FindObjectsByType<Light2D>(FindObjectsSortMode.None))
+            foreach (var l in FindObjectsByType<Light2D>())
             {
                 if (l.lightType != Light2D.LightType.Global) continue;
                 l.intensity = intensity;

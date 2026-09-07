@@ -13,5 +13,6 @@ namespace DeepCore.FreeMovement
         Hauling = 3,
         Refining = 4,
         Engineering = 5,
+        Steward = 6,
     }
 }

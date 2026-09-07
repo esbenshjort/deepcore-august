@@ -15,6 +15,14 @@ namespace UnityEngine
         public static int Min(int a, int b) => a < b ? a : b;
         public static float Lerp(float a, float b, float t) => a + (b - a) * Clamp01(t);
         public static int RoundToInt(float v) => (int)Math.Round(v);
+        public static int FloorToInt(float v) => (int)Math.Floor(v);
+        public static int CeilToInt(float v) => (int)Math.Ceiling(v);
+        public static float Repeat(float t, float length)
+        {
+            if (length <= 0f) return 0f;
+            float r = t - (float)Math.Floor(t / length) * length;
+            return r < 0f ? r + length : r;
+        }
         public static bool Approximately(float a, float b) => Abs(a - b) < 1e-5f;
     }
 
@@ -60,6 +68,13 @@ namespace UnityEngine
     public static class Time
     {
         public static float unscaledTime { get; set; }
+        public static float deltaTime { get; set; } = 0.016f;
+    }
+
+    public struct Vector2Int
+    {
+        public int x, y;
+        public Vector2Int(int x, int y) { this.x = x; this.y = y; }
     }
 
     [AttributeUsage(AttributeTargets.Field)]

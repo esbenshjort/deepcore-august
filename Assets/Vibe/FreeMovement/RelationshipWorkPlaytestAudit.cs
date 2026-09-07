@@ -147,12 +147,56 @@ namespace DeepCore.FreeMovement
             t.ApplyPreset(RelationshipWorkTestPreset.StrongProfessional, world, world.Memory, 2, 5);
             var qPro = ExcavatorEngineerCooperation.Evaluate(
                 new WorkerRuntime(2, "Mara"), new WorkerRuntime(5, "Viktor"), world);
+            t.ApplyPreset(RelationshipWorkTestPreset.Rivalry, world, world.Memory, 2, 5);
+            var qRiv = ExcavatorEngineerCooperation.Evaluate(
+                new WorkerRuntime(2, "Mara"), new WorkerRuntime(5, "Viktor"), world);
+            t.ApplyPreset(RelationshipWorkTestPreset.Neutral, world, world.Memory, 2, 5);
+            var qNeu = ExcavatorEngineerCooperation.Evaluate(
+                new WorkerRuntime(2, "Mara"), new WorkerRuntime(5, "Viktor"), world);
             t.ApplyPreset(RelationshipWorkTestPreset.Strained, world, world.Memory, 2, 5);
             var qStr = ExcavatorEngineerCooperation.Evaluate(
                 new WorkerRuntime(2, "Mara"), new WorkerRuntime(5, "Viktor"), world);
             Check("Preset Strong Professional Q > Strained Q",
                 qPro.Quality > qStr.Quality + 0.1f,
                 $"pro={qPro.Quality:0.00} strained={qStr.Quality:0.00}");
+            Check("All four presets produce distinct CooperationQuality",
+                DistinctEnough(qPro.Quality, qRiv.Quality, qNeu.Quality, qStr.Quality),
+                $"P={qPro.Quality:0.00} R={qRiv.Quality:0.00} N={qNeu.Quality:0.00} S={qStr.Quality:0.00}");
+            Check("Ordering: Professional > Rivalry > Strained",
+                qPro.Quality > qRiv.Quality && qRiv.Quality > qStr.Quality,
+                $"P={qPro.Quality:0.00} R={qRiv.Quality:0.00} S={qStr.Quality:0.00}");
+            Check("Rivalry still competent (Q≥0.45) despite high Hostility",
+                qRiv.Quality >= 0.45f, $"Q={qRiv.Quality:0.00}");
+            Check("All preset dispatch/repair muls stay in bounds",
+                InMulBounds(qPro) && InMulBounds(qRiv) && InMulBounds(qNeu) && InMulBounds(qStr),
+                $"P spd={qPro.DispatchSpeedMul:0.00} dur={qPro.RepairDurationMul:0.00}");
+
+            // Contamination: preset only touches named pair
+            log.AppendLine();
+            log.AppendLine("## 2b. DEV preset isolation");
+            world.AddActor(new SocialSimActor(1, "Lewis", WorkerStats.CreateBaseline(), WorkerState.CreateDefault()));
+            world.Relation(1, 2).Trust = 7f;
+            world.Relation(1, 2).Respect = 66f;
+            world.Relation(1, 2).Warmth = 3f;
+            float lewisT = world.Relation(1, 2).Trust;
+            float lewisR = world.Relation(1, 2).Respect;
+            world.Memory.AuditForceAdd(new SocialMemoryEntry
+            {
+                ObserverId = 1, TargetId = 2, Type = SocialMemoryType.HelpedMe,
+                Strength = 0.8f, GameTime = 10f, Major = true,
+                Context = SocialContext.WorkingTogether
+            });
+            int lewisMem = world.Memory.GetToward(1, 2).Count;
+            t.ApplyPreset(RelationshipWorkTestPreset.Strained, world, world.Memory, 2, 5);
+            Check("Preset Mara↔Viktor does not mutate Lewis→Mara axes",
+                Mathf.Abs(world.Relation(1, 2).Trust - lewisT) < 0.001f
+                && Mathf.Abs(world.Relation(1, 2).Respect - lewisR) < 0.001f,
+                RelationshipClassifier.FormatAxes(world.Relation(1, 2)));
+            Check("Preset ClearPair does not wipe unrelated pair memories",
+                world.Memory.GetToward(1, 2).Count == lewisMem,
+                $"count={world.Memory.GetToward(1, 2).Count}");
+            Check("ApplyPreset is DEV-only API (not invoked by Evaluate)",
+                typeof(ExcavatorEngineerCooperation).GetMethod("ApplyPreset") == null);
 
             // ——— Invariants unchanged ———
             log.AppendLine();
@@ -175,10 +219,7 @@ namespace DeepCore.FreeMovement
             log.AppendLine(fail == 0 ? "INVARIANT: PASS" : "INVARIANT: FAIL");
             log.AppendLine();
             log.AppendLine("## Files");
-            log.AppendLine("- Assets/Vibe/FreeMovement/RelationshipWorkPlaytestTracker.cs (new)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/SocialMemory.cs (ClearPair DEV helper)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/EngineerPerson.cs (observation hooks)");
-            log.AppendLine("- Assets/Vibe/FreeMovement/FreeMovementSocketMapRunner.cs (DEV UI + bind)");
+            log.AppendLine("- Assets/Vibe/FreeMovement/RelationshipWorkPlaytestTracker.cs");
             log.AppendLine("- Assets/Vibe/FreeMovement/RelationshipWorkPlaytestAudit.cs (this audit)");
 
             string dir = string.IsNullOrEmpty(outputDirectory)
@@ -191,5 +232,20 @@ namespace DeepCore.FreeMovement
             File.WriteAllText(latest, log.ToString());
             return latest;
         }
+
+        static bool DistinctEnough(float a, float b, float c, float d)
+        {
+            float[] v = { a, b, c, d };
+            for (int i = 0; i < v.Length; i++)
+            for (int j = i + 1; j < v.Length; j++)
+                if (Mathf.Abs(v[i] - v[j]) < 0.03f) return false;
+            return true;
+        }
+
+        static bool InMulBounds(CooperationAssessment c) =>
+            c.DispatchSpeedMul >= ExcavatorEngineerCooperation.DispatchMulMin - 0.001f
+            && c.DispatchSpeedMul <= ExcavatorEngineerCooperation.DispatchMulMax + 0.001f
+            && c.RepairDurationMul >= ExcavatorEngineerCooperation.RepairDurMulMin - 0.001f
+            && c.RepairDurationMul <= ExcavatorEngineerCooperation.RepairDurMulMax + 0.001f;
     }
 }

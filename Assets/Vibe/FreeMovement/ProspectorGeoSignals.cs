@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace DeepCore.FreeMovement
@@ -32,6 +33,7 @@ namespace DeepCore.FreeMovement
     /// Hidden or observed physical survey traits (0..1 continuous + discrete boundary class).
     /// Player never sees raw floats.
     /// </summary>
+    [Serializable]
     public struct AnomalyGeoSignals
     {
         public float ReturnStrength;
@@ -55,6 +57,7 @@ namespace DeepCore.FreeMovement
     /// <summary>
     /// Progressive Prospector reading of hidden signals. Traits unlock by work type.
     /// </summary>
+    [Serializable]
     public struct AnomalyObservedSignals
     {
         public AnomalyGeoSignals Values;

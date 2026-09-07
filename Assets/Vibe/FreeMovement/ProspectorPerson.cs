@@ -36,6 +36,7 @@ namespace DeepCore.FreeMovement
         ScanViewOverlay _scanView;
         FreeWorkerController _excavator;
         RefinerPerson _refiner;
+        ProspectorWorkstationSite _workstation;
         ExcavatedPathfinder _nav;
         ProspectorInvestigationLoop _investigation;
         float _radius = 0.1f;
@@ -202,8 +203,20 @@ namespace DeepCore.FreeMovement
         public void BindExcavator(FreeWorkerController excavator) => _excavator = excavator;
         public void BindRefiner(RefinerPerson refiner) => _refiner = refiner;
 
+        public void BindWorkstation(ProspectorWorkstationSite site)
+        {
+            _workstation = site;
+            if (site != null)
+                SetInvestigationDesk(site.ProspectorStand);
+        }
+
         public FreeWorkerController Excavator => _excavator;
         public RefinerPerson Refiner => _refiner;
+        public ProspectorWorkstationSite Workstation => _workstation;
+        public bool HasWorkstation => _workstation != null;
+        public Vector2 ConsultMeetWorld =>
+            _workstation != null ? _workstation.TableCenter
+            : (_refiner != null ? _refiner.ConsultationMeetPoint : Position);
         public float BodyRadius => _radius;
         public float InvestigationMoveSpeed => _autoMoveSpeed * 1.05f;
 
@@ -409,7 +422,11 @@ namespace DeepCore.FreeMovement
         /// <summary>Move only — keep WorkMode / investigation / scanner assignment across sleep.</summary>
         public void SoftTeleport(Vector2 pos)
         {
+            Vector2 from = Position;
             transform.localPosition = pos;
+            WorkerRelocationLog.Report(
+                AssignedWorker != null ? AssignedWorker.DisplayName : "Prospector",
+                from, pos, "SoftTeleport", "ProspectorPerson");
             _nav?.Invalidate();
             _hasWorkGoal = false;
             _workRetargetT = 0f;
@@ -474,6 +491,9 @@ namespace DeepCore.FreeMovement
         public event System.Action GasHintFound;
         public event System.Action SurveyWhisper;
         public event System.Action AssistNote;
+
+        /// <summary>Heavy scanner began a session — fires person-authored ScanStarted banter.</summary>
+        public void NotifyScanStarted() => ScanStarted?.Invoke();
 
         public void Tick(Vector2 wasd, bool scanPulse)
         {
@@ -589,10 +609,15 @@ namespace DeepCore.FreeMovement
             if (!Investigation.HasInvestigationWork()) return;
             if (WorkMode == ProspectorWorkMode.Investigate) return;
 
-            // After heavy scan freezes with unresolved anomalies — continuous investigator
-            var scan = ScanHistory?.DisplayScan;
-            if (scan != null)
-                SetInvestigationDesk(scan.ScannerPosition);
+            // Analyse at camp workstation — not parked on the field scanner
+            if (_workstation != null)
+                SetInvestigationDesk(_workstation.ProspectorStand);
+            else
+            {
+                var scan = ScanHistory?.DisplayScan;
+                if (scan != null)
+                    SetInvestigationDesk(scan.ScannerPosition);
+            }
             SetWorkMode(ProspectorWorkMode.Investigate);
             DigHoodLog.Push("PROSPECTOR | Investigation loop started (closest anomalies first)");
             Debug.Log("[PROSPECTOR] Auto-entered Investigate mode after scan freeze");
@@ -909,7 +934,10 @@ namespace DeepCore.FreeMovement
         bool NavFollow(Vector2 goal, float speed)
         {
             if (_nav == null) return (goal - Position).sqrMagnitude < 0.04f;
-            float spd = speed * LoosePile.SpeedMulAt(Position, _radius);
+            float bias = speed / WorkerPhysicalProfile.ReferenceWalkSpeed;
+            float spd = WorkerLocomotion.WalkSpeedAt(
+                _assignedWorker, _world, Position, _radius,
+                roleBias: bias, carriedLoad01: 0f, isMoving: true);
             return _nav.Follow(Position, goal, spd, _radius, Face, TryNavStep);
         }
 
@@ -990,7 +1018,10 @@ namespace DeepCore.FreeMovement
 
         void Step(Vector2 dir, float speed)
         {
-            float step = speed * LoosePile.SpeedMulAt(Position, _radius) * Time.deltaTime;
+            float bias = speed / WorkerPhysicalProfile.ReferenceWalkSpeed;
+            float step = WorkerLocomotion.WalkSpeedAt(
+                _assignedWorker, _world, Position, _radius,
+                roleBias: bias, carriedLoad01: 0f, isMoving: true) * Time.deltaTime;
             Vector2 pos = Position;
             Vector2 next = pos + dir * step;
             if (!_world.CircleHitsSolid(next, _radius))
