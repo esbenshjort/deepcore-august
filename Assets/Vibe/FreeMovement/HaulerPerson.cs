@@ -21,7 +21,7 @@ namespace DeepCore.FreeMovement
         DeliveryCalculator _calc;
         Vector2 _basecamp;
         float _radius = 0.055f;
-        float _moveSpeed = 0.68f;          // deliberate walk — heavy boots
+        float _moveSpeed = 0.52f;          // deliberate walk — heavy boots / cart
         float _pickupRadius = 0.55f;
         int _maxCarryPiles = CartSlots;
         float _pickupDuration = 1.15f;     // heave each cell into the cart
@@ -228,8 +228,9 @@ namespace DeepCore.FreeMovement
             {
                 _nav = new ExcavatedPathfinder(_world, _radius);
                 _nav.LateralOffset = 0.04f;
+                _nav.SetMachineProfile(_radius, TunnelWidthSpec.HaulerMinClearance);
             }
-            _nav.SetAgentRadius(_radius);
+            _nav.SetMachineProfile(_radius, TunnelWidthSpec.HaulerMinClearance);
         }
 
         void InvalidatePath()
@@ -813,7 +814,13 @@ namespace DeepCore.FreeMovement
             }
 
             if (bestScore < 1e20f)
-                transform.localPosition = Vector2.MoveTowards(pos, best, _moveSpeed * Time.deltaTime * 1.8f);
+            {
+                float escapeSpd = WorkerLocomotion.WalkSpeedAt(
+                    _assignedWorker, _world, pos, _radius,
+                    roleBias: WorkerLocomotion.RoleBiasFromAbsolute(_moveSpeed),
+                    carriedLoad01: 0f, isMoving: true);
+                transform.localPosition = Vector2.MoveTowards(pos, best, escapeSpd * Time.deltaTime);
+            }
         }
 
         bool TryOpenCellStep(Vector2 pos, Vector2 goal, float step, float radius)

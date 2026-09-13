@@ -40,7 +40,7 @@ namespace DeepCore.Vibe.Editor
                 cam.clearFlags = CameraClearFlags.SolidColor;
             }
 
-            var existing = Object.FindFirstObjectByType<LookTestBootstrap>();
+            var existing = Object.FindAnyObjectByType<LookTestBootstrap>();
             if (existing == null)
             {
                 var go = new GameObject("LookTestBootstrap");

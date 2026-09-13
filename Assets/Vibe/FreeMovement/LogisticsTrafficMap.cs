@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace DeepCore.FreeMovement
@@ -8,6 +9,8 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class LogisticsTrafficMap
     {
+        /// <summary>Fired when a cell is visited — terrain presentation can dirty wear.</summary>
+        public event Action<int, int> CellVisited;
         /// <summary>Score added per unloaded cell visit.</summary>
         public float VisitGainUnloaded = 1f;
         /// <summary>Score added per loaded cell visit.</summary>
@@ -73,6 +76,7 @@ namespace DeepCore.FreeMovement
             if (loaded) _loaded[i] += VisitGainLoaded;
             else _unloaded[i] += VisitGainUnloaded;
             _lastUsedHours[i] = _gameHours;
+            CellVisited?.Invoke(x, y);
         }
 
         public void RecordVisitWorld(Vector2 worldPos, bool loaded)

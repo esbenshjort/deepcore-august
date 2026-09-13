@@ -8,8 +8,18 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public readonly struct WorkerPhysicalProfile
     {
-        /// <summary>World units/sec for Agility=10, clear tunnel, rested, unloaded.</summary>
-        public const float ReferenceWalkSpeed = 1.35f;
+        /// <summary>
+        /// World units/sec for Agility=10, clear tunnel, rested, unloaded.
+        /// Tuned for mine visual scale (person-sized sprites) — brisk walk, not a jog.
+        /// </summary>
+        public const float ReferenceWalkSpeed = 0.58f;
+
+        /// <summary>Hard ceiling for normal walking (before footing slow). No silent run.</summary>
+        public const float MaxNormalWalkSpeed = 0.72f;
+
+        /// <summary>Role intent clamp — hosts may bias slightly, never invent sprint.</summary>
+        public const float RoleBiasMin = 0.88f;
+        public const float RoleBiasMax = 1.08f;
 
         /// <summary>Base walk speed from Agility (+ light Rhythm cadence).</summary>
         public readonly float MoveSpeed;
@@ -76,9 +86,9 @@ namespace DeepCore.FreeMovement
             int focus = stats.Get(WorkerStatId.Focus);
             int composure = stats.Get(WorkerStatId.Composure);
 
-            // Agility owns pace; Rhythm is a small cadence nudge — not a second speed axis.
-            float agiMul = Mathf.Lerp(0.78f, 1.22f, (agi - 1) / 19f);
-            float rhythmMul = 1f + (rhythm - 10) * 0.008f;
+            // Agility owns pace modestly; Rhythm is a tiny cadence nudge.
+            float agiMul = Mathf.Lerp(0.88f, 1.12f, (agi - 1) / 19f);
+            float rhythmMul = 1f + (rhythm - 10) * 0.005f;
             float move = ReferenceWalkSpeed * agiMul * rhythmMul;
 
             float accel = Mathf.Lerp(0.72f, 1.28f, (agi - 1) / 19f)

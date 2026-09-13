@@ -98,73 +98,71 @@ namespace DeepCore.FreeMovement
                     sb.AppendLine();
                 }
                 sb.AppendLine("## Design intent");
-                sb.AppendLine("- Organic SocketMap style retained (bedrock lobes, early teases, gas field).");
-                sb.AppendLine("- Mission overlay carves soft trunks + junctions; plugs tempting shortcuts.");
-                sb.AppendLine("- Prospecting must interpret mineral / hazard clues — safe path is not labeled.");
+                sb.AppendLine("- Tiny soft chokes (≈3-tile dig) with bedrock shoulders force class-1 tunnels.");
+                sb.AppendLine("- Medium soft pads at junctions + ore rooms reward class-3 dig for working space.");
+                sb.AppendLine("- Tiny gold/diamond galleries off the main snakes; tempting shortcuts = gas/bedrock.");
+                sb.AppendLine("- Prospecting stays interpretive — safe path is not labeled.");
                 sb.AppendLine("- Win = refine ≥1 GOLD and ≥1 DIA within 14 shift days.");
                 return sb.ToString();
             }
         }
 
+        /// <summary>
+        /// Puzzle geology: tiny soft chokes (≈ class-1 dig) between medium soft pads
+        /// (≈ class-3 dig) around ore. Bedrock shoulders punish wide shortcuts; gas/bedrock
+        /// plugs tempt the straight dig. Tiny gold/diamond sprinkles reward narrow side cuts.
+        /// </summary>
         public static Layout Apply(FineTerrainWorld w, int sx, int sy)
         {
             var layout = MakeLayout(sx, sy);
 
-            SoftCorridor(w, sx, sy + 6, layout.JunctionWest.x, layout.JunctionWest.y, 3);
-            SoftCorridor(w, sx, sy + 6, layout.JunctionEast.x, layout.JunctionEast.y, 3);
+            // --- Direct-north wall: straight dig dies into bedrock + gas ---
+            GoldVeinPlacer.FillBedrockRect(w, sx - 16, sy + 34, 33, 12);
+            GoldVeinPlacer.FillBedrockRect(w, layout.DirectBedrockPlug.x - 8,
+                layout.DirectBedrockPlug.y - 4, 17, 10);
+            GoldVeinPlacer.TryPlaceGasPocket(w, sx, sy + 58, rx: 3, ry: 3, stretch: 1f, rockBuffer: 2);
 
-            SoftCorridor(w, layout.JunctionWest.x, layout.JunctionWest.y,
-                layout.DiamondChamber.xMin - 2, layout.DiamondCenter.y, 3);
-            SoftCorridor(w, layout.JunctionWest.x - 8, layout.JunctionWest.y + 30,
-                layout.DiamondChamber.xMin - 1, layout.DiamondCenter.y - 4, 2);
+            // --- Camp → forks + ridge loop (all tiny) ---
+            TinyChoke(w, sx, sy + 6, sx - 4, sy + 28);
+            TinyChoke(w, sx - 4, sy + 28, layout.JunctionWest.x, layout.JunctionWest.y);
+            TinyChoke(w, sx, sy + 6, sx + 4, sy + 28);
+            TinyChoke(w, sx + 4, sy + 28, layout.JunctionEast.x, layout.JunctionEast.y);
 
-            SoftCorridor(w, layout.JunctionEast.x, layout.JunctionEast.y,
-                layout.GoldChamber.xMax + 2, layout.GoldCenter.y, 3);
-            SoftCorridor(w, layout.JunctionEast.x + 8, layout.JunctionEast.y + 30,
-                layout.GoldChamber.xMax + 1, layout.GoldCenter.y - 4, 2);
+            TinyChoke(w, layout.JunctionWest.x, layout.JunctionWest.y, sx - 28, sy + 72);
+            TinyChoke(w, sx - 28, sy + 72, layout.JunctionMid.x - 6, layout.JunctionMid.y);
+            TinyChoke(w, layout.JunctionEast.x, layout.JunctionEast.y, sx + 28, sy + 72);
+            TinyChoke(w, sx + 28, sy + 72, layout.JunctionMid.x + 6, layout.JunctionMid.y);
 
-            GoldVeinPlacer.FillSoftRockRect(w, layout.JunctionWest.x - 5, layout.JunctionWest.y - 5, 11, 11);
-            GoldVeinPlacer.FillSoftRockRect(w, layout.JunctionEast.x - 5, layout.JunctionEast.y - 5, 11, 11);
-            GoldVeinPlacer.FillSoftRockRect(w, layout.JunctionMid.x - 6, layout.JunctionMid.y - 6, 13, 13);
-
-            // Tempting direct north — bedrock ridge
-            GoldVeinPlacer.FillBedrockRect(w, sx - 14, sy + 38, 29, 10);
-            GoldVeinPlacer.FillBedrockRect(w, layout.DirectBedrockPlug.x - 10,
-                layout.DirectBedrockPlug.y - 3, 21, 8);
-
-            GoldVeinPlacer.FillBedrockRect(w, layout.GoldTemptBedrock.x - 5,
-                layout.GoldTemptBedrock.y - 4, 12, 10);
-            GoldVeinPlacer.FillBedrockRect(w, layout.DiamondTemptBedrock.x - 5,
-                layout.DiamondTemptBedrock.y - 4, 12, 10);
-
-            // Soft links around the ridge (not through it)
-            SoftCorridor(w, layout.JunctionWest.x, layout.JunctionWest.y, sx - 24, sy + 68, 3);
-            SoftCorridor(w, sx - 24, sy + 68, layout.JunctionMid.x - 8, layout.JunctionMid.y, 3);
-            SoftCorridor(w, layout.JunctionEast.x, layout.JunctionEast.y, sx + 24, sy + 68, 3);
-            SoftCorridor(w, sx + 24, sy + 68, layout.JunctionMid.x + 8, layout.JunctionMid.y, 3);
-            GoldVeinPlacer.FillSoftRockRect(w, layout.JunctionMid.x - 6, layout.JunctionMid.y - 6, 13, 13);
-
-            SoftCorridor(w, layout.JunctionEast.x, layout.JunctionEast.y,
-                layout.GoldChamber.xMax + 2, layout.GoldCenter.y, 3);
-            SoftCorridor(w, layout.JunctionMid.x + 22, layout.JunctionMid.y + 12,
-                layout.GoldCenter.x + 2, layout.GoldChamber.yMin - 2, 3);
-            SoftCorridor(w, layout.JunctionWest.x, layout.JunctionWest.y,
-                layout.DiamondChamber.xMin - 2, layout.DiamondCenter.y, 3);
-            SoftCorridor(w, layout.JunctionMid.x - 22, layout.JunctionMid.y + 12,
-                layout.DiamondCenter.x - 2, layout.DiamondChamber.yMin - 2, 3);
-
+            // Tempting mid shortcuts (blocked)
+            GoldVeinPlacer.FillBedrockRect(w, layout.GoldTemptBedrock.x - 4,
+                layout.GoldTemptBedrock.y - 5, 10, 12);
+            GoldVeinPlacer.FillBedrockRect(w, layout.DiamondTemptBedrock.x - 4,
+                layout.DiamondTemptBedrock.y - 5, 10, 12);
             GoldVeinPlacer.TryPlaceGasPocket(w, layout.GoldTemptGas.x, layout.GoldTemptGas.y,
-                rx: 4, ry: 3, stretch: 0.9f, rockBuffer: 2);
+                rx: 3, ry: 3, stretch: 0.95f, rockBuffer: 2);
             GoldVeinPlacer.TryPlaceGasPocket(w, layout.DiamondTemptGas.x, layout.DiamondTemptGas.y,
-                rx: 4, ry: 3, stretch: 0.9f, rockBuffer: 2);
-            GoldVeinPlacer.TryPlaceGasPocket(w, sx + 6, sy + 72, rx: 3, ry: 3, stretch: 1f, rockBuffer: 2);
+                rx: 3, ry: 3, stretch: 0.95f, rockBuffer: 2);
+            GoldVeinPlacer.TryPlaceGasPocket(w, sx + 10, sy + 86, rx: 4, ry: 3, stretch: 0.9f, rockBuffer: 2);
+            GoldVeinPlacer.TryPlaceGasPocket(w, sx - 48, sy + 64, rx: 3, ry: 4, stretch: 1f, rockBuffer: 2);
 
-            GoldVeinPlacer.FillSoftRockRect(w,
-                layout.GoldChamber.xMin - 3, layout.GoldChamber.yMin - 3,
-                layout.GoldChamber.width + 6, layout.GoldChamber.height + 6);
-            GoldVeinPlacer.FillSoftRockRect(w,
-                layout.DiamondChamber.xMin - 3, layout.DiamondChamber.yMin - 3,
-                layout.DiamondChamber.width + 6, layout.DiamondChamber.height + 6);
+            // --- Gold / diamond tiny approaches ---
+            TinyChoke(w, layout.JunctionEast.x, layout.JunctionEast.y,
+                layout.GoldChamber.xMax + 2, layout.GoldCenter.y);
+            TinyChoke(w, layout.JunctionMid.x + 10, layout.JunctionMid.y + 4,
+                layout.GoldCenter.x, layout.GoldChamber.yMin - 2);
+            TinyChoke(w, layout.JunctionWest.x, layout.JunctionWest.y,
+                layout.DiamondChamber.xMin - 2, layout.DiamondCenter.y);
+            TinyChoke(w, layout.JunctionMid.x - 10, layout.JunctionMid.y + 4,
+                layout.DiamondCenter.x, layout.DiamondChamber.yMin - 2);
+
+            PlaceTinyOreGalleries(w, sx, sy, layout);
+
+            // Medium pads AFTER chokes so shoulders don't seal working rooms
+            MediumPad(w, layout.JunctionWest.x, layout.JunctionWest.y, 9);
+            MediumPad(w, layout.JunctionEast.x, layout.JunctionEast.y, 9);
+            MediumPad(w, layout.JunctionMid.x, layout.JunctionMid.y, 10);
+            MediumPad(w, layout.GoldCenter.x, layout.GoldCenter.y, 11);
+            MediumPad(w, layout.DiamondCenter.x, layout.DiamondCenter.y, 10);
 
             GoldVeinPlacer.FillGoldRect(w,
                 layout.GoldChamber.xMin, layout.GoldChamber.yMin,
@@ -173,12 +171,80 @@ namespace DeepCore.FreeMovement
                 layout.DiamondChamber.xMin, layout.DiamondChamber.yMin,
                 layout.DiamondChamber.width, layout.DiamondChamber.height, 2, 4);
 
-            GoldVeinPlacer.FillSoftRockRect(w, sx - 10, sy + 62, 20, 8);
-            GoldVeinPlacer.FillSoftRockRect(w, sx + 14, sy + 58, 22, 8);
-
             EnsureSoftApproach(w, layout, gold: true);
             EnsureSoftApproach(w, layout, gold: false);
             return layout;
+        }
+
+        /// <summary>Soft disk ≈ class-3 brush working room (~8–11 cells across).</summary>
+        static void MediumPad(FineTerrainWorld w, int cx, int cy, int size)
+        {
+            int half = size / 2;
+            GoldVeinPlacer.FillSoftRockRect(w, cx - half, cy - half, size, size);
+        }
+
+        /// <summary>
+        /// Soft corridor half=1 (≈3 cells) with bedrock shoulders so medium/wide dig
+        /// hits hard rock instead of casually opening the mountain.
+        /// </summary>
+        static void TinyChoke(FineTerrainWorld w, int x0, int y0, int x1, int y1)
+        {
+            SoftCorridor(w, x0, y0, x1, y1, half: 1);
+
+            int dx = x1 - x0, dy = y1 - y0;
+            int steps = Mathf.Max(Mathf.Abs(dx), Mathf.Abs(dy)) * 2 + 1;
+            float len = Mathf.Max(1f, Mathf.Sqrt(dx * dx + dy * dy));
+            float px = -dy / len; // unit perpendicular
+            float py = dx / len;
+
+            for (int i = 0; i <= steps; i++)
+            {
+                float t = i / (float)Mathf.Max(1, steps);
+                int cx = Mathf.RoundToInt(Mathf.Lerp(x0, x1, t));
+                int cy = Mathf.RoundToInt(Mathf.Lerp(y0, y1, t));
+                for (int s = 2; s <= 3; s++)
+                {
+                    PlaceBedrockCell(w, Mathf.RoundToInt(cx + px * s), Mathf.RoundToInt(cy + py * s));
+                    PlaceBedrockCell(w, Mathf.RoundToInt(cx - px * s), Mathf.RoundToInt(cy - py * s));
+                }
+            }
+        }
+
+        static void PlaceBedrockCell(FineTerrainWorld w, int x, int y)
+        {
+            if (!w.InBounds(x, y) || w.IsExcavated(x, y)) return;
+            var c = w.Get(x, y);
+            if (c.IsUndamageableBorder || c.IsPreciousOre || w.IsGas(x, y)) return;
+            w.Set(x, y, FineTerrainWorld.FromCounts(0, 4, 0, 0));
+        }
+
+        static void PlaceTinyOreGalleries(FineTerrainWorld w, int sx, int sy, Layout layout)
+        {
+            // East spur off gold approach — tiny gold pocket
+            TinyChoke(w, layout.JunctionEast.x + 6, layout.JunctionEast.y + 8,
+                sx + 58, sy + 78);
+            GoldVeinPlacer.FillSoftRockRect(w, sx + 56, sy + 76, 5, 5);
+            GoldVeinPlacer.FillGoldRect(w, sx + 57, sy + 77, 3, 3, 2, 3);
+
+            // West spur — tiny diamond pocket
+            TinyChoke(w, layout.JunctionWest.x - 6, layout.JunctionWest.y + 10,
+                sx - 64, sy + 80);
+            GoldVeinPlacer.FillSoftRockRect(w, sx - 66, sy + 78, 5, 5);
+            GoldVeinPlacer.FillDiamondRect(w, sx - 65, sy + 79, 3, 3, 1, 3);
+
+            // Mid north spur — tiny mixed tease (gold then dia dead-end)
+            TinyChoke(w, layout.JunctionMid.x, layout.JunctionMid.y + 6,
+                sx + 6, sy + 118);
+            GoldVeinPlacer.FillSoftRockRect(w, sx + 4, sy + 116, 5, 4);
+            GoldVeinPlacer.FillGoldRect(w, sx + 5, sy + 117, 3, 2, 2, 3);
+            TinyChoke(w, sx + 6, sy + 118, sx - 8, sy + 126);
+            GoldVeinPlacer.FillSoftRockRect(w, sx - 10, sy + 124, 5, 5);
+            GoldVeinPlacer.FillDiamondRect(w, sx - 9, sy + 125, 3, 3, 2, 4);
+
+            // Far SE tiny gold crumb
+            TinyChoke(w, layout.JunctionEast.x + 2, layout.JunctionEast.y - 4,
+                sx + 70, sy + 42);
+            GoldVeinPlacer.FillGoldRect(w, sx + 69, sy + 41, 3, 3, 1, 2);
         }
 
         static void EnsureSoftApproach(FineTerrainWorld w, Layout layout, bool gold)
@@ -187,28 +253,36 @@ namespace DeepCore.FreeMovement
             int approaches = CountDisjointApproaches(w, layout.Spawn.x, layout.Spawn.y, chamber, out _, out _);
             if (approaches >= 2) return;
 
+            // Rescue stays tiny — never widen into a free medium highway
             if (gold)
             {
-                SoftCorridor(w, layout.JunctionEast.x + 14, layout.JunctionEast.y + 10,
-                    layout.GoldChamber.xMax + 4, layout.GoldCenter.y + 2, 4);
-                SoftCorridor(w, layout.JunctionMid.x + 28, layout.JunctionMid.y + 18,
-                    layout.GoldCenter.x, layout.GoldChamber.yMin - 3, 3);
+                TinyChoke(w, layout.JunctionEast.x + 12, layout.JunctionEast.y + 14,
+                    layout.GoldChamber.xMax + 3, layout.GoldCenter.y + 1);
+                TinyChoke(w, layout.JunctionMid.x + 18, layout.JunctionMid.y + 10,
+                    layout.GoldCenter.x + 1, layout.GoldChamber.yMin - 2);
+                MediumPad(w, layout.JunctionEast.x, layout.JunctionEast.y, 9);
+                MediumPad(w, layout.JunctionMid.x, layout.JunctionMid.y, 10);
+                MediumPad(w, layout.GoldCenter.x, layout.GoldCenter.y, 11);
                 GoldVeinPlacer.FillGoldRect(w, chamber.xMin, chamber.yMin, chamber.width, chamber.height, 3, 4);
             }
             else
             {
-                SoftCorridor(w, layout.JunctionWest.x - 14, layout.JunctionWest.y + 10,
-                    layout.DiamondChamber.xMin - 4, layout.DiamondCenter.y + 2, 4);
-                SoftCorridor(w, layout.JunctionMid.x - 28, layout.JunctionMid.y + 18,
-                    layout.DiamondCenter.x, layout.DiamondChamber.yMin - 3, 3);
+                TinyChoke(w, layout.JunctionWest.x - 12, layout.JunctionWest.y + 14,
+                    layout.DiamondChamber.xMin - 3, layout.DiamondCenter.y + 1);
+                TinyChoke(w, layout.JunctionMid.x - 18, layout.JunctionMid.y + 10,
+                    layout.DiamondCenter.x - 1, layout.DiamondChamber.yMin - 2);
+                MediumPad(w, layout.JunctionWest.x, layout.JunctionWest.y, 9);
+                MediumPad(w, layout.JunctionMid.x, layout.JunctionMid.y, 10);
+                MediumPad(w, layout.DiamondCenter.x, layout.DiamondCenter.y, 10);
                 GoldVeinPlacer.FillDiamondRect(w, chamber.xMin, chamber.yMin, chamber.width, chamber.height, 2, 4);
             }
         }
 
         public static Layout MakeLayout(int sx, int sy)
         {
-            var gold = new RectInt(sx + 38, sy + 102, 16, 12);
-            var dia = new RectInt(sx - 58, sy + 106, 14, 12);
+            // Medium ore rooms (need class-3 dig to clear efficiently) — new positions
+            var gold = new RectInt(sx + 48, sy + 118, 10, 8);
+            var dia = new RectInt(sx - 78, sy + 114, 9, 8);
             return new Layout
             {
                 Spawn = new Vector2Int(sx, sy),
@@ -216,14 +290,14 @@ namespace DeepCore.FreeMovement
                 DiamondChamber = dia,
                 GoldCenter = new Vector2Int(gold.xMin + gold.width / 2, gold.yMin + gold.height / 2),
                 DiamondCenter = new Vector2Int(dia.xMin + dia.width / 2, dia.yMin + dia.height / 2),
-                JunctionWest = new Vector2Int(sx - 42, sy + 48),
-                JunctionEast = new Vector2Int(sx + 42, sy + 48),
-                JunctionMid = new Vector2Int(sx, sy + 78),
-                DirectBedrockPlug = new Vector2Int(sx, sy + 52),
-                GoldTemptGas = new Vector2Int(sx + 22, sy + 88),
-                DiamondTemptGas = new Vector2Int(sx - 22, sy + 90),
-                GoldTemptBedrock = new Vector2Int(sx + 18, sy + 98),
-                DiamondTemptBedrock = new Vector2Int(sx - 18, sy + 100),
+                JunctionWest = new Vector2Int(sx - 36, sy + 52),
+                JunctionEast = new Vector2Int(sx + 36, sy + 52),
+                JunctionMid = new Vector2Int(sx, sy + 88),
+                DirectBedrockPlug = new Vector2Int(sx, sy + 48),
+                GoldTemptGas = new Vector2Int(sx + 26, sy + 96),
+                DiamondTemptGas = new Vector2Int(sx - 26, sy + 98),
+                GoldTemptBedrock = new Vector2Int(sx + 20, sy + 108),
+                DiamondTemptBedrock = new Vector2Int(sx - 20, sy + 110),
             };
         }
 

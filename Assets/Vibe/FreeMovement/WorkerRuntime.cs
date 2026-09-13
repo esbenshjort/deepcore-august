@@ -42,13 +42,14 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Person-owned persistent injuries — follows WorkerId across jobs/equipment.
+        /// Always non-null after construction; guarded for Unity deserialization shells.
         /// </summary>
-        public WorkerInjuryStore Injuries { get; } = new();
+        public WorkerInjuryStore Injuries { get; private set; } = new();
 
         /// <summary>
         /// Person-owned camp body needs (toilet urgency, stomach upset, meal recovery).
         /// </summary>
-        public WorkerCampBody CampBody { get; } = new();
+        public WorkerCampBody CampBody { get; private set; } = new();
 
         /// <summary>Obsolete name — use <see cref="State"/>.</summary>
         [Obsolete("V1.2A: use WorkerRuntime.State")]
@@ -62,6 +63,8 @@ namespace DeepCore.FreeMovement
             DisplayName = string.IsNullOrEmpty(displayName) ? $"Worker {workerId}" : displayName;
             Stats = stats ?? WorkerStats.CreateBaseline();
             Stats.ClampAll();
+            if (Injuries == null) Injuries = new WorkerInjuryStore();
+            if (CampBody == null) CampBody = new WorkerCampBody();
             ById[workerId] = this;
         }
 

@@ -128,7 +128,7 @@ namespace DeepCore.FreeMovement
         {
             if (_spark != null) return;
             const int s = 10;
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
             float cx = (s - 1) * 0.5f, cy = (s - 1) * 0.5f;
             for (int y = 0; y < s; y++)
             for (int x = 0; x < s; x++)

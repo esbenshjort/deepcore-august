@@ -478,9 +478,9 @@ namespace DeepCore.FreeMovement
             }
             w.EndBatch();
 
-            // Soft approach cone north of camp — early dig without wall of bedrock
-            FillSoftRockRect(w, startX - 22, startY + 1, 44, 36);
-            FillSoftRockRect(w, startX - 14, startY + 30, 28, 28);
+            // Narrow soft approach north of camp — forces early width choice (tiny vs medium)
+            FillSoftRockRect(w, startX - 8, startY + 1, 16, 20);
+            FillSoftRockRect(w, startX - 5, startY + 18, 10, 14);
         }
 
         /// <summary>
@@ -495,14 +495,12 @@ namespace DeepCore.FreeMovement
 
             w.BeginBatch();
 
-            // Test pocket: a few meters into solid rock north-east of camp — fully sealed
-            // so lighting / floor never show it until the excavator punches in.
-            if (!TryCarveGasPocket(w, startX + 30, startY + 28, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3)
-                && !TryCarveGasPocket(w, startX + 36, startY + 22, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3)
-                && !TryCarveGasPocket(w, startX - 32, startY + 26, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3))
+            // Near-camp sealed gas — new angles so early digs get hazard lessons
+            if (!TryCarveGasPocket(w, startX + 22, startY + 36, rx: 3, ry: 3, stretch: 0.9f, rockBuffer: 3)
+                && !TryCarveGasPocket(w, startX - 26, startY + 32, rx: 4, ry: 3, stretch: 0.85f, rockBuffer: 3)
+                && !TryCarveGasPocket(w, startX + 40, startY + 24, rx: 3, ry: 4, stretch: 0.85f, rockBuffer: 3))
             {
-                // Last resort: farther out on a clear ray
-                TryCarveGasPocket(w, startX + 40, startY + 34, rx: 3, ry: 3, stretch: 0.9f, rockBuffer: 2);
+                TryCarveGasPocket(w, startX - 38, startY + 40, rx: 3, ry: 3, stretch: 0.9f, rockBuffer: 2);
             }
 
             int count = 6 + rng.Next(0, 4);
@@ -705,20 +703,26 @@ namespace DeepCore.FreeMovement
         /// </summary>
         public static void BuildSocketMapStarterMaze(FineTerrainWorld w, int sx, int sy)
         {
-            const int seed = 4242;
+            // New seed → reshuffled organic bedrock / veins / gas vs prior mountain
+            const int seed = 7913;
             PlaceOrganicBedrock(w, seed);
             CarveSoftExplorationCorridors(w, sx, sy, seed + 7);
             PlaceOrganicGold(w, sx, sy, seed + 101);
             PlaceOrganicDiamond(w, sx, sy, seed + 202);
             PlaceGasPockets(w, sx, sy, seed + 303);
 
-            // Landmark diamond chamber deep north (reward for careful pathfinding)
-            FillDiamondRect(w, sx - 8, sy + 70, 16, 10, minGrade: 2, maxGrade: 4);
-            // Landmark gold chamber slightly offset
-            FillGoldRect(w, sx + 18, sy + 66, 18, 12, minGrade: 3, maxGrade: 4);
-            // Far gas diversion west — avoidable via soft corridors
-            FillSoftRockRect(w, sx - 72, sy + 40, 22, 22);
-            TryCarveGasPocket(w, sx - 64, sy + 48, rx: 5, ry: 4, stretch: 1f, rockBuffer: 4);
+            // Tiny ore crumbs (not big chambers — Mission01 owns the medium rooms)
+            FillGoldRect(w, sx + 26, sy + 44, 3, 3, minGrade: 2, maxGrade: 3);
+            FillGoldRect(w, sx - 34, sy + 50, 4, 3, minGrade: 1, maxGrade: 3);
+            FillGoldRect(w, sx + 8, sy + 62, 3, 2, minGrade: 2, maxGrade: 3);
+            FillDiamondRect(w, sx - 20, sy + 54, 3, 3, minGrade: 1, maxGrade: 3);
+            FillDiamondRect(w, sx + 38, sy + 56, 3, 3, minGrade: 2, maxGrade: 4);
+            FillDiamondRect(w, sx - 6, sy + 72, 3, 2, minGrade: 1, maxGrade: 2);
+
+            // Far gas diversion — new west pocket, soft skirt so you can skirt it
+            FillSoftRockRect(w, sx - 84, sy + 36, 14, 10);
+            TryCarveGasPocket(w, sx - 76, sy + 52, rx: 4, ry: 4, stretch: 1f, rockBuffer: 3);
+            TryCarveGasPocket(w, sx + 62, sy + 70, rx: 4, ry: 3, stretch: 0.95f, rockBuffer: 3);
         }
 
         /// <summary>Force diggable soft rock (clears accidental bedrock from the corridor).</summary>

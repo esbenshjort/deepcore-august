@@ -73,7 +73,8 @@ namespace DeepCore.FreeMovement
 
         /// <summary>
         /// Effective walk speed (world units/sec).
-        /// <paramref name="roleBias"/> scales role intent against ReferenceWalkSpeed.
+        /// <paramref name="roleBias"/> is a modest job intent scale (clamped).
+        /// Hosts that pass absoluteSpeed/ReferenceWalkSpeed are clamped so they cannot sprint.
         /// </summary>
         public static float EvaluateWalkSpeed(
             WorkerRuntime wr,
@@ -85,18 +86,23 @@ namespace DeepCore.FreeMovement
         {
             var loco = wr?.Locomotion;
             var profile = WorkerPhysicalProfile.From(wr);
-            float speed = profile.MoveSpeed * Mathf.Max(0.15f, roleBias);
+            float bias = Mathf.Clamp(roleBias,
+                WorkerPhysicalProfile.RoleBiasMin, WorkerPhysicalProfile.RoleBiasMax);
+            float speed = profile.MoveSpeed * bias;
 
             float terrainMul = TerrainSpeedMul(profile, terrain);
             float injuryMul = InjuryMoveMul(wr);
             float staminaMul = StaminaMoveMul(wr);
             float loadMul = LoadMoveMul(profile, carriedLoad01);
-            // Injury store load consequences stack with carried load
             if (wr?.Injuries != null && carriedLoad01 > 0.01f)
                 loadMul *= WorkerInjuryConsequences.LoadCarryMul(wr.Injuries);
 
             speed *= terrainMul * injuryMul * staminaMul * loadMul;
-            speed *= Mathf.Lerp(0.92f, 1f, Mathf.Clamp01((profile.AccelerationMul - 0.72f) / 0.56f));
+            // Tiny accel feel — was a hidden speed bump; keep near-neutral
+            speed *= Mathf.Lerp(0.97f, 1f, Mathf.Clamp01((profile.AccelerationMul - 0.72f) / 0.56f));
+
+            // Hard walk ceiling — off-duty / role bias cannot exceed believable walk
+            speed = Mathf.Min(speed, WorkerPhysicalProfile.MaxNormalWalkSpeed);
 
             if (loco != null)
             {
@@ -116,8 +122,15 @@ namespace DeepCore.FreeMovement
                 loco.LastTerrainMul = terrainMul;
             }
 
-            return Mathf.Max(0.08f, speed);
+            return Mathf.Max(0.06f, speed);
         }
+
+        /// <summary>
+        /// Convert a legacy absolute host speed into a clamped role bias.
+        /// Prefer passing 1f from new call sites.
+        /// </summary>
+        public static float RoleBiasFromAbsolute(float absoluteWorldSpeed) =>
+            absoluteWorldSpeed / Mathf.Max(0.01f, WorkerPhysicalProfile.ReferenceWalkSpeed);
 
         public static float WalkSpeedAt(
             WorkerRuntime wr,

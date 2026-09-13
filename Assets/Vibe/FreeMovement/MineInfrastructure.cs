@@ -11,7 +11,7 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class MineInfrastructure
     {
-        public float TrackSpeedMul = 1.25f;
+        public float TrackSpeedMul = 1.06f;
         public float LanternInstallGameHours = 0.2f;
         public float SupportBuildGameHours = 0.28f;
 

@@ -225,6 +225,25 @@ namespace DeepCore.FreeMovement
 
             AttachHeadlamp(body.transform, new Vector2(0f, 0.11f));
 
+            // Harsh directional work light — distinct from warm lanterns / campfire
+            var headlampTf = root.transform.Find("Headlamp");
+            if (headlampTf != null)
+            {
+                var hl = headlampTf.GetComponent<Light2D>();
+                if (hl != null)
+                {
+                    hl.color = new Color(1f, 0.82f, 0.55f);
+                    hl.intensity = 1.18f;
+                    hl.pointLightOuterRadius = 1.18f;
+                    hl.pointLightInnerAngle = 20f;
+                    hl.pointLightOuterAngle = 48f;
+                    hl.falloffIntensity = 0.58f;
+                    hl.shadowIntensity = 0.85f;
+                    var flick = headlampTf.GetComponent<HelmetFlashlight>();
+                    flick?.RetuneFromLight(1.18f);
+                }
+            }
+
             var bulbs = new Light2D[ExcavatorBulbLocals.Length];
             for (int i = 0; i < ExcavatorBulbLocals.Length; i++)
                 bulbs[i] = AttachStatusBulb(body.transform, ExcavatorBulbLocals[i], i, green: true);

@@ -134,6 +134,14 @@ namespace DeepCore.FreeMovement
         bool[] _gasSeen;
         /// <summary>Collapse debris HP — &gt;0 blocks IsTunnelOpen / pathfinding until cleared.</summary>
         byte[] _debrisHp;
+        /// <summary>
+        /// Monotonic excavate generation per opened cell (0 = never opened).
+        /// Early gens = settled tunnels; late gens = freshly cut rock.
+        /// Presentation only — does not affect gameplay.
+        /// </summary>
+        readonly ushort[] _openGen;
+        ushort _nextOpenGen = 1;
+
         public event Action Changed;
         /// <summary>Inclusive dirty cell rect after a change batch.</summary>
         public event Action<int, int, int, int> RegionChanged;
@@ -152,8 +160,32 @@ namespace DeepCore.FreeMovement
             _gas = new bool[width * height];
             _gasRevealed = new bool[width * height];
             _gasSeen = new bool[width * height];
+            _openGen = new ushort[width * height];
             for (int i = 0; i < _cells.Length; i++)
                 _cells[i] = MakeRock();
+        }
+
+        /// <summary>0 = freshly excavated, 1 = oldest settled open rock. Solid → 1.</summary>
+        public float ExcavationAge01(int x, int y)
+        {
+            if (!InBounds(x, y)) return 1f;
+            ushort g = _openGen[y * Width + x];
+            if (g == 0) return 1f;
+            float newest = Mathf.Max(1f, _nextOpenGen - 1f);
+            return 1f - Mathf.Clamp01((g - 1f) / newest);
+        }
+
+        /// <summary>True after this cell was ever opened (still excavated or later filled).</summary>
+        public bool WasOpened(int x, int y) =>
+            InBounds(x, y) && _openGen[y * Width + x] > 0;
+
+        void StampOpenGeneration(int x, int y)
+        {
+            int i = y * Width + x;
+            if (_openGen[i] != 0) return;
+            _openGen[i] = _nextOpenGen;
+            if (_nextOpenGen < ushort.MaxValue)
+                _nextOpenGen++;
         }
 
         public static byte PackSockets(SocketKind a, SocketKind b, SocketKind c, SocketKind d) =>
@@ -528,6 +560,7 @@ namespace DeepCore.FreeMovement
             c.Durability = 0;
             c.DamageState = c.MaxDurability;
             c.Hp = 0;
+            StampOpenGeneration(x, y);
             if (notify) Notify(x, y);
             else { MarkDirtyCell(x, y); _dirty = true; }
         }
@@ -562,6 +595,8 @@ namespace DeepCore.FreeMovement
 
             SyncDurabilityFromHp(ref c);
             c.Phase = c.Hp == 0 ? TerrainPhase.Excavated : TerrainPhase.Damaged;
+            if (c.Phase == TerrainPhase.Excavated)
+                StampOpenGeneration(x, y);
             Notify(x, y);
             return c.Phase == TerrainPhase.Excavated;
         }

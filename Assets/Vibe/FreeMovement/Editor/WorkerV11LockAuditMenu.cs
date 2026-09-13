@@ -137,6 +137,12 @@ namespace DeepCore.FreeMovement
         [MenuItem("DeepCore/Diagnostics/Run Social Dialogue Visual Audit")]
         public static void RunSocialDialogueVisual() => SocialDialogueVisualAudit.RunFromEditor();
 
+        [MenuItem("DeepCore/Diagnostics/Run Dialogue Bible V2.1 Audit")]
+        public static void RunDialogueBibleV21() => SocialDialogueBibleV21Audit.RunFromEditor();
+
+        [MenuItem("DeepCore/Diagnostics/Run Excavator Tile-Paint V1 Audit")]
+        public static void RunExcavatorTilePaintV1() => ExcavatorTilePaintRoutingV1Audit.RunFromEditor();
+
         [MenuItem("DeepCore/Diagnostics/Run Early Crew Pressure Audit")]
         public static void RunEarlyCrewPressure() => EarlyCrewPressureAudit.RunFromEditor();
 

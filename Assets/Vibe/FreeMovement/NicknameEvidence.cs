@@ -15,6 +15,16 @@ namespace DeepCore.FreeMovement
         MajorWorkSuccess = 5,
         SharedEmergency = 6,
         MajorSocial = 7,
+        /// <summary>V2: repeated narrow-tunnel / confined courage.</summary>
+        NarrowPassageNerve = 8,
+        /// <summary>V2: visible fear / refusal under confinement.</summary>
+        FearShown = 9,
+        /// <summary>V2: technical / prospecting insight reputation.</summary>
+        TechnicalReputation = 10,
+        /// <summary>V2: physical/haul reputation.</summary>
+        PhysicalReputation = 11,
+        /// <summary>V2: running joke / embarrassing callback fuel.</summary>
+        RunningJoke = 12,
     }
 
     [Serializable]
@@ -111,6 +121,17 @@ namespace DeepCore.FreeMovement
                 || entry.Type == SocialMemoryType.FailedTogether)
                 Add(entry.TargetId, NicknameEvidenceKind.SharedEmergency, 0.8f, entry.GameTime,
                     entry.Type.ToString());
+            if (entry.Type == SocialMemoryType.RescuedByWorker)
+                Add(entry.TargetId, NicknameEvidenceKind.RepairRescue, 1.3f, entry.GameTime, "Rescue");
+            if (entry.Type == SocialMemoryType.WasTrapped || entry.Type == SocialMemoryType.SurvivedCollapse)
+                Add(entry.TargetId, NicknameEvidenceKind.FearShown, 0.9f, entry.GameTime, entry.Type.ToString());
+        }
+
+        /// <summary>V2: explicit evidence from observed behaviour (still no nickname generation).</summary>
+        public void ObserveBehaviour(int workerId, NicknameEvidenceKind kind, float weight,
+            float gameHours, string source)
+        {
+            Add(workerId, kind, weight, gameHours, source);
         }
 
         void Add(int workerId, NicknameEvidenceKind kind, float weight, float gameHours, string source)

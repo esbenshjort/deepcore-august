@@ -17,6 +17,10 @@ namespace DeepCore.FreeMovement
         public bool HasMajorPosMemory;
         public SocialMemoryType MemoryHint;
         public bool HasMemoryHint;
+        public SocialSituationFlags Situation;
+        public int SpeakerId;
+        public int ListenerId;
+        public float GameHours;
 
         /// <summary>
         /// Build tone from speaker state + directed relation/memories (speaker → other).
@@ -24,7 +28,10 @@ namespace DeepCore.FreeMovement
         public static SocialDialogueTone From(
             WorkerRuntime speaker,
             SocialDirectedRelation relToward,
-            IReadOnlyList<SocialMemoryEntry> memoriesToward)
+            IReadOnlyList<SocialMemoryEntry> memoriesToward,
+            SocialSituationFlags situation = default,
+            int listenerId = 0,
+            float gameHours = 0f)
         {
             var tone = new SocialDialogueTone
             {
@@ -39,6 +46,10 @@ namespace DeepCore.FreeMovement
                 EmotionalClass = SocialAuraClass.Neutral,
                 MemoryHint = SocialMemoryType.HelpedMe,
                 HasMemoryHint = false,
+                Situation = situation,
+                SpeakerId = speaker != null ? speaker.WorkerId : 0,
+                ListenerId = listenerId,
+                GameHours = gameHours,
             };
 
             if (speaker != null)
@@ -121,10 +132,18 @@ namespace DeepCore.FreeMovement
         public static string PickInitiator(
             SocialAction action, bool actionOk, SocialContext ctx, in SocialDialogueTone tone)
         {
+            SocialDialogueExchanges.ClearActive();
+            string v2 = SocialDialogueExchanges.PickInitiator(
+                action, actionOk, ctx, in tone, tone.Situation,
+                tone.SpeakerId, tone.ListenerId, tone.GameHours);
+            if (!string.IsNullOrEmpty(v2))
+                return v2;
+
             Scratch.Clear();
             AddInitiatorBase(Scratch, action, actionOk, ctx);
             int baseCount = Scratch.Count;
             AddInitiatorTone(Scratch, action, actionOk, ctx, in tone);
+            FilterRecent(Scratch, tone.GameHours);
             return PickWeighted(Scratch, baseCount, in tone);
         }
 
@@ -139,6 +158,11 @@ namespace DeepCore.FreeMovement
             SocialContext ctx,
             in SocialDialogueTone tone)
         {
+            string paired = SocialDialogueExchanges.PickResponse(
+                response, action, actionOk, in tone, tone.GameHours);
+            if (!string.IsNullOrEmpty(paired))
+                return paired;
+
             // Failed positive actions should feel rejected, not warm
             if (!actionOk
                 && IsPositive(action)
@@ -154,6 +178,7 @@ namespace DeepCore.FreeMovement
                     Scratch.Add("Fine.");
                     Scratch.Add("Whatever.");
                 }
+                FilterRecent(Scratch, tone.GameHours);
                 return Pick(Scratch);
             }
 
@@ -161,6 +186,7 @@ namespace DeepCore.FreeMovement
             AddResponseBase(Scratch, response, action, actionOk, ctx);
             int baseCount = Scratch.Count;
             AddResponseTone(Scratch, response, action, actionOk, ctx, in tone);
+            FilterRecent(Scratch, tone.GameHours);
             return PickWeighted(Scratch, baseCount, in tone);
         }
 
@@ -169,6 +195,10 @@ namespace DeepCore.FreeMovement
 
         public static string PickOptionalCloser(SocialEncounterLog log, in SocialDialogueTone tone)
         {
+            string v2Closer = SocialDialogueExchanges.PickCloser(log, tone.GameHours);
+            if (!string.IsNullOrEmpty(v2Closer))
+                return v2Closer;
+
             if (log == null || string.IsNullOrEmpty(log.OutcomeSummary)) return null;
             string o = log.OutcomeSummary;
             Scratch.Clear();
@@ -1164,6 +1194,17 @@ namespace DeepCore.FreeMovement
                 pool.Add(pick[i]);
         }
 
+        static void FilterRecent(List<string> pool, float gameHours)
+        {
+            if (pool == null || pool.Count <= 1) return;
+            var hist = SocialDialogueHistory.Instance;
+            for (int i = pool.Count - 1; i >= 0; i--)
+            {
+                if (!hist.IsLineFresh(pool[i], gameHours) && pool.Count > 2)
+                    pool.RemoveAt(i);
+            }
+        }
+
         /// <summary>
         /// When relationship class is colored, prefer tone-flavored lines so friends ≠ grudges.
         /// </summary>
@@ -1178,9 +1219,15 @@ namespace DeepCore.FreeMovement
             {
                 int flavorStart = Mathf.Clamp(baseCount, 0, pool.Count - 1);
                 if (flavorStart < pool.Count)
-                    return pool[Rng.Next(flavorStart, pool.Count)];
+                {
+                    string line = pool[Rng.Next(flavorStart, pool.Count)];
+                    SocialDialogueHistory.Instance.Remember(line, 0, SocialDialogueTopic.General, tone.GameHours);
+                    return line;
+                }
             }
-            return pool[Rng.Next(0, pool.Count)];
+            string pick = pool[Rng.Next(0, pool.Count)];
+            SocialDialogueHistory.Instance.Remember(pick, 0, SocialDialogueTopic.General, tone.GameHours);
+            return pick;
         }
 
         static string Pick(List<string> lines)

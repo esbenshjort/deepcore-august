@@ -21,6 +21,8 @@ namespace DeepCore.FreeMovement
         bool _campReturnMode;
         bool _campHomeLogged;
         float _lateralOffset;
+        bool _useMachineProfile;
+        int _machineMinClearance = 2;
 
         public ExcavatedPathfinder(FineTerrainWorld world, float agentRadiusWorld = 0.12f)
         {
@@ -66,14 +68,25 @@ namespace DeepCore.FreeMovement
         public void SetAgentRadius(float bodyRadius)
         {
             _agent.BodyRadius = bodyRadius;
-            _agent.MinClearance = Mathf.Max(1, _agent.MinClearance);
+            RefreshAgentProfile();
+        }
+
+        /// <summary>Hauler / machine profile — MinClearance 2 blocks single-person shafts.</summary>
+        public void SetMachineProfile(float bodyRadius, int minClearance = 2)
+        {
+            _useMachineProfile = true;
+            _machineMinClearance = Mathf.Max(1, minClearance);
+            _agent.BodyRadius = bodyRadius;
             RefreshAgentProfile();
         }
 
         void RefreshAgentProfile()
         {
             float r = _agent.BodyRadius > 0.001f ? _agent.BodyRadius : 0.12f;
-            _agent = PathAgentProfile.Worker(r, _lateralOffset);
+            if (_useMachineProfile)
+                _agent = PathAgentProfile.Machine(r, _machineMinClearance);
+            else
+                _agent = PathAgentProfile.Worker(r, _lateralOffset);
         }
 
         public void Invalidate()

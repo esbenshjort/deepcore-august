@@ -29,6 +29,14 @@ namespace DeepCore.FreeMovement
             _flickPhase = Random.Range(0f, 100f);
         }
 
+        /// <summary>Re-capture base intensity/outer after identity retunes (e.g. excavator work light).</summary>
+        public void RetuneFromLight(float baseIntensity)
+        {
+            _baseIntensity = baseIntensity;
+            if (_spot != null)
+                _baseOuter = _spot.pointLightOuterRadius;
+        }
+
         void LateUpdate()
         {
             if (_spot == null) return;

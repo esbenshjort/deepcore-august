@@ -30,6 +30,9 @@ namespace DeepCore.FreeMovement
         [Range(MeterMin, MeterMax)] [SerializeField] float focusState = DefaultFocusState;
         [Range(MeterMin, MeterMax)] [SerializeField] float frustration = DefaultFrustration;
         [Range(MeterMin, MeterMax)] [SerializeField] float morale = DefaultMorale;
+        [Range(MeterMin, MeterMax)] [SerializeField] float claustrophobicStress;
+        [SerializeField] float claustroExposureHours;
+        [SerializeField] bool claustroSeekingExit;
 
         [Header("INJURY")]
         [Range(MeterMin, MeterMax)] [SerializeField] float injury;
@@ -120,6 +123,29 @@ namespace DeepCore.FreeMovement
             set => morale = ClampMeter(value);
         }
 
+        /// <summary>
+        /// Current confinement pressure 0–100. Runtime psychological state — not a permanent Soul/stat.
+        /// </summary>
+        public float ClaustrophobicStress
+        {
+            get => claustrophobicStress;
+            set => claustrophobicStress = ClampMeter(value);
+        }
+
+        /// <summary>Continuous underground exposure hours (for tooltip / residue).</summary>
+        public float ClaustroExposureHours
+        {
+            get => claustroExposureHours;
+            set => claustroExposureHours = Mathf.Max(0f, value);
+        }
+
+        /// <summary>Severe/critical — person wants out / may refuse deeper dig.</summary>
+        public bool ClaustroSeekingExit
+        {
+            get => claustroSeekingExit;
+            set => claustroSeekingExit = value;
+        }
+
         /// <summary>Physical Injury 0–100. Not a WorkerStat.</summary>
         public float Injury
         {
@@ -178,6 +204,9 @@ namespace DeepCore.FreeMovement
             focusState = DefaultFocusState;
             frustration = DefaultFrustration;
             morale = DefaultMorale;
+            claustrophobicStress = 0f;
+            claustroExposureHours = 0f;
+            claustroSeekingExit = false;
             injury = 0f;
             needsCare = false;
             exhaustionLatched = false;
@@ -306,6 +335,13 @@ namespace DeepCore.FreeMovement
 
             Morale = Mathf.Lerp(Morale, WorkerSleepRecovery.MoraleBaseline,
                 WorkerSleepRecovery.MoraleLerp * t);
+
+            // Confinement residue fades overnight but not instantly after a bad dig
+            float claustroRelief = ClaustrophobicStress > 70f ? 28f : 48f;
+            ClaustrophobicStress = Mathf.Max(0f, ClaustrophobicStress - claustroRelief * t);
+            ClaustroExposureHours = Mathf.Max(0f, ClaustroExposureHours - 5f * t);
+            if (ClaustrophobicStress < ClaustrophobiaBands.CriticalAt)
+                ClaustroSeekingExit = false;
         }
 
         /// <summary>

@@ -40,6 +40,8 @@ namespace DeepCore.FreeMovement
                 YardVisualKit.SleepPad, 10, 0.95f);
             DigVisualKit.ApplyLit(pad);
             pad.color = new Color(0.35f, 0.36f, 0.38f, 0.55f);
+            DigVisualKit.PlaceGroundingPad(transform, StallCenter + new Vector2(0.05f, -0.28f), 0.75f,
+                new Color(0.2f, 0.22f, 0.24f, 0.4f), sortingOrder: 9);
 
             var stall = Make("Stall", StallCenter, YardVisualKit.ToiletStall, 18, 0.72f);
             DigVisualKit.ApplyLit(stall);

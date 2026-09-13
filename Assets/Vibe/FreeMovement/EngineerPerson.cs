@@ -27,7 +27,7 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class EngineerPerson : MonoBehaviour, IWorkProvider
     {
-        public const float MoveSpeed = 1.45f;
+        public const float MoveSpeed = 0.60f; // Engineer intent — same locomotion band as crew walk
         public const float BodyRadius = 0.12f;
         public const float RepairSeconds = 2.6f;
         public const float ArriveRadius = 0.38f;

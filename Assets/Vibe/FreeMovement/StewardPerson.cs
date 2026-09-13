@@ -20,7 +20,7 @@ namespace DeepCore.FreeMovement
     /// </summary>
     public sealed class StewardPerson : MonoBehaviour, IWorkProvider
     {
-        public const float MoveSpeed = 1.25f;
+        public const float MoveSpeed = 0.58f;
         public const float BodyRadius = 0.12f;
         public const float ArriveRadius = 0.32f;
         static int _nextProviderSerial = 1;
@@ -185,7 +185,7 @@ namespace DeepCore.FreeMovement
             {
                 Vector2 p = transform.localPosition;
                 float speed = WorkerLocomotion.WalkSpeedAt(
-                    _assignedWorker, _world, p, BodyRadius, 1.05f, 0f, true);
+                    _assignedWorker, _world, p, BodyRadius, 1f, 0f, true);
                 bool done = _nav.Follow(
                     p, _dutyTarget, speed, BodyRadius,
                     face: dir => Face(dir),

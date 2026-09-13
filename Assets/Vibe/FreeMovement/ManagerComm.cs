@@ -53,6 +53,8 @@ namespace DeepCore.FreeMovement
         Hollow = 7,
         Complied = 8,
         Ignored = 9,
+        ReluctantlyAccepted = 10,
+        Panicked = 11,
     }
 
     public enum ManagerRelationLabel : byte
@@ -174,6 +176,12 @@ namespace DeepCore.FreeMovement
             public float BreakUntil;
             public bool AcceptedPush;
             public bool AcceptedBreak;
+            /// <summary>Temporary dig refuse ceiling while AcceptedPush (stress 0–100+).</summary>
+            public float WillingUntilStress;
+            /// <summary>Repeated confinement pushes escalate danger.</summary>
+            public int ConfinementPushCount;
+            public float LastConfinementPushAt = -999f;
+            public bool HadPanicMemory;
         }
 
         readonly Dictionary<int, Flags> _byId = new(16);
@@ -194,7 +202,11 @@ namespace DeepCore.FreeMovement
             {
                 var f = kv.Value;
                 if (f == null) continue;
-                if (now >= f.PushUntil) f.AcceptedPush = false;
+                if (now >= f.PushUntil)
+                {
+                    f.AcceptedPush = false;
+                    f.WillingUntilStress = 0f;
+                }
                 if (now >= f.BreakUntil) f.AcceptedBreak = false;
             }
         }
@@ -278,16 +290,18 @@ namespace DeepCore.FreeMovement
     {
         public static string ReactionLabel(ManagerReactionKind k) => k switch
         {
-            ManagerReactionKind.Motivated => "MOTIVATED",
-            ManagerReactionKind.Accepted => "ACCEPTED",
+            ManagerReactionKind.Motivated => "ACCEPTS",
+            ManagerReactionKind.Accepted => "ACCEPTS",
+            ManagerReactionKind.ReluctantlyAccepted => "RELUCTANTLY ACCEPTS",
             ManagerReactionKind.Annoyed => "ANNOYED",
             ManagerReactionKind.Angered => "ANGERED",
             ManagerReactionKind.Reassured => "REASSURED",
             ManagerReactionKind.Resentful => "RESENTFUL",
-            ManagerReactionKind.Refused => "REFUSED",
+            ManagerReactionKind.Refused => "REFUSES",
             ManagerReactionKind.Hollow => "HOLLOW",
             ManagerReactionKind.Complied => "COMPLIED",
             ManagerReactionKind.Ignored => "IGNORED",
+            ManagerReactionKind.Panicked => "PANICS",
             _ => "ACCEPTED",
         };
 
@@ -295,30 +309,39 @@ namespace DeepCore.FreeMovement
         {
             if (ctx?.Worker == null || !ctx.Worker.IsAlive || ctx.Asleep) return false;
             var st = ctx.Worker.State;
+            bool confinementPressure = st != null && (
+                st.ClaustroSeekingExit
+                || st.ClaustrophobicStress >= ClaustrophobiaBands.ElevatedAt);
+            bool confinementSevere = st != null && (
+                st.ClaustroSeekingExit
+                || st.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt);
             switch (a)
             {
                 case ManagerTalkAction.PushHarder:
-                    return ctx.OnShift || ctx.Commuting;
+                    return ctx.OnShift || ctx.Commuting || confinementSevere;
                 case ManagerTalkAction.KeepItUp:
                     return ctx.OnShift && st != null && st.FocusState >= 45f
-                           && !st.ExhaustionLatched;
+                           && !st.ExhaustionLatched && !st.ClaustroSeekingExit;
                 case ManagerTalkAction.EaseOff:
                     return st != null && (st.MentalFatigue >= 45f || st.ExhaustionLatched
-                                          || ctx.OvertimeHours >= 1f || st.Frustration >= 40f);
+                                          || ctx.OvertimeHours >= 1f || st.Frustration >= 40f
+                                          || confinementPressure);
                 case ManagerTalkAction.TakeABreak:
                     return st != null && (st.ExhaustionLatched || st.NeedsCare || st.Injury >= 35f
                                           || st.MentalFatigue >= 55f || ctx.OvertimeHours >= 2f
-                                          || WorkerJobDemand.StaminaRatio(ctx.Worker) <= 0.35f);
+                                          || WorkerJobDemand.StaminaRatio(ctx.Worker) <= 0.35f
+                                          || confinementSevere);
                 case ManagerTalkAction.Praise:
                     return true;
                 case ManagerTalkAction.Encourage:
                     return st != null && (st.Morale <= 50f || st.Frustration >= 35f
-                                          || ctx.RecentFailure);
+                                          || ctx.RecentFailure || confinementPressure);
                 case ManagerTalkAction.CheckIn:
                     return st != null && (st.NeedsCare || st.Injury >= 25f
                                           || st.MentalFatigue >= 50f
                                           || (ctx.Mgr != null && ctx.Mgr.Resentment >= 20f)
-                                          || ctx.SleepDeficit01 >= 0.3f);
+                                          || ctx.SleepDeficit01 >= 0.3f
+                                          || confinementPressure);
                 case ManagerTalkAction.Criticize:
                     return ctx.OnShift || ctx.RecentFailure || (st != null && st.FocusState < 40f);
                 default:
@@ -329,7 +352,8 @@ namespace DeepCore.FreeMovement
         public static ManagerCommResult EvaluateTalk(
             ManagerTalkAction action,
             ManagerCommContext ctx,
-            ManagerCommAntiSpam spam)
+            ManagerCommAntiSpam spam,
+            ManagerIntentStore intents = null)
         {
             var wr = ctx?.Worker;
             if (wr == null || !wr.IsAlive)
@@ -345,7 +369,7 @@ namespace DeepCore.FreeMovement
             }
 
             int repeats = spam?.CountRecent(wr.WorkerId, code, ctx.GameHours) ?? 0;
-            var result = EvaluateTalkCore(action, ctx, repeats);
+            var result = EvaluateTalkCore(action, ctx, repeats, intents: intents);
             spam?.Record(wr.WorkerId, code, ctx.GameHours,
                 ManagerCommAntiSpam.WorkerActionCooldownHours * (1f + repeats * 0.25f));
             return result;
@@ -391,15 +415,16 @@ namespace DeepCore.FreeMovement
             ManagerTalkAction action,
             ManagerCommContext ctx,
             int repeats,
-            ManagerCrewAction? crewFlavor = null)
+            ManagerCrewAction? crewFlavor = null,
+            ManagerIntentStore intents = null)
         {
             var wr = ctx.Worker;
-            var st = wr.State;
             var mgr = ctx.Mgr ?? new ManagerRelation();
             float recept = Receptivity01(wr, mgr);
             float determ = Norm(wr.Stats.Get(WorkerStatId.Determination));
             float composure = Norm(wr.Stats.Get(WorkerStatId.Composure));
             float tolerance = Norm(wr.Stats.Get(WorkerStatId.Tolerance));
+            float bravery = Norm(wr.Stats.Get(WorkerStatId.Bravery));
             float empathy = Norm(wr.Stats.Get(WorkerStatId.Empathy));
 
             var r = new ManagerCommResult
@@ -410,11 +435,12 @@ namespace DeepCore.FreeMovement
 
             // Diminishing / irritation from repeats
             float spamTax = Mathf.Clamp01(repeats * 0.22f);
+            var flags = intents?.Get(wr.WorkerId);
 
             switch (action)
             {
                 case ManagerTalkAction.PushHarder:
-                    EvalPush(r, ctx, recept, determ, composure, spamTax);
+                    EvalPush(r, ctx, recept, determ, composure, tolerance, bravery, spamTax, flags);
                     break;
                 case ManagerTalkAction.KeepItUp:
                     EvalKeep(r, ctx, recept, spamTax);
@@ -454,9 +480,25 @@ namespace DeepCore.FreeMovement
             return r;
         }
 
-        static void EvalPush(ManagerCommResult r, ManagerCommContext ctx,
-            float recept, float determ, float composure, float spamTax)
+        static bool IsConfinementPushContext(ManagerCommContext ctx)
         {
+            var st = ctx?.Worker?.State;
+            if (st == null) return false;
+            return st.ClaustroSeekingExit
+                   || st.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt;
+        }
+
+        static void EvalPush(ManagerCommResult r, ManagerCommContext ctx,
+            float recept, float determ, float composure, float tolerance, float bravery,
+            float spamTax, ManagerIntentStore.Flags flags)
+        {
+            if (IsConfinementPushContext(ctx))
+            {
+                EvalConfinementPush(r, ctx, recept, determ, composure, tolerance, bravery,
+                    spamTax, flags);
+                return;
+            }
+
             var st = ctx.Worker.State;
             bool brutal = ctx.OvertimeHours >= 2.5f || ctx.WorkedHoursToday >= 11f
                           || (st != null && (st.ExhaustionLatched || st.NeedsCare));
@@ -523,6 +565,177 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        /// <summary>
+        /// Confinement refusal push — pressure, not erasure of claustrophobia.
+        /// Outcomes: ACCEPTS / RELUCTANTLY ACCEPTS / REFUSES / ANGERED / PANICS.
+        /// </summary>
+        static void EvalConfinementPush(ManagerCommResult r, ManagerCommContext ctx,
+            float recept, float determ, float composure, float tolerance, float bravery,
+            float spamTax, ManagerIntentStore.Flags flags)
+        {
+            var wr = ctx.Worker;
+            var st = wr.State;
+            var mgr = ctx.Mgr ?? new ManagerRelation();
+            float stress01 = st.ClaustrophobicStress / 100f;
+            float fr01 = st.Frustration / 100f;
+            float fat01 = st.MentalFatigue / 100f;
+            float resent01 = mgr.Resentment / 100f;
+            float trust01 = mgr.Trust / 100f;
+
+            int priorPushes = flags != null ? flags.ConfinementPushCount : 0;
+            bool panicMem = flags != null && flags.HadPanicMemory;
+            float hoursSincePush = flags != null
+                ? Mathf.Max(0f, ctx.GameHours - flags.LastConfinementPushAt)
+                : 99f;
+            if (hoursSincePush > 10f && priorPushes > 0)
+                priorPushes = Mathf.Max(0, priorPushes - 1); // slow cool-down of escalation
+
+            float pushEscalation = Mathf.Clamp01(
+                spamTax * 1.05f + priorPushes * 0.22f + (panicMem ? 0.2f : 0f));
+
+            bool pitchBlack = false;
+            bool deepDark = false;
+            if (ClaustrophobiaSystem.TryGetLastCauses(wr.WorkerId, out var causes))
+            {
+                pitchBlack = causes.Light >= TunnelLightBand.PitchBlack;
+                deepDark = causes.Light >= TunnelLightBand.Dark && causes.DepthCells >= 14f;
+            }
+
+            // Hard limit — worker will not continue no matter the ask
+            bool hardLimit =
+                (st.ClaustrophobicStress >= 98f && pitchBlack)
+                || (st.ClaustrophobicStress >= 96f && fat01 >= 0.85f && fr01 >= 0.7f)
+                || (resent01 >= 0.72f && st.ClaustrophobicStress >= ClaustrophobiaBands.CriticalAt
+                    && pushEscalation >= 0.35f)
+                || (st.ClaustrophobicStress >= 99.5f && composure < 0.35f && bravery < 0.35f)
+                || (pushEscalation >= 0.7f && st.ClaustrophobicStress >= 94f && trust01 < 0.35f)
+                || (panicMem && st.ClaustrophobicStress >= ClaustrophobiaBands.CriticalAt
+                    && pushEscalation >= 0.4f);
+
+            if (hardLimit)
+            {
+                bool panic = composure < 0.4f && st.ClaustrophobicStress >= 95f
+                             && (pitchBlack || pushEscalation >= 0.45f || fr01 >= 0.65f
+                                 || panicMem);
+                if (panic)
+                {
+                    r.Reaction = ManagerReactionKind.Panicked;
+                    r.AcceptedIntent = false;
+                    r.DResentment = 3.5f + pushEscalation * 2f;
+                    r.DTrust = -1.8f - (1f - recept);
+                    r.DRespect = -1.0f;
+                    r.EventMagnitude = 2.4f;
+                    r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                    r.MemoryStrength = 0.8f;
+                    r.WhyPlain = "Panicked under confinement push";
+                }
+                else
+                {
+                    r.Reaction = ManagerReactionKind.Refused;
+                    r.AcceptedIntent = false;
+                    r.DResentment = 2.4f + pushEscalation * 1.5f;
+                    r.DTrust = -1.1f;
+                    r.DRespect = -0.5f;
+                    r.EventMagnitude = 1.8f;
+                    r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                    r.MemoryStrength = 0.65f;
+                    r.WhyPlain = "Hard refusal — will not continue like this";
+                }
+                return;
+            }
+
+            // Repeated push while already critical → escalating danger before hard wall
+            if (pushEscalation >= 0.55f && st.ClaustrophobicStress >= ClaustrophobiaBands.CriticalAt)
+            {
+                if (composure < 0.45f || fr01 >= 0.6f)
+                {
+                    r.Reaction = ManagerReactionKind.Panicked;
+                    r.AcceptedIntent = false;
+                    r.DResentment = 3.0f + pushEscalation;
+                    r.DTrust = -1.5f;
+                    r.EventMagnitude = 2.1f;
+                    r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                    r.MemoryStrength = 0.75f;
+                    r.WhyPlain = "Repeated push triggered panic";
+                    return;
+                }
+                r.Reaction = ManagerReactionKind.Angered;
+                r.AcceptedIntent = false;
+                r.DResentment = 2.8f + pushEscalation;
+                r.DTrust = -1.2f;
+                r.DRespect = -0.7f;
+                r.EventMagnitude = 1.7f;
+                r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                r.MemoryStrength = 0.7f;
+                r.WhyPlain = "Repeated confinement push angered them";
+                return;
+            }
+
+            float acceptScore =
+                recept * 0.28f
+                + determ * 0.16f
+                + bravery * 0.14f
+                + tolerance * 0.12f
+                + composure * 0.1f
+                + trust01 * 0.08f
+                - stress01 * 0.38f
+                - fr01 * 0.18f
+                - fat01 * 0.14f
+                - resent01 * 0.22f
+                - spamTax * 0.4f
+                - pushEscalation * 0.35f
+                - (pitchBlack ? 0.12f : 0f)
+                - (deepDark ? 0.08f : 0f);
+
+            if (acceptScore >= 0.50f)
+            {
+                r.Reaction = ManagerReactionKind.Motivated;
+                r.AcceptedIntent = true;
+                r.DTrust = recept >= 0.55f ? 0.15f : -0.15f;
+                r.DRespect = 0.2f;
+                r.DResentment = 0.55f + (1f - recept) * 0.6f;
+                r.EventMagnitude = 0.85f;
+                r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                r.MemoryStrength = 0.4f;
+                r.WhyPlain = "Accepted confinement push — still stressed";
+            }
+            else if (acceptScore >= 0.34f)
+            {
+                r.Reaction = ManagerReactionKind.ReluctantlyAccepted;
+                r.AcceptedIntent = true;
+                r.DTrust = -0.35f - (1f - recept) * 0.4f;
+                r.DRespect = -0.1f;
+                r.DResentment = 1.2f + (1f - recept) * 1.0f + pushEscalation;
+                r.EventMagnitude = 1.15f;
+                r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                r.MemoryStrength = 0.55f;
+                r.WhyPlain = "Reluctantly continues — not fine";
+            }
+            else if (acceptScore >= 0.20f && composure >= 0.4f)
+            {
+                r.Reaction = ManagerReactionKind.Refused;
+                r.AcceptedIntent = false;
+                r.DResentment = 1.6f + (1f - recept) * 1.2f;
+                r.DTrust = -0.55f;
+                r.EventMagnitude = 1.2f;
+                r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                r.MemoryStrength = 0.5f;
+                r.WhyPlain = "Refused confinement push";
+            }
+            else
+            {
+                r.Reaction = ManagerReactionKind.Angered;
+                r.AcceptedIntent = false;
+                r.DResentment = 2.4f + pushEscalation * 1.5f;
+                r.DTrust = -0.9f;
+                r.DRespect = -0.55f;
+                r.EventMagnitude = 1.55f;
+                r.MemoryType = SocialMemoryType.ManagerPushedMeTooHard;
+                r.MemoryStrength = 0.6f;
+                r.WhyPlain = "Angered by confinement push";
+            }
+        }
+
         static void EvalKeep(ManagerCommResult r, ManagerCommContext ctx, float recept, float spamTax)
         {
             if (spamTax > 0.5f)
@@ -545,8 +758,9 @@ namespace DeepCore.FreeMovement
             float recept, float determ, float spamTax)
         {
             var st = ctx.Worker.State;
+            bool confinement = st != null && st.ClaustrophobicStress >= ClaustrophobiaBands.ElevatedAt;
             bool needsEase = st != null && (st.ExhaustionLatched || st.MentalFatigue >= 50f
-                                            || ctx.OvertimeHours >= 1.5f);
+                                            || ctx.OvertimeHours >= 1.5f || confinement);
             if (ctx.MissionTight && determ >= 0.65f && !needsEase)
             {
                 r.Reaction = ManagerReactionKind.Annoyed;
@@ -567,15 +781,21 @@ namespace DeepCore.FreeMovement
                 r.MemoryType = SocialMemoryType.ManagerGaveMeRecovery;
                 r.MemoryStrength = 0.5f;
             }
-            r.WhyPlain = needsEase ? "Recovery after hard work" : "Took the ease-off";
+            r.WhyPlain = confinement
+                ? "Eased off under confinement pressure"
+                : needsEase ? "Recovery after hard work" : "Took the ease-off";
         }
 
         static void EvalBreak(ManagerCommResult r, ManagerCommContext ctx,
             float recept, float determ, float spamTax)
         {
             var st = ctx.Worker.State;
+            bool confinement = st != null && (
+                st.ClaustroSeekingExit
+                || st.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt);
             bool needs = st != null && (st.ExhaustionLatched || st.NeedsCare || st.Injury >= 40f
-                                        || WorkerJobDemand.StaminaRatio(ctx.Worker) <= 0.3f);
+                                        || WorkerJobDemand.StaminaRatio(ctx.Worker) <= 0.3f
+                                        || confinement);
             if (!needs && determ >= 0.7f && recept < 0.75f)
             {
                 r.Reaction = ManagerReactionKind.Refused;
@@ -595,7 +815,9 @@ namespace DeepCore.FreeMovement
                 r.EventMagnitude = 0.55f;
                 r.MemoryType = SocialMemoryType.ManagerGaveMeRecovery;
                 r.MemoryStrength = 0.6f;
-                r.WhyPlain = "Break after brutal work builds trust";
+                r.WhyPlain = confinement
+                    ? "Break after confinement builds trust"
+                    : "Break after brutal work builds trust";
             }
             else
             {
@@ -668,14 +890,18 @@ namespace DeepCore.FreeMovement
         static void EvalCheckIn(ManagerCommResult r, ManagerCommContext ctx,
             float recept, float empathy, float spamTax)
         {
+            var st = ctx.Worker.State;
+            bool confinement = st != null && st.ClaustrophobicStress >= ClaustrophobiaBands.ElevatedAt;
             r.Reaction = ManagerReactionKind.Reassured;
             r.AcceptedIntent = true;
-            r.DTrust = 0.55f + empathy * 0.3f;
-            r.DResentment = -0.35f;
+            r.DTrust = 0.55f + empathy * 0.3f + (confinement ? 0.25f : 0f);
+            r.DResentment = -0.35f - (confinement ? 0.2f : 0f);
             r.EventMagnitude = 0.4f;
             r.MemoryType = SocialMemoryType.ManagerSupportedMe;
-            r.MemoryStrength = 0.4f;
-            r.WhyPlain = "Checked in on their state";
+            r.MemoryStrength = confinement ? 0.5f : 0.4f;
+            r.WhyPlain = confinement
+                ? "Checked in during confinement stress"
+                : "Checked in on their state";
         }
 
         static void EvalCriticize(ManagerCommResult r, ManagerCommContext ctx,
@@ -956,12 +1182,14 @@ namespace DeepCore.FreeMovement
             ManagerReactionKind.Reassured => SocialSpeechValence.Positive,
             ManagerReactionKind.Complied => SocialSpeechValence.Positive,
             ManagerReactionKind.Accepted => SocialSpeechValence.Neutral,
+            ManagerReactionKind.ReluctantlyAccepted => SocialSpeechValence.Negative,
             ManagerReactionKind.Hollow => SocialSpeechValence.Neutral,
             ManagerReactionKind.Annoyed => SocialSpeechValence.Negative,
             ManagerReactionKind.Refused => SocialSpeechValence.Negative,
             ManagerReactionKind.Ignored => SocialSpeechValence.Negative,
             ManagerReactionKind.Resentful => SocialSpeechValence.Severe,
             ManagerReactionKind.Angered => SocialSpeechValence.Severe,
+            ManagerReactionKind.Panicked => SocialSpeechValence.Severe,
             _ => SocialSpeechValence.Neutral,
         };
 
@@ -1026,23 +1254,111 @@ namespace DeepCore.FreeMovement
                 });
             }
 
-            if (intents != null && talkAction.HasValue && result.AcceptedIntent)
+            if (intents != null && talkAction.HasValue)
             {
                 var f = intents.Get(result.WorkerId);
-                if (talkAction == ManagerTalkAction.PushHarder
-                    || talkAction == ManagerTalkAction.KeepItUp)
+                var wr = WorkerRuntime.Find(result.WorkerId);
+
+                if (result.AcceptedIntent)
                 {
-                    f.AcceptedPush = true;
-                    f.PushUntil = gameHours + 1.2f;
+                    if (talkAction == ManagerTalkAction.PushHarder
+                        || talkAction == ManagerTalkAction.KeepItUp)
+                    {
+                        f.AcceptedPush = true;
+                        bool confinement = wr?.State != null && (
+                            wr.State.ClaustroSeekingExit
+                            || wr.State.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt
+                            || result.WhyPlain != null && result.WhyPlain.IndexOf(
+                                "confinement", System.StringComparison.OrdinalIgnoreCase) >= 0);
+
+                        if (talkAction == ManagerTalkAction.PushHarder && confinement)
+                        {
+                            f.ConfinementPushCount = Mathf.Min(8, f.ConfinementPushCount + 1);
+                            f.LastConfinementPushAt = gameHours;
+                            f.PushUntil = gameHours + (
+                                result.Reaction == ManagerReactionKind.ReluctantlyAccepted
+                                    ? 0.85f
+                                    : 1.45f);
+                            f.WillingUntilStress = result.Reaction switch
+                            {
+                                ManagerReactionKind.Motivated => 102f,
+                                ManagerReactionKind.Accepted => 99f,
+                                ManagerReactionKind.ReluctantlyAccepted => 96.5f,
+                                _ => 97f,
+                            };
+                            // "I will do it" — not suddenly fine
+                            if (wr?.State != null)
+                            {
+                                wr.State.ClaustroSeekingExit = false;
+                                float frBump = result.Reaction == ManagerReactionKind.ReluctantlyAccepted
+                                    ? 9f
+                                    : 5f;
+                                wr.State.Frustration = WorkerState.ClampMeter(
+                                    wr.State.Frustration + frBump);
+                            }
+                        }
+                        else
+                        {
+                            f.PushUntil = gameHours + 1.2f;
+                            if (f.WillingUntilStress < ClaustrophobiaBands.CriticalAt)
+                                f.WillingUntilStress = 0f;
+                        }
+                    }
+                    if (talkAction == ManagerTalkAction.TakeABreak
+                        || talkAction == ManagerTalkAction.EaseOff
+                        || talkAction == ManagerTalkAction.CheckIn)
+                    {
+                        if (talkAction == ManagerTalkAction.TakeABreak
+                            || talkAction == ManagerTalkAction.EaseOff)
+                        {
+                            f.AcceptedBreak = true;
+                            f.BreakUntil = gameHours + 1.5f;
+                        }
+                        if (wr?.State != null)
+                        {
+                            if (talkAction == ManagerTalkAction.TakeABreak)
+                                wr.State.IsResting = true;
+                            float stressRelief = talkAction switch
+                            {
+                                ManagerTalkAction.TakeABreak => 14f,
+                                ManagerTalkAction.EaseOff => 10f,
+                                _ => 6f,
+                            };
+                            float exposureRelief = talkAction switch
+                            {
+                                ManagerTalkAction.TakeABreak => 0.9f,
+                                ManagerTalkAction.EaseOff => 0.55f,
+                                _ => 0.35f,
+                            };
+                            ClaustrophobiaSystem.ApplyManagerRelief(wr, stressRelief, exposureRelief);
+                        }
+                    }
                 }
-                if (talkAction == ManagerTalkAction.TakeABreak
-                    || talkAction == ManagerTalkAction.EaseOff)
+                else if (talkAction == ManagerTalkAction.PushHarder)
                 {
-                    f.AcceptedBreak = true;
-                    f.BreakUntil = gameHours + 1.5f;
-                    var wr = WorkerRuntime.Find(result.WorkerId);
-                    if (wr?.State != null && talkAction == ManagerTalkAction.TakeABreak)
-                        wr.State.IsResting = true;
+                    // Failed pushes still escalate the counter
+                    bool confinement = wr?.State != null && (
+                        wr.State.ClaustroSeekingExit
+                        || wr.State.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt);
+                    if (confinement)
+                    {
+                        f.ConfinementPushCount = Mathf.Min(8, f.ConfinementPushCount + 1);
+                        f.LastConfinementPushAt = gameHours;
+                        f.AcceptedPush = false;
+                        f.WillingUntilStress = 0f;
+                        if (result.Reaction == ManagerReactionKind.Panicked)
+                        {
+                            f.HadPanicMemory = true;
+                            if (wr?.State != null)
+                            {
+                                wr.State.ClaustrophobicStress = WorkerState.ClampMeter(
+                                    wr.State.ClaustrophobicStress + 6f);
+                                wr.State.ClaustroSeekingExit = true;
+                                wr.State.Frustration = WorkerState.ClampMeter(
+                                    wr.State.Frustration + 12f);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -171,12 +171,14 @@ namespace DeepCore.FreeMovement
                     if (entry.Significance > list[i].Significance)
                         list[i].Significance = entry.Significance;
                 }
+                SocialPersonKnowledge.Instance.ObserveMemory(list[i], entry.GameTime);
                 Trim(list);
                 return;
             }
 
             list.Add(entry);
             Trim(list);
+            SocialPersonKnowledge.Instance.ObserveMemory(entry, entry.GameTime);
             if (entry.Significance == SocialMemorySignificance.Major)
                 NicknameEvidenceStore.Instance.ObserveMajorSocialMemory(entry);
         }

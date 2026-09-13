@@ -557,6 +557,8 @@ namespace DeepCore.FreeMovement
                 if (wr.State.IsAlive)
                 {
                     wr.State.Frustration = Mathf.Min(100f, wr.State.Frustration + (field.Severity == CollapseSeverity.Major ? 18f : 8f));
+                    ClaustrophobiaSystem.SpikeCollapse(wr,
+                        field.Severity == CollapseSeverity.Major ? 28f : 16f);
                     wr.State.Morale = Mathf.Max(0f, wr.State.Morale - (field.Severity == CollapseSeverity.Major ? 10f : 4f));
                     managerRel?.Get(wr.WorkerId)?.Add(
                         -1.5f, 0f, field.Severity == CollapseSeverity.Major ? 4f : 1.5f);

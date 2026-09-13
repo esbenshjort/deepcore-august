@@ -35,6 +35,7 @@ namespace DeepCore.FreeMovement
         readonly ManagerIntentStore _managerIntents = new ManagerIntentStore();
         ManagerCommResult _lastTalkResult;
         float _lastTalkResultUntilUnscaled;
+        float _lastClaustroRefuseBannerUnscaled;
         ManagerInterveneOutcome _lastIntervene;
         string _mgrRelHoverTip;
         Vector2 _mgrRelHoverGui;
@@ -44,13 +45,13 @@ namespace DeepCore.FreeMovement
         float _campEveningEndAbsolute = -1f;
         bool _showDailySummary;
         /// <summary>Stage A prototype roster — identity + shared WorkerStats. Indexed by WorkerId order.</summary>
-        WorkerRuntime[] _crewWorkers;
-        WorkerRuntime _workerLewis;
-        WorkerRuntime _workerMara;
-        WorkerRuntime _workerKowalski;
-        WorkerRuntime _workerElena;
-        WorkerRuntime _workerViktor;
-        WorkerRuntime _workerSteward;
+        [System.NonSerialized] WorkerRuntime[] _crewWorkers;
+        [System.NonSerialized] WorkerRuntime _workerLewis;
+        [System.NonSerialized] WorkerRuntime _workerMara;
+        [System.NonSerialized] WorkerRuntime _workerKowalski;
+        [System.NonSerialized] WorkerRuntime _workerElena;
+        [System.NonSerialized] WorkerRuntime _workerViktor;
+        [System.NonSerialized] WorkerRuntime _workerSteward;
         readonly WorkerAssignmentManager _assignments = new();
         readonly WorkerPresenceRegistry _presence = new();
         readonly WorkerStateEventService _stateEvents = new();
@@ -95,6 +96,7 @@ namespace DeepCore.FreeMovement
         bool _engineerWasRepairing;
         LogisticsTrafficMap _logisticsTraffic;
         MineInfrastructure _mineInfra;
+        FreeMovementTerrainView _terrainView;
         InfrastructureDebugOverlay _infraDebug;
         TunnelCollapseSystem _collapse;
         bool _devCollapsePanel;
@@ -288,10 +290,11 @@ namespace DeepCore.FreeMovement
 
             var viewGo = new GameObject("TerrainView");
             viewGo.transform.SetParent(_worldRoot, false);
-            viewGo.AddComponent<FreeMovementTerrainView>()
-                .Setup(_world, fogOfWarGold: false, strongCliffEdges: true);
+            _terrainView = viewGo.AddComponent<FreeMovementTerrainView>();
+            _terrainView.Setup(_world, fogOfWarGold: false, strongCliffEdges: true);
             // Rock wall ShadowCaster2D — used by crew headlamps only (lanterns keep shadows off).
             viewGo.AddComponent<RockWallShadows>().Setup(_world);
+            TunnelAmbientFx.Attach(_worldRoot, _world, _looseRoot);
             GoldVeinShine.Attach(_worldRoot, _world);
             _tactical = TacticalMapOverlay.Attach(_worldRoot, _world);
             _mission01DevOverlay = Mission01DevOverlay.Attach(_worldRoot, _world);
@@ -346,6 +349,7 @@ namespace DeepCore.FreeMovement
             }
 
             _logisticsTraffic = new LogisticsTrafficMap(_world);
+            _terrainView?.BindPresentation(_logisticsTraffic, BasecampPos, campRadiusCells: 24f);
             _mineInfra = new MineInfrastructure(_world, _logisticsTraffic, _trackRoot, _lanternRoot);
             _mineInfra.BindExcavator(_worker);
             _mineInfra.BindDropPoint(_yard.DropPoint);
@@ -546,6 +550,8 @@ namespace DeepCore.FreeMovement
             _worker.Setup(_world, _world.CellCenter(StartX, StartY), WorkerRadius,
                 pinsRoot, OnBroke, OnDigImpact, _goalSprite);
             _worker.SetRouteVisible(false);
+            _worker.ResolveClaustroRefuseCeiling = ResolveClaustroRefuseCeiling;
+            _worker.OnClaustroRefusePause = PresentClaustroRefuseBanner;
             DigVisualKit.AttachDrillerVisual(go, _worker);
 
             _worker.WeakPointFound += (wx, wy) =>
@@ -588,6 +594,114 @@ namespace DeepCore.FreeMovement
                 // Only one prospecting seat in prototype roster.
                 break;
             }
+        }
+
+        readonly List<Vector2> _claustroCoworkerScratch = new(8);
+
+        void TickClaustrophobia(float hoursDelta)
+        {
+            if (_crewWorkers == null || hoursDelta <= 0f || _world == null) return;
+            if (_crewPhase == CrewPhase.Asleep) return; // sleep recovery handles via WorkerState
+
+            _claustroCoworkerScratch.Clear();
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null || !wr.IsAlive) continue;
+                _claustroCoworkerScratch.Add(CrewWorldPos(wr));
+            }
+
+            Vector2? excavPos = _worker != null ? _worker.Position : (Vector2?)null;
+            Vector2 camp = BasecampPos;
+
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr?.State == null || !wr.IsAlive) continue;
+                Vector2 pos = CrewWorldPos(wr);
+
+                // Exclude self from isolation check
+                _claustroCoworkerScratch[i] = camp + Vector2.one * 999f; // temp remove self
+                var env = ClaustrophobiaSystem.SampleEnvironment(
+                    _world, pos, camp, _mineInfra, excavPos, _claustroCoworkerScratch);
+                _claustroCoworkerScratch[i] = pos;
+
+                var asg = _assignments?.GetAssignment(wr.WorkerId);
+                JobType job = asg != null ? asg.JobType : JobType.Unassigned;
+                string pid = asg?.ProviderId ?? "";
+
+                ClaustrophobiaSystem.TickPerson(
+                    wr, hoursDelta, env, wr.State.TrappedFromCamp, job, pid,
+                    tryBanter: (w, line) =>
+                    {
+                        if (w == null || string.IsNullOrEmpty(line)) return;
+                        var a = _assignments?.GetAssignment(w.WorkerId);
+                        var j = a != null ? a.JobType : JobType.Unassigned;
+                        if (!TryWorkerBanter(w, j, "Claustrophobia", line))
+                            TryAuthoredBanter(w.WorkerId, w.DisplayName, j, "Claustrophobia", line);
+                    },
+                    onSeekExit: OnClaustroSeekExit);
+            }
+        }
+
+        void OnClaustroSeekExit(WorkerRuntime wr)
+        {
+            if (wr == null || wr.State == null) return;
+
+            // Open camp/yard — never pause dig from confinement (false positives at perimeter)
+            if (Vector2.Distance(CrewWorldPos(wr), BasecampPos) < 5.2f)
+            {
+                wr.State.ClaustroSeekingExit = false;
+                _worker?.ResumeExecutionIfPossible();
+                return;
+            }
+
+            // Manager push willingness — still complying; do not re-pause
+            var flags = _managerIntents.Get(wr.WorkerId);
+            if (flags.AcceptedPush
+                && flags.WillingUntilStress > ClaustrophobiaBands.CriticalAt
+                && wr.State.ClaustrophobicStress < flags.WillingUntilStress)
+                return;
+
+            // Pause dig execution — never clear / replace player-painted route
+            if (_worker != null && _worker.AssignedWorkerId == wr.WorkerId)
+                _worker.PauseExecution(
+                    "CLAUSTROPHOBIA | REFUSES TO CONTINUE — plan retained");
+
+            var rel = _managerRels?.Get(wr.WorkerId);
+            if (rel != null && wr.State.ClaustrophobicStress >= ClaustrophobiaBands.CriticalAt)
+                rel.Add(-0.15f, 0f, 0.35f);
+
+            PresentClaustroRefuseBanner(wr);
+        }
+
+        void PresentClaustroRefuseBanner(WorkerRuntime wr)
+        {
+            if (wr == null) return;
+            if (Time.unscaledTime < _lastClaustroRefuseBannerUnscaled + 2.8f) return;
+            _lastClaustroRefuseBannerUnscaled = Time.unscaledTime;
+            string line = "Not deeper. Not like this.";
+            if (ClaustrophobiaSystem.TryGetLastCauses(wr.WorkerId, out var c)
+                && c.Light >= TunnelLightBand.PitchBlack)
+                line = "I can't stay down here. Get me out.";
+            _lastTalkResult = new ManagerCommResult
+            {
+                WorkerId = wr.WorkerId,
+                DisplayName = wr.DisplayName,
+                Reaction = ManagerReactionKind.Refused,
+                ReactionLabel = "REFUSES TO CONTINUE",
+                Line = line,
+                Valence = SocialSpeechValence.Severe,
+                AcceptedIntent = false,
+                WhyPlain = "Critical confinement — paused, route pending",
+            };
+            _lastTalkResultUntilUnscaled = Time.unscaledTime + 4.2f;
+            var asg = _assignments?.GetAssignment(wr.WorkerId);
+            var job = asg != null ? asg.JobType : JobType.Unassigned;
+            TryAuthoredSocialBanter(
+                wr.WorkerId, wr.DisplayName, job, "Claustrophobia", line,
+                SocialSpeechValence.Severe);
+            DigHoodLog.Push($"CLAUSTRO | {wr.DisplayName}: REFUSES TO CONTINUE — plan retained");
         }
 
         void TickJobDemands(float gameHoursDelta)
@@ -1375,7 +1489,10 @@ namespace DeepCore.FreeMovement
             if (_crewPhase != CrewPhase.OnShift && _crewPhase != CrewPhase.HeadingOut) return false;
             if (wr.State != null && wr.State.Incapacitated) return false;
             if (wr.CampBody != null && wr.CampBody.ToiletTripActive) return false;
-            if (wr.CampBody != null && (wr.CampBody.InjuryReturnActive || wr.CampBody.SeekingStewardCare))
+            // Care commute blocks work. Stale SeekingStewardCare after NeedsCare cleared must not soft-lock jobs.
+            if (wr.CampBody != null && wr.CampBody.InjuryReturnActive) return false;
+            if (wr.CampBody != null && wr.CampBody.SeekingStewardCare
+                && wr.State != null && wr.State.NeedsCare)
                 return false;
             var status = InjuryResponse.EvaluateWorkStatus(wr);
             if (status == WorkerInjuryWorkStatus.OffDuty
@@ -1396,9 +1513,14 @@ namespace DeepCore.FreeMovement
             return CanPerformJobActions(FindCrewWorker(_selectedWorkerId));
         }
 
+        /// <summary>
+        /// Selected person is assigned to this job (UI / input routing).
+        /// Does NOT require CanPerform — simulation Tick already gates that separately.
+        /// Scanner Y/C and excavator paint keys must work when the assigned person is selected;
+        /// placement/plan entry still enforce OnShift inside their Enter* methods.
+        /// </summary>
         bool SelectedJobIs(JobType job)
         {
-            if (!CanPerformSelectedJobActions()) return false;
             var t = ResolveControlTarget();
             return t.IsAssigned && t.JobType == job;
         }
@@ -1925,14 +2047,30 @@ namespace DeepCore.FreeMovement
                 if (SelectedJobIs(JobType.Excavation) &&
                     (kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame))
                     _worker.AddPin(_worker.Position, replaceRoute: false);
+                // Tunnel width 1–5 while excavator route planning is active
+                if (SelectedJobIs(JobType.Excavation) && _worker != null)
+                {
+                    if (kb.digit1Key.wasPressedThisFrame || kb.numpad1Key.wasPressedThisFrame)
+                        _worker.SetPlannedTunnelWidth(1);
+                    if (kb.digit2Key.wasPressedThisFrame || kb.numpad2Key.wasPressedThisFrame)
+                        _worker.SetPlannedTunnelWidth(2);
+                    if (kb.digit3Key.wasPressedThisFrame || kb.numpad3Key.wasPressedThisFrame)
+                        _worker.SetPlannedTunnelWidth(3);
+                    if (kb.digit4Key.wasPressedThisFrame || kb.numpad4Key.wasPressedThisFrame)
+                        _worker.SetPlannedTunnelWidth(4);
+                    if (kb.digit5Key.wasPressedThisFrame || kb.numpad5Key.wasPressedThisFrame)
+                        _worker.SetPlannedTunnelWidth(5);
+                }
                 if (kb.rKey.wasPressedThisFrame) ResetMap();
-                if (kb.bKey.wasPressedThisFrame)
+                if (kb.semicolonKey.wasPressedThisFrame)
+                    ToggleDevMode(); // Ø on Nordic layouts (physical Semicolon / Ø key)
+                if (kb.bKey.wasPressedThisFrame && DevMode.Enabled)
                 {
                     _showBalanceHarness = !_showBalanceHarness;
                     _hudPopup = _showBalanceHarness ? HudPopupKind.Balance : HudPopupKind.None;
                 }
                 if (kb.lKey.wasPressedThisFrame) TryPlaceLantern();
-                if (kb.tKey.wasPressedThisFrame) _tactical?.Toggle();
+                if (kb.tKey.wasPressedThisFrame && DevMode.Enabled) _tactical?.Toggle();
                 if (kb.tabKey.wasPressedThisFrame) CycleSelectedPerson(+1);
                 if (kb.iKey.wasPressedThisFrame) ToggleStatsSheetForSelected();
                 if (kb.uKey.wasPressedThisFrame) _playerTactical?.Toggle();
@@ -1947,7 +2085,8 @@ namespace DeepCore.FreeMovement
                 }
                 if (kb.cKey.wasPressedThisFrame && SelectedJobIs(JobType.Prospecting))
                     ToggleScannerPlanMode();
-                if (kb.equalsKey.wasPressedThisFrame && SelectedJobIs(JobType.Prospecting))
+                if (kb.equalsKey.wasPressedThisFrame && DevMode.Enabled
+                    && SelectedJobIs(JobType.Prospecting))
                 {
                     if (_fieldScanner != null && _fieldScanner.State == ProspectorScannerState.Scanning)
                         _fieldScanner.DebugForceCompleteScan(_absoluteGameHours);
@@ -1956,7 +2095,8 @@ namespace DeepCore.FreeMovement
                 }
                 if (_prospector != null && SelectedJobIs(JobType.Prospecting))
                 {
-                    bool boost = kb.leftAltKey.isPressed || kb.rightAltKey.isPressed;
+                    bool boost = DevMode.Enabled
+                        && (kb.leftAltKey.isPressed || kb.rightAltKey.isPressed);
                     if (_prospector.IsSettingUpScanner)
                         _prospector.SetDebugSetupSpeedMul(boost ? 20f : 1f);
                     if (_fieldScanner != null && _fieldScanner.State == ProspectorScannerState.Scanning)
@@ -2019,11 +2159,13 @@ namespace DeepCore.FreeMovement
                     _refiner?.TogglePriority();
             }
 
-            // F1: tick all hosts; WASD / player job input only to selected person's current job
+            // F1: tick ALL job hosts from assigned-worker eligibility — never from UI selection.
+            // WASD / player job input only routes to the selected person's current job.
             // HeadingOut: people who have ArrivedWork may already operate (others still walking)
             if (_crewPhase == CrewPhase.OnShift || _crewPhase == CrewPhase.HeadingOut)
             {
                 var ctl = ResolveControlTarget();
+                // Player drive input only — excavator keeps Tick(zero) for autonomous paint dig
                 Vector2 digWasd = CanPerformJobActions(ctl.Worker) && ctl.JobType == JobType.Excavation
                     ? wasd : Vector2.zero;
                 Vector2 prosWasd = CanPerformJobActions(ctl.Worker) && ctl.JobType == JobType.Prospecting
@@ -2037,6 +2179,7 @@ namespace DeepCore.FreeMovement
                     && CanPerformJobActions(ctl.Worker));
                 bool ToiletBusy(WorkerRuntime wr) =>
                     wr?.CampBody != null && wr.CampBody.ToiletTripActive;
+                // Excavation simulation: AssignedWorker + CanPerform — NOT SelectedJobIs / selection
                 if (!ToiletBusy(_worker?.AssignedWorker)
                     && CanPerformJobActions(_worker?.AssignedWorker))
                     _worker.Tick(digWasd);
@@ -2126,6 +2269,7 @@ namespace DeepCore.FreeMovement
                     WorkerStateDaytimeRecovery.Tick(_crewWorkers[i], hoursDelta);
                 TickJobDemands(hoursDelta);
                 TickProspectorDrySpell(hoursDelta);
+                TickClaustrophobia(hoursDelta);
             }
 
             TickInjuryRecovery(hoursDelta, sleeping: _crewPhase == CrewPhase.Asleep);
@@ -2970,7 +3114,7 @@ namespace DeepCore.FreeMovement
                 _world,
                 p,
                 AvatarCommuteRadius,
-                roleBias: 1.15f,
+                roleBias: 1f,
                 carriedLoad01: 0f,
                 isMoving: true);
             bool done = _personNav[rosterIndex].Follow(
@@ -3300,7 +3444,7 @@ namespace DeepCore.FreeMovement
                         continue;
                     }
                     float spd = WorkerLocomotion.WalkSpeedAt(
-                        wr, _world, bp, AvatarCommuteRadius, 1.1f, 0f, true);
+                        wr, _world, bp, AvatarCommuteRadius, 1f, 0f, true);
                     if (i < _personNav.Length && _personNav[i] != null)
                     {
                         _personNav[i].Follow(
@@ -3333,7 +3477,7 @@ namespace DeepCore.FreeMovement
                     continue;
                 }
                 float speed = WorkerLocomotion.WalkSpeedAt(
-                    wr, _world, p, AvatarCommuteRadius, 1.1f, 0f, true);
+                    wr, _world, p, AvatarCommuteRadius, 1f, 0f, true);
                 if (i < _personNav.Length && _personNav[i] != null)
                 {
                     _personNav[i].Follow(
@@ -3534,7 +3678,7 @@ namespace DeepCore.FreeMovement
         {
             if (result == null) return;
             _lastTalkResult = result;
-            _lastTalkResultUntilUnscaled = Time.unscaledTime + 3.2f;
+            _lastTalkResultUntilUnscaled = Time.unscaledTime + 3.8f;
             if (!result.SpamBlocked && !string.IsNullOrEmpty(result.Line))
             {
                 var wr = FindCrewWorker(result.WorkerId);
@@ -3552,9 +3696,42 @@ namespace DeepCore.FreeMovement
                 result, _managerRels,
                 _socialAura != null && _socialAura.IsBootstrapped ? _socialAura.Memory : null,
                 _managerIntents, _absoluteGameHours, talk);
+
+            // Accepted confinement push → resume SAME painted route (never rewrite plan)
+            if (talk == ManagerTalkAction.PushHarder
+                && result.AcceptedIntent
+                && _worker != null
+                && _worker.AssignedWorkerId == result.WorkerId)
+            {
+                _worker.ResumeExecutionIfPossible();
+            }
+
+            if (talk == ManagerTalkAction.TakeABreak
+                && result.AcceptedIntent
+                && _worker != null
+                && _worker.AssignedWorkerId == result.WorkerId)
+            {
+                var breakWr = FindCrewWorker(result.WorkerId);
+                if (breakWr?.State != null
+                    && breakWr.State.ClaustrophobicStress >= ClaustrophobiaBands.ElevatedAt
+                    && !_worker.ExecutionPaused)
+                {
+                    _worker.PauseExecution("MANAGER | Take a break — plan retained");
+                }
+            }
+
             DigHoodLog.Push(
                 $"TALK | {result.DisplayName}: {result.ReactionLabel}"
                 + (result.SpamBlocked ? " (blocked)" : ""));
+        }
+
+        float ResolveClaustroRefuseCeiling(WorkerRuntime wr)
+        {
+            if (wr == null) return ClaustrophobiaBands.CriticalAt;
+            var f = _managerIntents.Get(wr.WorkerId);
+            if (f.AcceptedPush && f.WillingUntilStress > ClaustrophobiaBands.CriticalAt)
+                return f.WillingUntilStress;
+            return ClaustrophobiaBands.CriticalAt;
         }
 
         void DrawManagerTalkPanel()
@@ -3607,7 +3784,8 @@ namespace DeepCore.FreeMovement
                 Block(br);
                 if (DrawCyberButton(br, label, selected: false, accent: accent))
                 {
-                    var result = ManagerCommSystem.EvaluateTalk(action, ctx, _managerCommSpam);
+                    var result = ManagerCommSystem.EvaluateTalk(
+                        action, ctx, _managerCommSpam, _managerIntents);
                     PresentManagerCommResult(result, action);
                 }
                 y += 24f;
@@ -3726,15 +3904,21 @@ namespace DeepCore.FreeMovement
             if (_lastTalkResult == null || Time.unscaledTime > _lastTalkResultUntilUnscaled)
                 return;
             var res = _lastTalkResult;
-            float pw = 220f;
-            float ph = 52f;
+            bool hasLine = !string.IsNullOrEmpty(res.Line) && !res.SpamBlocked;
+            float pw = 260f;
+            float ph = hasLine ? 72f : 52f;
             var r = new Rect((Screen.width - pw) * 0.5f, 48f, pw, ph);
             Color accent = SocialSpeechVisuals.Accent(res.Valence);
             DrawCyberPanel(r, lit: true, accentOverride: accent);
-            GUI.Label(new Rect(r.x + 10f, r.y + 8f, pw - 20f, 14f),
+            GUI.Label(new Rect(r.x + 10f, r.y + 6f, pw - 20f, 14f),
                 res.DisplayName.ToUpperInvariant(), LabelStyle(9, UiWhite, bold: true));
-            GUI.Label(new Rect(r.x + 10f, r.y + 26f, pw - 20f, 16f),
+            GUI.Label(new Rect(r.x + 10f, r.y + 22f, pw - 20f, 16f),
                 res.ReactionLabel, LabelStyle(11, accent, bold: true));
+            if (hasLine)
+            {
+                GUI.Label(new Rect(r.x + 10f, r.y + 42f, pw - 20f, 24f),
+                    "\"" + res.Line + "\"", LabelStyle(8, UiDim));
+            }
         }
 
         void DrawManagerInterveneOverlay()
@@ -3916,7 +4100,7 @@ namespace DeepCore.FreeMovement
         void DrawCampLifePanel()
         {
             const float pw = 260f;
-            float ph = 420f;
+            float ph = DevMode.Enabled ? 420f : 168f;
             float bx = Screen.width - pw - 12f - HudToolStripReserve;
             if (bx < 160f) bx = 160f;
             float by = 96f;
@@ -3981,6 +4165,8 @@ namespace DeepCore.FreeMovement
                 GUI.Label(new Rect(x, y, inner, 11f), "(none)", LabelStyle(7, UiDim));
                 y += 12f;
             }
+            if (!DevMode.Enabled) return;
+
             y += 8f;
             GUI.Label(new Rect(x, y, inner, 11f), "DEV CONTROLS", LabelStyle(7, UiMute, bold: true));
             y += 12f;
@@ -4100,6 +4286,7 @@ namespace DeepCore.FreeMovement
         /// <summary>TEMP DEV: selected-worker commute / path / relocation readout.</summary>
         void DrawWorkerMovementDebug()
         {
+            if (!DevMode.Enabled) return;
             var wr = FindCrewWorker(_selectedWorkerId);
             if (wr == null) return;
             var av = _presence.Get(wr.WorkerId);
@@ -4184,14 +4371,12 @@ namespace DeepCore.FreeMovement
             y += 12f;
             if (asg != null && asg.JobType == JobType.Excavation && _worker != null)
             {
-                string dig = _worker.IsOverheated ? "OVERHEAT"
-                    : _worker.IsCooling ? "COOLING"
-                    : _worker.IsActivelyDigging ? "DIGGING"
-                    : _worker.HasGoal ? "ENROUTE"
-                    : "IDLE";
+                string dig = _worker.MachineActivityLabel;
                 GUI.Label(new Rect(x, y, w, 11f),
-                    $"EXCAV: {dig}  H={_worker.Heat:0}  pins={_worker.RouteCount}",
-                    LabelStyle(8, dig == "DIGGING" ? UiGreen : dig == "IDLE" ? UiAmber : UiMute));
+                    $"EXCAV: {dig}  H={_worker.Heat:0}  plan={_worker.RouteCount}",
+                    LabelStyle(8, dig == "MINING" ? UiGreen
+                        : dig == "AWAITING ORDERS" || dig == "REFUSED" ? UiAmber
+                        : UiMute));
                 y += 12f;
             }
             GUI.Label(new Rect(x, y, w, 11f),
@@ -4481,6 +4666,7 @@ namespace DeepCore.FreeMovement
                     L.Sleeping = false;
                     L.WakeGameHour = _gameHour;
                     L.ArrivedWork = false;
+                    ClearStaleStewardCareFlag(wr);
                 }
             }
 
@@ -4553,7 +4739,7 @@ namespace DeepCore.FreeMovement
 
             if (_hasExcavatorDigResume && _worker != null && _worker.RouteCount > 0)
                 DigHoodLog.Push(
-                    $"SHIFT START | Excavator still at dig face | Route {_worker.RouteCount} pin{(_worker.RouteCount == 1 ? "" : "s")}");
+                    $"SHIFT START | Excavator still at dig face | Plan {_worker.RouteCount} cell{(_worker.RouteCount == 1 ? "" : "s")}");
             if (_prospector != null && _prospector.WorkMode == ProspectorWorkMode.Investigate)
                 DigHoodLog.Push($"SHIFT START | Prospector resumes {_prospector.Investigation.PlayerWorkLabel}");
             if (_refiner != null && _refiner.IsInConsultation)
@@ -4569,7 +4755,37 @@ namespace DeepCore.FreeMovement
 
             _socialAura.NotifyShiftStart(_crewWorkers);
             _dayTracker.BeginNewDayKeepStreaks(_crewWorkers);
+            // Ledger reset wipes ArrivedWork — restore anyone who already physically arrived this morning
+            if (_crewWorkers != null)
+            {
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var wr = _crewWorkers[i];
+                    if (wr == null) continue;
+                    if (i < _personArrived.Length && _personArrived[i])
+                        _dayTracker.Get(wr.WorkerId).ArrivedWork = true;
+                    ClearStaleStewardCareFlag(wr);
+                }
+            }
             _managerRels.EnsureCrew(_crewWorkers);
+
+            // Resume excavator dig against retained overnight plan
+            if (_worker != null && _worker.RouteCount > 0)
+                _worker.ResumeExecutionIfPossible();
+        }
+
+        /// <summary>
+        /// SeekingStewardCare must not outlive NeedsCare — otherwise jobs soft-lock after sleep
+        /// (operator seats at machine but CanPerform stays false).
+        /// </summary>
+        void ClearStaleStewardCareFlag(WorkerRuntime wr)
+        {
+            if (wr?.CampBody == null || wr.State == null) return;
+            if (!wr.CampBody.SeekingStewardCare) return;
+            if (wr.State.NeedsCare) return;
+            if (InjuryResponse.EvaluateWorkStatus(wr) == WorkerInjuryWorkStatus.OffDuty) return;
+            wr.CampBody.SeekingStewardCare = false;
+            DigHoodLog.Push($"INJURY | {wr.DisplayName} care flag cleared — fit for work");
         }
 
         void FinalizeSleepLedgerAndSummary()
@@ -4694,9 +4910,10 @@ namespace DeepCore.FreeMovement
             for (int i = 0; i < _crewWorkers.Length; i++)
             {
                 var wr = _crewWorkers[i];
-                if (wr == null || !wr.IsAlive) continue;
+                if (wr?.Stats == null || wr.Injuries == null || wr.State == null || !wr.IsAlive)
+                    continue;
                 // Trapped / incap at collapse site — no proper sleep (exhaustion rises)
-                if (wr.State != null && (wr.State.Incapacitated || wr.State.TrappedFromCamp))
+                if (wr.State.Incapacitated || wr.State.TrappedFromCamp)
                 {
                     wr.State.Frustration = Mathf.Min(100f, wr.State.Frustration + 10f * nightFraction01);
                     wr.State.Morale = Mathf.Max(0f, wr.State.Morale - 8f * nightFraction01);
@@ -4741,11 +4958,13 @@ namespace DeepCore.FreeMovement
             for (int i = 0; i < _crewWorkers.Length; i++)
             {
                 var wr = _crewWorkers[i];
-                if (wr == null) continue;
+                // Unity may deserialize [Serializable] WorkerRuntime shells without ctor → null Stats/Injuries
+                if (wr?.Stats == null || wr.Injuries == null || wr.State == null) continue;
                 float rec01 = (wr.Stats.Get(WorkerStatId.Recovery) - 1) / 19f;
                 wr.Injuries.TickRecovery(gameHoursDelta, rec01, sleeping: false);
                 wr.Injuries.SyncInjuryMeter(wr.State);
                 wr.Injuries.SyncNeedsCare(wr.State);
+                ClearStaleStewardCareFlag(wr);
             }
         }
 
@@ -5191,8 +5410,17 @@ namespace DeepCore.FreeMovement
                 var memTI = mem != null
                     ? mem.GetToward(log.TargetId, log.InitiatorId)
                     : System.Array.Empty<SocialMemoryEntry>();
-                initTone = SocialDialogueTone.From(init, relIT, memIT);
-                respTone = SocialDialogueTone.From(target, relTI, memTI);
+
+                Vector2? excavPos = _worker != null ? _worker.Position : (Vector2?)null;
+                var sit = SocialSituationFlags.FromWorkers(
+                    init, target, initPos, _world, BasecampPos, _mineInfra, excavPos);
+                if (log.Context == SocialContext.Camp) { /* camp talk allowed */ }
+                if (init?.State != null && init.State.ClaustrophobicStress >= 70f)
+                    SocialPersonKnowledge.Instance.ObserveConfinementFear(
+                        log.TargetId, log.InitiatorId, init.State.ClaustrophobicStress, _absoluteGameHours);
+
+                initTone = SocialDialogueTone.From(init, relIT, memIT, sit, log.TargetId, _absoluteGameHours);
+                respTone = SocialDialogueTone.From(target, relTI, memTI, sit, log.InitiatorId, _absoluteGameHours);
             }
 
             _socialPresenter.TryEnqueue(
@@ -5320,9 +5548,34 @@ namespace DeepCore.FreeMovement
 
             Vector2 screen = mouse.position.ReadValue();
             Vector2 guiPt = new(screen.x, Screen.height - screen.y);
-            if (IsOverHud(guiPt)) return;
-
             Vector3 world = cam.ScreenToWorldPoint(new Vector3(screen.x, screen.y, -cam.transform.position.z));
+
+            // Always finalize / sample active paint stroke even if cursor crosses HUD
+            if (_worker != null && SelectedJobIs(JobType.Excavation) && _worker.PaintPlan.IsStroking)
+            {
+                if (mouse.leftButton.wasReleasedThisFrame || !mouse.leftButton.isPressed)
+                {
+                    _worker.CommitPaintStroke();
+                    UpdateExcavationWidthRing(world, guiPt);
+                    return;
+                }
+                if (mouse.rightButton.wasPressedThisFrame)
+                {
+                    _worker.CancelPaintStroke();
+                    UpdateExcavationWidthRing(world, guiPt);
+                    return;
+                }
+                _worker.SamplePaintStroke(world);
+                UpdateExcavationWidthRing(world, overHud: false); // stroking — keep ring on brush
+                return;
+            }
+
+            if (IsOverHud(guiPt))
+            {
+                if (SelectedJobIs(JobType.Excavation))
+                    _worker?.HideBrushWidthRing();
+                return;
+            }
 
             if (_scannerPlaceMode)
             {
@@ -5347,21 +5600,68 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
-            if (!SelectedJobIs(JobType.Excavation) || _worker == null) return;
-
-            // RMB / Backspace: undo last pin
-            if (mouse.rightButton.wasPressedThisFrame)
+            if (!SelectedJobIs(JobType.Excavation) || _worker == null)
             {
-                _worker.UndoLastPin();
+                _worker?.HideBrushWidthRing();
                 return;
             }
 
-            if (!mouse.leftButton.wasPressedThisFrame) return;
+            // Planning / paint hover — faint width ring at tile under cursor
+            UpdateExcavationWidthRing(world, overHud: false);
 
-            // Shift+LMB: replace route with one pin (go here)
-            // LMB: append pin to dig route (plan path through mountain)
-            bool replace = kb != null && (kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed);
-            _worker.AddPin(world, replaceRoute: replace);
+            // RMB: erase planned tiles under cursor (or cancel in-progress stroke)
+            if (mouse.rightButton.wasPressedThisFrame)
+            {
+                if (_worker.PaintPlan.IsStroking)
+                    _worker.CancelPaintStroke();
+                else
+                    _worker.ErasePaintAt(world);
+                return;
+            }
+
+            // Tile-paint routing: hold LMB drag → release commits
+            if (mouse.leftButton.wasPressedThisFrame)
+            {
+                bool replace = kb != null && (kb.leftShiftKey.isPressed || kb.rightShiftKey.isPressed);
+                if (replace)
+                    _worker.ClearRoute();
+
+                var op = _worker.AssignedWorker;
+                if (op?.State != null
+                    && op.State.ClaustrophobicStress >= ClaustrophobiaBands.SevereAt
+                    && world.y < _worker.Position.y - 0.15f)
+                {
+                    _managerRels.Get(op.WorkerId)?.Add(-0.25f, 0f, 0.55f);
+                    WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                        op.WorkerId,
+                        WorkerStateEventType.ManagerCommunication,
+                        3.2f,
+                        "ForcedDeeper",
+                        JobType.Excavation,
+                        _worker.ProviderId ?? ""));
+                }
+                _worker.BeginPaintStroke(world);
+                UpdateExcavationWidthRing(world, overHud: false);
+                return;
+            }
+        }
+
+        void UpdateExcavationWidthRing(Vector3 world, Vector2 guiPt) =>
+            UpdateExcavationWidthRing(world, IsOverHud(guiPt));
+
+        void UpdateExcavationWidthRing(Vector3 world, bool overHud)
+        {
+            if (_worker == null || !SelectedJobIs(JobType.Excavation))
+            {
+                _worker?.HideBrushWidthRing();
+                return;
+            }
+            if (overHud && !_worker.PaintPlan.IsStroking)
+            {
+                _worker.HideBrushWidthRing();
+                return;
+            }
+            _worker.UpdateBrushWidthRingAt(world, planningVisible: true);
         }
 
         bool IsOverHud(Vector2 guiPoint)
@@ -5592,7 +5892,7 @@ namespace DeepCore.FreeMovement
 
         void OnDrawGizmos()
         {
-            if (_socialDevDrawWorld && _crewWorkers != null && _socialAura.IsBootstrapped)
+            if (DevMode.Enabled && _socialDevDrawWorld && _crewWorkers != null && _socialAura.IsBootstrapped)
             {
                 for (int i = 0; i < _crewWorkers.Length; i++)
                 {
@@ -5681,7 +5981,16 @@ namespace DeepCore.FreeMovement
             DrawCyberPanel(topBar, lit: _crewPhase == CrewPhase.OnShift);
             Block(topBar);
             DrawCollapseEventBanners();
-            DrawWorkerMovementDebug();
+            if (DevMode.Enabled)
+                DrawWorkerMovementDebug();
+
+            if (DevMode.Enabled)
+            {
+                var devBadge = new Rect(Screen.width - 56f, Screen.height - 28f, 44f, 18f);
+                DrawCyberPanel(devBadge, lit: true, accentOverride: UiAmber);
+                GUI.Label(new Rect(devBadge.x + 6f, devBadge.y + 2f, 36f, 14f), "DEV",
+                    LabelStyle(9, UiAmber, bold: true));
+            }
 
             float px = topBar.x + 12f;
             float py = topBar.y + 8f;
@@ -5756,7 +6065,7 @@ namespace DeepCore.FreeMovement
             // ——— Left crew column (scanner stacks above roster; never overlaps) ———
             float faceW = WorkerFaceMonitor.DefaultWidth;
             float faceGap = 5f;
-            float cardW = 168f, cardH = 80f, cardGap = 5f;
+            float cardW = 176f, cardH = 108f, cardGap = 5f;
             const float statsBtnW = 36f;
             float faceX = 10f;
             float cx = faceX + faceW + faceGap;
@@ -5837,73 +6146,79 @@ namespace DeepCore.FreeMovement
                         selected: _hauler.PreferGold, accent: UiAmber))
                     _hauler.TogglePreferGold();
                 rosterExtraY += 32f;
-                GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
-                    $"TRACK MUL  {_hauler.DebugTrackSpeedMul:0.00}×",
-                    LabelStyle(9, UiDim));
+                if (DevMode.Enabled)
+                {
+                    GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
+                        $"TRACK MUL  {_hauler.DebugTrackSpeedMul:0.00}×",
+                        LabelStyle(9, UiDim));
+                    rosterExtraY += 18f;
+                }
             }
 
             if (SelectedJobIs(JobType.Engineering) && _engineer != null)
             {
-                GUI.Label(new Rect(cx, rosterExtraY, cardW, 18f),
-                    _engineer.DebugStatus,
-                    LabelStyle(11, UiAmber));
-                rosterExtraY += 18f;
-                var coopNow = EvaluateExcavatorEngineerCoop();
-                if (coopNow.Active)
+                if (DevMode.Enabled)
                 {
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 40f, 14f),
-                        $"COOP Q {coopNow.Quality:0.00}  spd×{coopNow.DispatchSpeedMul:0.00}  dur×{coopNow.RepairDurationMul:0.00}",
-                        LabelStyle(9, UiCyan));
-                    rosterExtraY += 14f;
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
-                        TruncateDev(coopNow.Factors ?? "", 52),
-                        LabelStyle(8, UiDim));
-                    rosterExtraY += 14f;
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
-                        $"LAST  {ExcavatorEngineerCooperation.LastConsequence}  {TruncateDev(ExcavatorEngineerCooperation.LastConsequenceDetail, 40)}",
-                        LabelStyle(8, UiMute));
-                    rosterExtraY += 14f;
+                    GUI.Label(new Rect(cx, rosterExtraY, cardW, 18f),
+                        _engineer.DebugStatus,
+                        LabelStyle(11, UiAmber));
+                    rosterExtraY += 18f;
+                    var coopNow = EvaluateExcavatorEngineerCoop();
+                    if (coopNow.Active)
+                    {
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW + 40f, 14f),
+                            $"COOP Q {coopNow.Quality:0.00}  spd×{coopNow.DispatchSpeedMul:0.00}  dur×{coopNow.RepairDurationMul:0.00}",
+                            LabelStyle(9, UiCyan));
+                        rosterExtraY += 14f;
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
+                            TruncateDev(coopNow.Factors ?? "", 52),
+                            LabelStyle(8, UiDim));
+                        rosterExtraY += 14f;
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, 14f),
+                            $"LAST  {ExcavatorEngineerCooperation.LastConsequence}  {TruncateDev(ExcavatorEngineerCooperation.LastConsequenceDetail, 40)}",
+                            LabelStyle(8, UiMute));
+                        rosterExtraY += 14f;
+                    }
+                    if (_engineer.HasDebugTarget)
+                    {
+                        var tc = _engineer.DebugTargetCell;
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
+                            $"TARGET  ({tc.x},{tc.y})",
+                            LabelStyle(9, UiCyan));
+                        rosterExtraY += 16f;
+                    }
+                    if (_mineInfra != null)
+                    {
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
+                            $"LAMP {_mineInfra.LanternCount}  SUPPORT {_mineInfra.SupportCount}",
+                            LabelStyle(9, UiDim));
+                        rosterExtraY += 16f;
+                    }
+                    string lanDbg = _engineer.EvalLanternDebug;
+                    string supDbg = _engineer.EvalSupportDebug;
+                    if (!string.IsNullOrEmpty(lanDbg))
+                    {
+                        float lh = Mathf.Min(54f, 12f + lanDbg.Length * 0.12f);
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, lh), lanDbg, LabelStyle(8, UiDim));
+                        rosterExtraY += lh + 2f;
+                    }
+                    if (!string.IsNullOrEmpty(supDbg))
+                    {
+                        float sh = Mathf.Min(54f, 12f + supDbg.Length * 0.12f);
+                        GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, sh), supDbg, LabelStyle(8, UiDim));
+                        rosterExtraY += sh + 4f;
+                    }
+                    var dbgBtn = new Rect(cx, rosterExtraY, cardW, 28f);
+                    Block(dbgBtn);
+                    bool dbgOn = _infraDebug != null && _infraDebug.Visible;
+                    if (DrawCyberButton(dbgBtn, dbgOn ? "INFRA DEBUG // ON" : "INFRA DEBUG // OFF",
+                            selected: dbgOn, accent: new Color(1f, 0.55f, 0.22f)))
+                    {
+                        if (_infraDebug != null)
+                            _infraDebug.Visible = !dbgOn;
+                    }
+                    rosterExtraY += 32f;
                 }
-                if (_engineer.HasDebugTarget)
-                {
-                    var tc = _engineer.DebugTargetCell;
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
-                        $"TARGET  ({tc.x},{tc.y})",
-                        LabelStyle(9, UiCyan));
-                    rosterExtraY += 16f;
-                }
-                if (_mineInfra != null)
-                {
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW, 16f),
-                        $"LAMP {_mineInfra.LanternCount}  SUPPORT {_mineInfra.SupportCount}",
-                        LabelStyle(9, UiDim));
-                    rosterExtraY += 16f;
-                }
-                // Eval diagnostics — wrap long lines
-                string lanDbg = _engineer.EvalLanternDebug;
-                string supDbg = _engineer.EvalSupportDebug;
-                if (!string.IsNullOrEmpty(lanDbg))
-                {
-                    float lh = Mathf.Min(54f, 12f + lanDbg.Length * 0.12f);
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, lh), lanDbg, LabelStyle(8, UiDim));
-                    rosterExtraY += lh + 2f;
-                }
-                if (!string.IsNullOrEmpty(supDbg))
-                {
-                    float sh = Mathf.Min(54f, 12f + supDbg.Length * 0.12f);
-                    GUI.Label(new Rect(cx, rosterExtraY, cardW + 80f, sh), supDbg, LabelStyle(8, UiDim));
-                    rosterExtraY += sh + 4f;
-                }
-                var dbgBtn = new Rect(cx, rosterExtraY, cardW, 28f);
-                Block(dbgBtn);
-                bool dbgOn = _infraDebug != null && _infraDebug.Visible;
-                if (DrawCyberButton(dbgBtn, dbgOn ? "INFRA DEBUG // ON" : "INFRA DEBUG // OFF",
-                        selected: dbgOn, accent: new Color(1f, 0.55f, 0.22f)))
-                {
-                    if (_infraDebug != null)
-                        _infraDebug.Visible = !dbgOn;
-                }
-                rosterExtraY += 32f;
             }
 
             if (SelectedJobIs(JobType.Refining) && _refiner != null)
@@ -5977,32 +6292,43 @@ namespace DeepCore.FreeMovement
                 by += bh + 6f;
             }
 
-            bool tacOn = _tactical != null && _tactical.Visible;
-            var rTac = new Rect(bx, by + bh + 6, bw, bh);
-            Block(rTac);
-            if (DrawCyberButton(rTac, tacOn ? "TRUTH VIEW // ON" : "TRUTH VIEW", selected: tacOn, accent: UiAmber))
-                _tactical?.Toggle();
+            bool tacOn = DevMode.Enabled && _tactical != null && _tactical.Visible;
+            if (DevMode.Enabled)
+            {
+                var rTac = new Rect(bx, by + bh + 6, bw, bh);
+                Block(rTac);
+                if (DrawCyberButton(rTac, tacOn ? "TRUTH VIEW // ON" : "TRUTH VIEW", selected: tacOn, accent: UiAmber))
+                    _tactical?.Toggle();
+                by = rTac.yMax + 10f;
+            }
+            else
+            {
+                by = by + bh + 10f;
+            }
 
             // Compact tool strip — non-essentials open as exclusive pop-ups
-            by = rTac.yMax + 10f;
             DrawHudPopupToolStrip(bx, by, bw, 22f);
 
             DrawScanHistoryBrowser();
             DrawHistoricalTacticalBanner();
-            DrawScanHistoryDevReadout();
+            if (DevMode.Enabled)
+                DrawScanHistoryDevReadout();
 
-            if (_hudPopup == HudPopupKind.Runtime) DrawWorkerRuntimeDevPanel();
-            if (_hudPopup == HudPopupKind.Assign) DrawWorkerAssignmentDevPanel();
-            if (_hudPopup == HudPopupKind.Presence) DrawWorkerPresenceDevPanel();
-            if (_hudPopup == HudPopupKind.Social) DrawSocialAuraDevPanel();
-            if (_hudPopup == HudPopupKind.Control) DrawWorkerControlDevPanel();
-            if (_hudPopup == HudPopupKind.Sheet) DrawWorkerSheetDevPanel();
-            if (_hudPopup == HudPopupKind.Banter) DrawBanterDevPanel();
+            if (DevMode.Enabled)
+            {
+                if (_hudPopup == HudPopupKind.Runtime) DrawWorkerRuntimeDevPanel();
+                if (_hudPopup == HudPopupKind.Assign) DrawWorkerAssignmentDevPanel();
+                if (_hudPopup == HudPopupKind.Presence) DrawWorkerPresenceDevPanel();
+                if (_hudPopup == HudPopupKind.Social) DrawSocialAuraDevPanel();
+                if (_hudPopup == HudPopupKind.Control) DrawWorkerControlDevPanel();
+                if (_hudPopup == HudPopupKind.Sheet) DrawWorkerSheetDevPanel();
+                if (_hudPopup == HudPopupKind.Banter) DrawBanterDevPanel();
+                if (_hudPopup == HudPopupKind.Activity) DrawProspectorDevActivityBox();
+                if (_hudPopup == HudPopupKind.Balance || _showBalanceHarness) DrawBalanceHarnessPanel();
+                if (_hudPopup == HudPopupKind.Mission) DrawMission01DevPanel();
+            }
             if (_hudPopup == HudPopupKind.Keys) DrawKeybindingsPanel();
             if (_hudPopup == HudPopupKind.Comms) DrawDigHoodLog();
-            if (_hudPopup == HudPopupKind.Activity) DrawProspectorDevActivityBox();
-            if (_hudPopup == HudPopupKind.Balance || _showBalanceHarness) DrawBalanceHarnessPanel();
-            if (_hudPopup == HudPopupKind.Mission) DrawMission01DevPanel();
             if (_hudPopup == HudPopupKind.Camp) DrawCampLifePanel();
             if (_hudPopup == HudPopupKind.Shift) DrawShiftPlannerPanel();
             if (_hudPopup == HudPopupKind.Talk) DrawManagerTalkPanel();
@@ -6018,6 +6344,7 @@ namespace DeepCore.FreeMovement
 
             DrawFindingToast();
             DrawProspectorThinkingPanel();
+            DrawTunnelWidthPlanningHud();
             DrawRosterMeterTooltip();
             DrawAnomalyHoverTooltip();
 
@@ -6040,8 +6367,42 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        void ToggleDevMode()
+        {
+            DevMode.Toggle();
+            if (!DevMode.Enabled)
+                ApplyDevModeOffCleanup();
+        }
+
+        void ApplyDevModeOffCleanup()
+        {
+            if (IsDevOnlyHudPopup(_hudPopup))
+                _hudPopup = HudPopupKind.None;
+            _showBalanceHarness = false;
+            _socialDevDrawWorld = false;
+            if (_tactical != null)
+                _tactical.Visible = false;
+            if (_infraDebug != null)
+                _infraDebug.Visible = false;
+            if (_mission01 != null)
+                _mission01.DevValidationVisible = false;
+            if (_collapse != null)
+                _collapse.ShowStabilityOverlay = false;
+        }
+
+        static bool IsDevOnlyHudPopup(HudPopupKind kind) => kind switch
+        {
+            HudPopupKind.Assign or HudPopupKind.Control or HudPopupKind.Sheet
+                or HudPopupKind.Banter or HudPopupKind.Presence or HudPopupKind.Social
+                or HudPopupKind.Runtime or HudPopupKind.Activity or HudPopupKind.Balance
+                or HudPopupKind.Mission => true,
+            _ => false,
+        };
+
         void ToggleHudPopup(HudPopupKind kind)
         {
+            if (IsDevOnlyHudPopup(kind) && !DevMode.Enabled)
+                return;
             if (_hudPopup == kind)
             {
                 _hudPopup = HudPopupKind.None;
@@ -6083,6 +6444,16 @@ namespace DeepCore.FreeMovement
 
             StripBtn("COMMS", HudPopupKind.Comms, UiCyan);
             StripBtn("KEYS", HudPopupKind.Keys, UiDim);
+            StripBtn("CAMP", HudPopupKind.Camp, UiAmber);
+            StripBtn("SHIFT", HudPopupKind.Shift, UiCyan);
+            StripBtn("TALK", HudPopupKind.Talk, UiGreen);
+            StripBtn("CREW", HudPopupKind.CrewTalk, UiAmber);
+
+            if (!DevMode.Enabled) return;
+
+            y += 6f;
+            GUI.Label(new Rect(x, y, w, 12f), "DEV", LabelStyle(8, UiAmber, bold: true));
+            y += 14f;
             StripBtn("ASSIGN", HudPopupKind.Assign, UiGreen);
             StripBtn("CTRL", HudPopupKind.Control, UiGreen);
             StripBtn("SHEET", HudPopupKind.Sheet, UiAmber);
@@ -6093,10 +6464,6 @@ namespace DeepCore.FreeMovement
             StripBtn("ACTIVITY", HudPopupKind.Activity, UiAmber);
             StripBtn("BALANCE", HudPopupKind.Balance, UiAmber);
             StripBtn("MISSION", HudPopupKind.Mission, UiGreen);
-            StripBtn("CAMP", HudPopupKind.Camp, UiAmber);
-            StripBtn("SHIFT", HudPopupKind.Shift, UiCyan);
-            StripBtn("TALK", HudPopupKind.Talk, UiGreen);
-            StripBtn("CREW", HudPopupKind.CrewTalk, UiAmber);
         }
 
         /// <summary>Right margin reserved for the always-visible panel tool strip.</summary>
@@ -6147,6 +6514,7 @@ namespace DeepCore.FreeMovement
 
         void DrawMission01DevPanel()
         {
+            if (!DevMode.Enabled) return;
             float pw = 320f, ph = 280f;
             float px = Screen.width - pw - 24f;
             float py = 96f;
@@ -6248,6 +6616,7 @@ namespace DeepCore.FreeMovement
 
         void DrawBalanceHarnessPanel()
         {
+            if (!DevMode.Enabled) return;
             if (!_showBalanceHarness || _worker == null) return;
 
             const float panelW = 320f;
@@ -6396,17 +6765,17 @@ namespace DeepCore.FreeMovement
 
             float nameW = r.width - 22f - iconW - 4f;
             var tStyle = new GUIStyle(titleStyle) { normal = { textColor = on ? accent : UiDim } };
-            GUI.Label(new Rect(r.x + 14, r.y + 5, nameW, 16),
+            GUI.Label(new Rect(r.x + 14, r.y + 4, nameW, 14),
                 wr.DisplayName.ToUpperInvariant(), tStyle);
-            GUI.Label(new Rect(r.x + 14, r.y + 22, r.width - 20, 13), jobLine, subStyle);
-            GUI.Label(new Rect(r.x + 14, r.y + 35, r.width - 20, 12), providerLine,
-                LabelStyle(8, UiMute));
+            GUI.Label(new Rect(r.x + 14, r.y + 18, r.width - 20, 12), jobLine, subStyle);
+            GUI.Label(new Rect(r.x + 14, r.y + 30, r.width - 20, 11), providerLine,
+                LabelStyle(7, UiMute));
             if (wr != null && !wr.IsAlive)
-                GUI.Label(new Rect(r.x + 14, r.y + 47, r.width - 20, 10), "// DEAD",
-                    LabelStyle(7, new Color(1f, 0.35f, 0.3f, 0.85f)));
+                GUI.Label(new Rect(r.x + 14, r.y + 41, r.width - 20, 9), "// DEAD",
+                    LabelStyle(6, new Color(1f, 0.35f, 0.3f, 0.85f)));
             else if (on)
-                GUI.Label(new Rect(r.x + 14, r.y + 47, r.width - 20, 10), "// SELECTED",
-                    LabelStyle(7, new Color(accent.r, accent.g, accent.b, 0.65f)));
+                GUI.Label(new Rect(r.x + 14, r.y + 41, r.width - 20, 9), "// SELECTED",
+                    LabelStyle(6, new Color(accent.r, accent.g, accent.b, 0.65f)));
 
             DrawRosterStateBars(r, wr);
 
@@ -6461,41 +6830,74 @@ namespace DeepCore.FreeMovement
             float stamMax = Mathf.Max(1f, wr.PhysicalStaminaMax);
             float stam = Mathf.Clamp(st.PhysicalStamina, 0f, stamMax);
 
-            const float barH = 2.2f;
-            const float gap = 1.4f;
-            float stackH = barH * 4f + gap * 3f;
+            const float barH = 9f;
+            const float gap = 2f;
+            float stackH = barH * 5f + gap * 4f;
             float x = card.x + 12f;
             float w = card.width - 20f;
             float y = card.yMax - stackH - 5f;
 
             DrawRosterMeterBar(new Rect(x, y, w, barH), stam / stamMax, RosterStaminaCol,
-                "STAMINA", $"{stam:0}/{stamMax:0}", "Physical reserve.");
+                "STAMINA", "STAM", $"{stam:0}/{stamMax:0}", "Physical reserve.");
             y += barH + gap;
             DrawRosterMeterBar(new Rect(x, y, w, barH), st.FocusState / 100f, RosterFocusCol,
-                "FOCUS", $"{st.FocusState:0}", "Current concentration.");
+                "FOCUS", "FOCUS", $"{st.FocusState:0}", "Current concentration.");
             y += barH + gap;
             DrawRosterMeterBar(new Rect(x, y, w, barH), st.Frustration / 100f, RosterFrustrationCol,
-                "FRUSTRATION", $"{st.Frustration:0}", "Pressure and irritation.");
+                "FRUSTRATION", "FRUST", $"{st.Frustration:0}", "Pressure and irritation.");
             y += barH + gap;
             DrawRosterMeterBar(new Rect(x, y, w, barH), st.Morale / 100f, RosterMoraleCol,
-                "MORALE", $"{st.Morale:0}", "Broader outlook.");
+                "MORALE", "MORALE", $"{st.Morale:0}", "Broader outlook.");
+            y += barH + gap;
+            float claustro = st.ClaustrophobicStress / 100f;
+            DrawRosterMeterBar(new Rect(x, y, w, barH), claustro,
+                ClaustrophobiaBands.BarColor(st.ClaustrophobicStress),
+                "CONFINEMENT STRESS", "CONFINE", $"{st.ClaustrophobicStress:0}",
+                ClaustrophobiaSystem.BuildTooltip(wr));
         }
 
-        void DrawRosterMeterBar(Rect r, float fill01, Color accent, string name, string value, string desc)
+        void DrawRosterMeterBar(
+            Rect r, float fill01, Color accent,
+            string name, string shortLabel, string value, string desc)
         {
             fill01 = Mathf.Clamp01(fill01);
             var prev = GUI.color;
-            GUI.color = new Color(0.04f, 0.06f, 0.08f, 0.55f);
+            GUI.color = new Color(0.04f, 0.06f, 0.08f, 0.62f);
             GUI.DrawTexture(r, Texture2D.whiteTexture);
             float fill = fill01 * r.width;
             if (fill > 0.4f)
             {
-                GUI.color = new Color(accent.r, accent.g, accent.b, 0.82f);
+                GUI.color = new Color(accent.r, accent.g, accent.b, 0.72f);
                 GUI.DrawTexture(new Rect(r.x, r.y, fill, r.height), Texture2D.whiteTexture);
             }
-            GUI.color = new Color(accent.r, accent.g, accent.b, 0.28f);
+            // Thin top edge — cyber hairline, not a glow slab
+            GUI.color = new Color(accent.r, accent.g, accent.b, 0.35f);
             GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1f), Texture2D.whiteTexture);
             GUI.color = prev;
+
+            // Quiet in-bar identity — small, uppercase, does not compete with fill
+            // Bypass LabelStyle floor so tags stay visibly smaller than card titles.
+            var tag = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 7,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = new Color(0.78f, 0.88f, 0.92f, 0.9f) },
+                alignment = TextAnchor.MiddleLeft,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(0, 0, 0, 0),
+            };
+            var val = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 7,
+                fontStyle = FontStyle.Normal,
+                normal = { textColor = new Color(0.92f, 0.96f, 1f, 0.78f) },
+                alignment = TextAnchor.MiddleRight,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(0, 0, 0, 0),
+            };
+            GUI.Label(new Rect(r.x + 3f, r.y, r.width * 0.55f, r.height), shortLabel, tag);
+            GUI.Label(new Rect(r.x + r.width * 0.4f, r.y, r.width * 0.58f - 3f, r.height),
+                value, val);
 
             // Invisible hit — set tooltip without stealing the card click (checked before card button)
             var e = Event.current;
@@ -6504,6 +6906,32 @@ namespace DeepCore.FreeMovement
                 _rosterMeterTooltip = $"{name}  {value}\n{desc}";
                 _rosterMeterTooltipGui = e.mousePosition;
             }
+        }
+
+        void DrawTunnelWidthPlanningHud()
+        {
+            if (!SelectedJobIs(JobType.Excavation) || _worker == null) return;
+            int w = _worker.PlannedTunnelWidth;
+            int active = _worker.ActiveTunnelWidth;
+            const float pw = 220f;
+            const float ph = 92f;
+            var r = new Rect(Screen.width * 0.5f - pw * 0.5f, Screen.height - ph - 18f, pw, ph);
+            DrawCyberPanel(r, lit: true, accentOverride: TunnelWidthSpec.PreviewColor(w));
+            Block(r);
+
+            var title = LabelStyle(11, UiCyan, bold: true);
+            var body = LabelStyle(10, UiWhite);
+            var mute = LabelStyle(9, UiDim);
+            GUI.Label(new Rect(r.x + 12, r.y + 8, pw - 24, 14),
+                $"BRUSH {w}  ·  {TunnelWidthSpec.BrushCells(w)} CELLS  ·  {TunnelWidthSpec.Label(w)}", title);
+            GUI.Label(new Rect(r.x + 12, r.y + 26, pw - 24, 14),
+                $"{TunnelWidthSpec.ShortHint(w)}  ·  LMB paint · RMB erase", body);
+            GUI.Label(new Rect(r.x + 12, r.y + 44, pw - 24, 14),
+                $"Keys 1–5 · LMB plan · active dig W{active}", mute);
+            string access = w <= 2 ? "Access: person only"
+                : w == 3 ? "Access: tight machine/haul"
+                : "Access: operational corridor";
+            GUI.Label(new Rect(r.x + 12, r.y + 62, pw - 24, 14), access, mute);
         }
 
         void DrawRosterMeterTooltip()
@@ -6676,15 +7104,18 @@ namespace DeepCore.FreeMovement
             GUI.Label(new Rect(x0, y, innerW - 48f, 16f),
                 wr.DisplayName.ToUpperInvariant(), hdr);
             y += 16f;
+            if (DevMode.Enabled)
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f),
+                    $"id {wr.WorkerId}  ·  {wr.StatsRefLabel}",
+                    LabelStyle(8, UiMute));
+                y += 13f;
+            }
             GUI.Label(new Rect(x0, y, innerW, 12f),
-                $"id {wr.WorkerId}  ·  {wr.StatsRefLabel}",
-                LabelStyle(8, UiMute));
-            y += 13f;
-            GUI.Label(new Rect(x0, y, innerW, 12f),
-                $"Current Job: {JobStatPreview.DisplayName(job)}",
+                JobStatPreview.DisplayName(job),
                 LabelStyle(9, UiCyan));
             y += 13f;
-            if (job != JobType.Unassigned)
+            if (DevMode.Enabled && job != JobType.Unassigned)
             {
                 GUI.Label(new Rect(x0, y, innerW, 12f),
                     $"Provider: {ProviderLabelForAssignment(asg)}",
@@ -6694,35 +7125,38 @@ namespace DeepCore.FreeMovement
             DrawHLine(x0, y, innerW, new Color(accent.r, accent.g, accent.b, 0.28f));
             y += 8f;
 
-            // ——— Person profiles (always) ———
-            GUI.Label(new Rect(x0, y, innerW, 12f), "PERSON PROFILE", sec);
-            y += 14f;
-            float btnW = (innerW - 10f) / 3f;
-            float btnH = 22f;
-            WorkerSheetProfile[] personProfiles =
+            if (DevMode.Enabled)
             {
-                WorkerSheetProfile.Baseline,
-                WorkerSheetProfile.Ace,
-                WorkerSheetProfile.Green,
-            };
-            for (int i = 0; i < personProfiles.Length; i++)
-            {
-                var p = personProfiles[i];
-                var br = new Rect(x0 + i * (btnW + 5f), y, btnW, btnH);
-                Block(br);
-                bool sel = GetSheetProfile(workerId) == p;
-                string lab = p == WorkerSheetProfile.Baseline ? "BASE"
-                    : p == WorkerSheetProfile.Ace ? "ACE" : "GREEN";
-                if (DrawCyberButton(br, lab, selected: sel, accent: WorkerStatProfiles.Accent(p)))
-                    ApplySheetProfile(workerId, p);
+                // ——— Person profiles (DEV) ———
+                GUI.Label(new Rect(x0, y, innerW, 12f), "PERSON PROFILE", sec);
+                y += 14f;
+                float btnW = (innerW - 10f) / 3f;
+                float btnH = 22f;
+                WorkerSheetProfile[] personProfiles =
+                {
+                    WorkerSheetProfile.Baseline,
+                    WorkerSheetProfile.Ace,
+                    WorkerSheetProfile.Green,
+                };
+                for (int i = 0; i < personProfiles.Length; i++)
+                {
+                    var p = personProfiles[i];
+                    var br = new Rect(x0 + i * (btnW + 5f), y, btnW, btnH);
+                    Block(br);
+                    bool sel = GetSheetProfile(workerId) == p;
+                    string lab = p == WorkerSheetProfile.Baseline ? "BASE"
+                        : p == WorkerSheetProfile.Ace ? "ACE" : "GREEN";
+                    if (DrawCyberButton(br, lab, selected: sel, accent: WorkerStatProfiles.Accent(p)))
+                        ApplySheetProfile(workerId, p);
+                }
+                y += btnH + 6f;
+
+                // ——— Job-specific test presets (DEV) ———
+                y = DrawJobTestPresetRow(ref y, x0, innerW, btnW, btnH, job, workerId);
+
+                DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
+                y += 8f;
             }
-            y += btnH + 6f;
-
-            // ——— Job-specific test presets (contextual) ———
-            y = DrawJobTestPresetRow(ref y, x0, innerW, btnW, btnH, job, workerId);
-
-            DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
-            y += 8f;
 
             // ——— Personal conditions (always person-owned) ———
             y = DrawPersonalConditionsBlock(ref y, x0, innerW, wr, mute, sec);
@@ -6749,7 +7183,7 @@ namespace DeepCore.FreeMovement
             HashSet<WorkerStatId> relevant = null;
             if (job != JobType.Unassigned && jobDef.RelevantStats.Count > 0)
             {
-                relevant = new HashSet<WorkerStatId>(jobDef.RelevantStats);
+                relevant = ScratchRelevantStats(jobDef.RelevantStats);
                 string relTitle = jobDef.RelevantStatsAreProvisional
                     ? "RELEVANT STATS — PROVISIONAL"
                     : "JOB-RELEVANT (highlighted)";
@@ -6770,6 +7204,16 @@ namespace DeepCore.FreeMovement
             var close = new Rect(panel.xMax - 54f, panel.y + 6f, 42f, 18f);
             if (DrawCyberButton(close, "×", selected: false, accent: accent))
                 _openStatsWorkerId = 0;
+        }
+
+        readonly HashSet<WorkerStatId> _sheetRelevantScratch = new(16);
+
+        HashSet<WorkerStatId> ScratchRelevantStats(IReadOnlyList<WorkerStatId> src)
+        {
+            _sheetRelevantScratch.Clear();
+            for (int i = 0; i < src.Count; i++)
+                _sheetRelevantScratch.Add(src[i]);
+            return _sheetRelevantScratch;
         }
 
         float DrawJobTestPresetRow(ref float y, float x0, float innerW, float btnW, float btnH,
@@ -6814,7 +7258,8 @@ namespace DeepCore.FreeMovement
         float DrawPersonalConditionsBlock(ref float y, float x0, float innerW,
             WorkerRuntime wr, GUIStyle mute, GUIStyle sec)
         {
-            GUI.Label(new Rect(x0, y, innerW, 12f), "PERSON STATE · V1.2C", sec);
+            GUI.Label(new Rect(x0, y, innerW, 12f),
+                DevMode.Enabled ? "PERSON STATE · V1.2C" : "PERSON STATE", sec);
             y += 14f;
 
             var st = wr.State;
@@ -6822,27 +7267,29 @@ namespace DeepCore.FreeMovement
             var job = asg != null ? asg.JobType : JobType.Unassigned;
             var demand = ResolveDemandFor(wr, job);
             GUI.Label(new Rect(x0, y, innerW, 11f),
-                $"ACTIVITY  {demand.ActivityLabel}",
+                $"Current: {demand.ActivityLabel}",
                 LabelStyle(8, UiCyan, bold: true));
             y += 12f;
-            GUI.Label(new Rect(x0, y, innerW, 11f),
-                $"DEMAND  P {demand.Physical:0.00}  M {demand.Mental:0.00}  A {demand.Attention:0.00}",
-                mute);
-            y += 13f;
-
-            // Debug condition tags
-            string tags = "";
-            if (st.IsResting) tags += "RESTING ";
-            if (WorkerJobDemand.StaminaRatio(wr) <= JobDemandTuning.ExhaustionEnterRatio
-                && st.StaminaPrimed)
-                tags += "EXHAUSTED ";
-            if (st.MentalFatigue >= JobDemandTuning.HighMentalFatigue) tags += "HIGH MENTAL FATIGUE ";
-            if (st.FocusState < JobDemandTuning.LowFocusState) tags += "LOW FOCUS ";
-            if (!string.IsNullOrEmpty(tags))
+            if (DevMode.Enabled)
             {
-                GUI.Label(new Rect(x0, y, innerW, 11f), tags.Trim(),
-                    LabelStyle(8, UiAmber, bold: true));
-                y += 12f;
+                GUI.Label(new Rect(x0, y, innerW, 11f),
+                    $"DEMAND  P {demand.Physical:0.00}  M {demand.Mental:0.00}  A {demand.Attention:0.00}",
+                    mute);
+                y += 13f;
+
+                string tags = "";
+                if (st.IsResting) tags += "RESTING ";
+                if (WorkerJobDemand.StaminaRatio(wr) <= JobDemandTuning.ExhaustionEnterRatio
+                    && st.StaminaPrimed)
+                    tags += "EXHAUSTED ";
+                if (st.MentalFatigue >= JobDemandTuning.HighMentalFatigue) tags += "HIGH MENTAL FATIGUE ";
+                if (st.FocusState < JobDemandTuning.LowFocusState) tags += "LOW FOCUS ";
+                if (!string.IsNullOrEmpty(tags))
+                {
+                    GUI.Label(new Rect(x0, y, innerW, 11f), tags.Trim(),
+                        LabelStyle(8, UiAmber, bold: true));
+                    y += 12f;
+                }
             }
 
             float stamMax = wr.PhysicalStaminaMax;
@@ -6863,7 +7310,7 @@ namespace DeepCore.FreeMovement
             DrawMeterRow(ref y, x0, innerW, "MENTAL FAT", st.MentalFatigue, mute,
                 st.MentalFatigue >= 70f ? new Color(1f, 0.35f, 0.3f) :
                 st.MentalFatigue >= 40f ? UiAmber : UiDim);
-            DrawMeterRow(ref y, x0, innerW, "FOCUS ST", st.FocusState, mute,
+            DrawMeterRow(ref y, x0, innerW, "FOCUS", st.FocusState, mute,
                 st.FocusState >= 70f ? UiGreen :
                 st.FocusState >= 40f ? UiCyan : UiAmber);
             DrawMeterRow(ref y, x0, innerW, "FRUST.", st.Frustration, mute,
@@ -6872,6 +7319,8 @@ namespace DeepCore.FreeMovement
             DrawMeterRow(ref y, x0, innerW, "MORALE", st.Morale, mute,
                 st.Morale >= 65f ? UiGreen :
                 st.Morale >= 40f ? UiCyan : UiAmber);
+            DrawMeterRow(ref y, x0, innerW, "CONFINEMENT", st.ClaustrophobicStress, mute,
+                ClaustrophobiaBands.BarColor(st.ClaustrophobicStress));
 
             float inj = st.Injury;
             Color injCol = inj >= FreeWorkerController.InjuryCareThreshold
@@ -6947,22 +7396,25 @@ namespace DeepCore.FreeMovement
                 }
             }
 
-            y += 4f;
-            GUI.Label(new Rect(x0, y, innerW, 11f),
-                $"WALK×{WorkerLocomotion.InjuryMoveMul(wr):0.00}  MANUAL×{WorkerInjuryConsequences.ManualWorkMul(wr.Injuries):0.00}  LOAD×{WorkerInjuryConsequences.LoadCarryMul(wr.Injuries):0.00}",
-                mute);
-            y += 12f;
-            GUI.Label(new Rect(x0, y, innerW, 11f),
-                $"Traits  Stam {wr.Stats.Get(WorkerStatId.Stamina)}  Rec {wr.Stats.Get(WorkerStatId.Recovery)}  " +
-                $"Foc {wr.Stats.Get(WorkerStatId.Focus)}  Comp {wr.Stats.Get(WorkerStatId.Composure)}  " +
-                $"Det {wr.Stats.Get(WorkerStatId.Determination)}  Tol {wr.Stats.Get(WorkerStatId.Tolerance)}",
-                mute);
-            y += 14f;
-            GUI.Label(new Rect(x0, y, innerW, 10f),
-                $"StateRef {wr.StateRefLabel}", mute);
-            y += 12f;
+            if (DevMode.Enabled)
+            {
+                y += 4f;
+                GUI.Label(new Rect(x0, y, innerW, 11f),
+                    $"WALK×{WorkerLocomotion.InjuryMoveMul(wr):0.00}  MANUAL×{WorkerInjuryConsequences.ManualWorkMul(wr.Injuries):0.00}  LOAD×{WorkerInjuryConsequences.LoadCarryMul(wr.Injuries):0.00}",
+                    mute);
+                y += 12f;
+                GUI.Label(new Rect(x0, y, innerW, 11f),
+                    $"Traits  Stam {wr.Stats.Get(WorkerStatId.Stamina)}  Rec {wr.Stats.Get(WorkerStatId.Recovery)}  " +
+                    $"Foc {wr.Stats.Get(WorkerStatId.Focus)}  Comp {wr.Stats.Get(WorkerStatId.Composure)}  " +
+                    $"Det {wr.Stats.Get(WorkerStatId.Determination)}  Tol {wr.Stats.Get(WorkerStatId.Tolerance)}",
+                    mute);
+                y += 14f;
+                GUI.Label(new Rect(x0, y, innerW, 10f),
+                    $"StateRef {wr.StateRefLabel}", mute);
+                y += 12f;
 
-            y = DrawRecentStateEventsBlock(ref y, x0, innerW, wr, mute, sec);
+                y = DrawRecentStateEventsBlock(ref y, x0, innerW, wr, mute, sec);
+            }
 
             DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
             y += 8f;
@@ -6972,6 +7424,7 @@ namespace DeepCore.FreeMovement
         float DrawRecentStateEventsBlock(ref float y, float x0, float innerW,
             WorkerRuntime wr, GUIStyle mute, GUIStyle sec)
         {
+            if (!DevMode.Enabled) return y;
             GUI.Label(new Rect(x0, y, innerW, 12f), "RECENT STATE EVENTS · V1.2B", sec);
             y += 14f;
             var hist = wr.EventHistory;
@@ -7029,7 +7482,7 @@ namespace DeepCore.FreeMovement
         float DrawExcavatorMachineBlock(ref float y, float x0, float innerW,
             GUIStyle mute, GUIStyle sec)
         {
-            GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE CONTEXT", sec);
+            GUI.Label(new Rect(x0, y, innerW, 12f), "MACHINE", sec);
             y += 14f;
 
             Color heatCol = _worker.HeatZone switch
@@ -7065,10 +7518,13 @@ namespace DeepCore.FreeMovement
                 LabelStyle(9, actCol, bold: true));
             y += 16f;
 
-            GUI.Label(new Rect(x0, y, innerW, 12f),
-                $"Route {_worker.RouteCount}  ·  Tool {_worker.ToolPower}  ·  {_worker.ProviderId}",
-                LabelStyle(8, UiDim));
-            y += 14f;
+            if (DevMode.Enabled)
+            {
+                GUI.Label(new Rect(x0, y, innerW, 12f),
+                    $"Plan {_worker.RouteCount}  ·  Tool {_worker.ToolPower}  ·  {_worker.ProviderId}",
+                    LabelStyle(8, UiDim));
+                y += 14f;
+            }
 
             DrawHLine(x0, y, innerW, new Color(UiCyan.r, UiCyan.g, UiCyan.b, 0.15f));
             y += 8f;
@@ -7240,7 +7696,7 @@ namespace DeepCore.FreeMovement
         void DrawKeybindingsPanel()
         {
             const float panelW = 248f;
-            const float panelH = 474f;
+            const float panelH = 490f;
             // Left of right-edge tool strip
             var r = new Rect(Screen.width - panelW - 12f - HudToolStripReserve, Screen.height - panelH - 12f, panelW, panelH);
             DrawCyberPanel(r, lit: false);
@@ -7267,17 +7723,19 @@ namespace DeepCore.FreeMovement
                 ("Q / E", "Scan width · place rotate"),
                 ("SPACE", "Radar cone on (preview)"),
                 ("SHIFT", "Radar off"),
+                ("1–5", "Dig tunnel width (excavator)"),
                 ("1 / 2 / 3", "Scan short · med · long"),
                 ("U", "Tactical View (anomalies)"),
                 ("H", "Scan History (from Tactical)"),
-                ("T", "Truth View (debug)"),
-                ("Alt", "20× setup / 120× scan / 8× analysis"),
-                ("=", "Force READY / finish scan"),
+                ("Ø", "DEV MODE toggle"),
+                ("T", "Truth View (DEV)"),
+                ("Alt", "Speed boost scan/setup (DEV)"),
+                ("=", "Force READY / finish scan (DEV)"),
                 ("N", "Skip sleep → 08:00"),
                 ("G", "Hauler / Refiner priority"),
                 ("L", "Place lantern"),
                 ("R", "Reset map"),
-                ("B", "Balance harness"),
+                ("B", "Balance harness (DEV)"),
             };
 
             float y = r.y + 34f;
@@ -7289,21 +7747,29 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        static readonly Dictionary<int, GUIStyle> _labelStyleCache = new(24);
+
         static GUIStyle LabelStyle(int size, Color color, bool bold = false)
         {
             // Floor tiny DEV/body sizes so IMGUI stays readable without redesign.
             int s = size < 9 ? 9 : size;
-            return new GUIStyle(GUI.skin.label)
+            int key = (s << 1) | (bold ? 1 : 0);
+            if (!_labelStyleCache.TryGetValue(key, out var st))
             {
-                fontSize = s,
-                fontStyle = bold ? FontStyle.Bold : FontStyle.Normal,
-                normal = { textColor = color },
-                richText = false,
-                clipping = TextClipping.Overflow,
-                alignment = TextAnchor.UpperLeft,
-                wordWrap = false,
-                padding = new RectOffset(0, 0, 0, 2),
-            };
+                st = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = s,
+                    fontStyle = bold ? FontStyle.Bold : FontStyle.Normal,
+                    richText = false,
+                    clipping = TextClipping.Overflow,
+                    alignment = TextAnchor.UpperLeft,
+                    wordWrap = false,
+                    padding = new RectOffset(0, 0, 0, 2),
+                };
+                _labelStyleCache[key] = st;
+            }
+            st.normal.textColor = color;
+            return st;
         }
 
         void DrawHeavyScannerHud(float x, float y, float width, float height)
@@ -7598,6 +8064,7 @@ namespace DeepCore.FreeMovement
         /// <summary>DEV-only activity readout — evidence-driven investigation plan.</summary>
         void DrawProspectorDevActivityBox()
         {
+            if (!DevMode.Enabled) return;
             if (_prospector == null) return;
             // Live investigation DEV — conflicts with History browser / historical map
             if (_scanHistoryBrowserOpen
@@ -9539,6 +10006,7 @@ namespace DeepCore.FreeMovement
 
         void DrawScanHistoryDevReadout()
         {
+            if (!DevMode.Enabled) return;
             // Compact DEV line lives inside the History browser when open.
             // When historical without browser, show a thin strip under the top-right toggles.
             if (_playerTactical == null || !_playerTactical.Visible) return;

@@ -348,11 +348,25 @@ namespace DeepCore.FreeMovement
             DigVisualKit.ApplyLit(psr);
             platform.transform.localScale = Vector3.one * 2.85f;
 
+            // Contact dirt / wear under pad — machines feel installed, not floating
+            DigVisualKit.PlaceGroundingPad(root, center + new Vector2(0.15f, -0.55f), 1.35f);
+            DigVisualKit.PlaceGroundingPad(root, center + new Vector2(-0.55f, -0.2f), 0.72f);
+            DigVisualKit.PlaceGroundingPad(root, center + new Vector2(0.95f, -0.15f), 0.68f);
+
             // Compact wash bay — piles hug the washer instead of spanning the whole pad.
             //   [ROCK]  [GOLD]  [DIAMOND]     ← ore inputs (hauler / refiner pick)
             //         [WASHER]
             //   [DIRT]  [R.GOLD] [R.DIA]      ← wash outputs
             Vector2 wash = center + new Vector2(-0.05f, -0.35f);
+            DigVisualKit.PlaceGroundingPad(root, wash + new Vector2(0f, -0.05f), 0.95f,
+                new Color(0.18f, 0.2f, 0.22f, 0.4f)); // wet/dirty wash apron
+            DigVisualKit.PlaceUtilityCable(root,
+                center + new Vector2(0.55f, -0.75f), 0.42f, -55f,
+                new Color(0.25f, 0.28f, 0.3f, 0.85f));
+            DigVisualKit.PlaceUtilityCable(root,
+                center + new Vector2(-0.35f, -0.85f), 0.35f, 28f,
+                new Color(0.22f, 0.24f, 0.26f, 0.75f));
+
             float xInL = -0.85f;
             float xInC = 0.15f;
             float xInR = 1.05f;

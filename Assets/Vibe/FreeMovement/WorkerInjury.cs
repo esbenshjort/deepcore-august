@@ -444,6 +444,11 @@ namespace DeepCore.FreeMovement
             for (int i = _active.Count - 1; i >= 0; i--)
             {
                 var a = _active[i];
+                if (a == null)
+                {
+                    _active.RemoveAt(i);
+                    continue;
+                }
                 // Fractures resist sleep magic
                 float local = rate;
                 if (a.Severity >= WorkerInjurySeverity.Serious && sleeping)

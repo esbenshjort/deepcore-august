@@ -24,10 +24,10 @@ namespace DeepCore.FreeMovement
             sb.Append(result.ToReport());
             sb.AppendLine();
             sb.AppendLine("## Map design summary");
-            sb.AppendLine("- Base: organic SocketMap mountain (bedrock lobes, early gold/diamond teases, gas field).");
-            sb.AppendLine("- Overlay: west/east soft trunks → mid junction → dual approaches to deep Gold (NE) and Diamond (NW).");
-            sb.AppendLine("- Wrong turns: direct-north bedrock ridge; diagonal gas pockets; chamber shortcut bedrock plugs.");
-            sb.AppendLine("- Soft routes always exist around hazards; prospecting must interpret clues (no safe-path reveal).");
+            sb.AppendLine("- Puzzle mountain: tiny soft chokes (≈3-tile dig) with bedrock shoulders + medium pads (≈8–11) at junctions/ore.");
+            sb.AppendLine("- Overlay: camp → W/E forks → ridge loop → mid → dual tiny approaches to Gold (NE) and Diamond (NW).");
+            sb.AppendLine("- Tiny gold/diamond galleries off the snakes; wrong turns = direct-north ridge + gas + chamber plugs.");
+            sb.AppendLine("- Soft routes always exist around hazards; use width 1 for chokes and width 3 for chamber work.");
             sb.AppendLine("- Objective: refine ≥1 GOLD and ≥1 DIA before Day 14 shift end.");
             sb.AppendLine();
             sb.AppendLine($"- Gold chamber: {result.Layout.GoldChamber}");

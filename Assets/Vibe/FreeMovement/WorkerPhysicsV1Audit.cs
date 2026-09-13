@@ -116,12 +116,13 @@ namespace DeepCore.FreeMovement
                 lewis, WorkerTerrainSample.Normal, roleBias: 1f);
             float lewisSpdHaul = WorkerLocomotion.EvaluateWalkSpeed(
                 lewis, WorkerTerrainSample.Normal,
-                roleBias: 0.68f / WorkerPhysicalProfile.ReferenceWalkSpeed);
+                roleBias: WorkerPhysicalProfile.RoleBiasMin);
             Check("Same Stats sheet drives both role biases",
                 lewis.Stats.Get(WorkerStatId.Agility) == 16);
-            Check("Role bias changes absolute speed without swapping sheets",
-                lewisSpdHaul < lewisSpdProspect * 0.7f,
-                $"prospect={lewisSpdProspect:0.##} haul={lewisSpdHaul:0.##}");
+            Check("Role bias min slows vs baseline (modest)",
+                lewisSpdHaul < lewisSpdProspect
+                && lewisSpdHaul > lewisSpdProspect * 0.8f,
+                $"base={lewisSpdProspect:0.##} slowBias={lewisSpdHaul:0.##}");
 
             var mara = new WorkerRuntime(11, "Mara", StatsSet(WorkerStatId.Agility, 5));
             float maraBase = WorkerPhysicalProfile.From(mara).MoveSpeed;
@@ -131,8 +132,8 @@ namespace DeepCore.FreeMovement
             Check("Reassignment cannot swap Stats object between people",
                 !ReferenceEquals(lewisSheet, maraSheet)
                 && lewisSheet.Get(WorkerStatId.Agility) != maraSheet.Get(WorkerStatId.Agility));
-            Check("Lewis keeps high Agility MoveSpeed after 'job swap' simulation",
-                WorkerPhysicalProfile.From(lewis).MoveSpeed > maraBase + 0.1f);
+            Check("Lewis keeps higher Agility MoveSpeed after 'job swap' simulation",
+                WorkerPhysicalProfile.From(lewis).MoveSpeed > maraBase + 0.04f);
 
             // 5. Normal terrain stable
             sb.AppendLine();

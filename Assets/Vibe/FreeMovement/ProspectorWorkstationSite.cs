@@ -65,12 +65,18 @@ namespace DeepCore.FreeMovement
             lightGo.transform.localPosition = TableCenter + new Vector2(0.05f, 0.12f);
             _mapGlow = lightGo.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(_mapGlow,
-                new Color(0.35f, 0.85f, 1f),
-                intensity: 0.28f,
-                outer: 0.7f,
+                new Color(0.3f, 0.88f, 1f),
+                intensity: 0.32f,
+                outer: 0.75f,
                 inner: 0.04f,
                 shadows: false,
-                falloff: 0.75f);
+                falloff: 0.78f);
+
+            DigVisualKit.PlaceGroundingPad(transform, TableCenter + new Vector2(0.02f, -0.22f), 0.9f,
+                new Color(0.22f, 0.24f, 0.26f, 0.42f), sortingOrder: 10);
+            DigVisualKit.PlaceUtilityCable(transform,
+                TableCenter + new Vector2(-0.35f, -0.35f), 0.28f, 18f,
+                new Color(0.28f, 0.32f, 0.35f, 0.8f));
         }
 
         public void SetWorkActive(bool active)

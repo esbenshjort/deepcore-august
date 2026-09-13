@@ -14,6 +14,19 @@ namespace DeepCore.FreeMovement
         Overheated = 4, // 100
     }
 
+    /// <summary>One excavator dig-route waypoint with planned tunnel width 1–5.</summary>
+    public struct DigRoutePin
+    {
+        public Vector2 Pos;
+        public byte Width;
+
+        public DigRoutePin(Vector2 pos, int width)
+        {
+            Pos = pos;
+            Width = (byte)TunnelWidthSpec.Clamp(width);
+        }
+    }
+
     /// <summary>
     /// Excavator digs a passable tunnel. Supports a queued dig route of pinpoints.
     /// Stage D: one machine host; assigned <see cref="WorkerRuntime"/> supplies stats + personal conditions.
@@ -99,11 +112,34 @@ namespace DeepCore.FreeMovement
         Transform _pinsRoot;
         LineRenderer _routeLine;
         Sprite _pinSprite;
-        readonly List<Vector2> _route = new(16);
+        readonly List<DigRoutePin> _route = new(16);
         readonly List<Transform> _pinVisuals = new(16);
         int _routeI;
+        byte _plannedWidth = TunnelWidthSpec.Standard;
+        byte _activeWidth = TunnelWidthSpec.Standard;
+        float _baseFootprintRadius = 0.6f;
         System.Action<int, int> _onBrokeCell;
         System.Action<TerrainCell, bool> _onDigImpact;
+
+        /// <summary>Tile-paint excavation plan (authoritative routing V1).</summary>
+        readonly ExcavatorTilePaintPlan _paintPlan = new();
+        ExcavatorPaintPreview _paintPreview;
+        readonly List<(int x, int y, bool valid)> _strokePreviewScratch = new(256);
+        int _paintWorkX = -1, _paintWorkY = -1;
+        bool _paintDrivenGeometry;
+        /// <summary>Pending paint exists but no open-tunnel work front is reachable.</summary>
+        bool _awaitingAccess;
+        /// <summary>Open-tunnel nav to standing cell beside the work front (existing system).</summary>
+        ExcavatedPathfinder _accessNav;
+        /// <summary>Worker paused execution (claustro/injury/etc.) — plan cells remain.</summary>
+        bool _executionPaused;
+        /// <summary>
+        /// Manager push willingness: returns stress ceiling for dig refuse.
+        /// Default = CriticalAt. Raised temporarily after accepted PUSH HARDER.
+        /// </summary>
+        public System.Func<WorkerRuntime, float> ResolveClaustroRefuseCeiling;
+        /// <summary>Fired when dig pauses for critical confinement (plan retained).</summary>
+        public System.Action<WorkerRuntime> OnClaustroRefusePause;
         public event System.Action<int, int> WeakPointFound;
         /// <summary>Collapse debris chip (cell x,y).</summary>
         public event System.Action<int, int> DebrisStrike;
@@ -234,8 +270,83 @@ namespace DeepCore.FreeMovement
         public Vector2 Facing => transform.up;
         public Vector2 DrillTip(float ahead = 0.42f) => Position + Facing * ahead;
         public Vector2 Position => transform.localPosition;
-        public bool HasGoal => _hasGoal || _route.Count > 0;
-        public int RouteCount => _route.Count;
+        public bool HasGoal => _hasGoal || _route.Count > 0 || _paintPlan.PendingDigCount > 0;
+        public int RouteCount => Mathf.Max(_route.Count, _paintPlan.PendingDigCount);
+        /// <summary>Tile-paint plan (cells). Preferred over legacy pins.</summary>
+        public ExcavatorTilePaintPlan PaintPlan => _paintPlan;
+        /// <summary>Width used for the next paint stroke (1–5). Hotkeys set this while planning.</summary>
+        public int PlannedTunnelWidth
+        {
+            get => _plannedWidth;
+            set
+            {
+                _plannedWidth = (byte)TunnelWidthSpec.Clamp(value);
+                _paintPlan.BrushWidth = _plannedWidth;
+                if (_route.Count == 0 && _paintPlan.PendingDigCount == 0)
+                    SetActiveTunnelWidth(_plannedWidth);
+            }
+        }
+        /// <summary>Width currently driving dig geometry.</summary>
+        public int ActiveTunnelWidth => _activeWidth;
+        public float ActiveDigHalfWorld => _digHalf;
+        public float ActiveMoveRadiusWorld => _moveRadius;
+
+        public DigRoutePin GetRoutePin(int index) =>
+            index >= 0 && index < _route.Count ? _route[index] : default;
+
+        public void SetPlannedTunnelWidth(int width)
+        {
+            PlannedTunnelWidth = width;
+            DigHoodLog.Push(
+                $"TUNNEL WIDTH | Brush W{_plannedWidth} · {TunnelWidthSpec.Label(_plannedWidth)} · {TunnelWidthSpec.BrushCells(_plannedWidth)} tiles");
+            RefreshPaintPreview();
+        }
+
+        /// <summary>
+        /// Planning-only brush footprint ring — radius = BrushHalfCells × cellSize
+        /// (same as DigHalfCells / paint dig envelope).
+        /// </summary>
+        public void UpdateBrushWidthRingAt(Vector2 worldPos, bool planningVisible)
+        {
+            if (_paintPreview == null || _world == null)
+                return;
+            // Snap to tile under cursor so the ring matches stamped brush cells
+            var cell = _world.WorldToCell(worldPos);
+            Vector2 center = _world.CellCenter(cell.x, cell.y);
+            _paintPreview.UpdateBrushWidthRing(
+                center, _world.CellSize, _plannedWidth, planningVisible);
+        }
+
+        public void HideBrushWidthRing()
+        {
+            _paintPreview?.UpdateBrushWidthRing(Vector2.zero, 1f, _plannedWidth, false);
+        }
+
+        void SetActiveTunnelWidth(int width)
+        {
+            _activeWidth = (byte)TunnelWidthSpec.Clamp(width);
+            ApplyWidthGeometry(_activeWidth, paintDriven: _paintDrivenGeometry);
+        }
+
+        void ApplyWidthGeometry(int width, bool paintDriven = false)
+        {
+            float cs = _world != null ? Mathf.Max(0.05f, _world.CellSize) : 0.1f;
+            _paintDrivenGeometry = paintDriven;
+            if (paintDriven)
+            {
+                _digHalf = ExcavatorTilePaintPlan.PaintDigHalfWorld(width, cs);
+                _moveRadius = _digHalf * (TunnelWidthSpec.Clamp(width) <= 2 ? 0.88f : 0.92f);
+            }
+            else
+            {
+                _digHalf = TunnelWidthSpec.DigHalfCells(width) * cs;
+                _moveRadius = TunnelWidthSpec.MoveRadiusCells(width) * cs;
+            }
+            // Keep legacy _radius as max(body, dig) for loose-pile / misc callers
+            _radius = Mathf.Max(_baseFootprintRadius * 0.68f, _moveRadius);
+            if (_accessNav != null)
+                _accessNav.SetMachineProfile(_moveRadius, TunnelWidthSpec.WorkerMinClearance);
+        }
         public FineTerrainWorld World => _world;
 
         /// <summary>
@@ -273,16 +384,65 @@ namespace DeepCore.FreeMovement
         public bool LastDigWeakPoint => _lastDigWeakPoint;
         public float LastDigThermalMul => _lastDigThermalMul;
 
-        /// <summary>Simple machine activity label for debug: OVERHEATED / COOLING / MINING / IDLE.</summary>
+        /// <summary>Machine activity label — never invents dig work.</summary>
         public string MachineActivityLabel
         {
             get
             {
                 if (IsOverheated) return "OVERHEATED";
                 if (_isCooling) return "COOLING";
+                if (_executionPaused) return "REFUSED";
                 if (IsActivelyDigging || _dugThisTick) return "MINING";
-                return "IDLE";
+                if (_awaitingAccess && _paintPlan.PendingDigCount > 0) return "AWAITING ACCESS";
+                if (_paintPlan.PendingDigCount > 0) return "ENROUTE";
+                return "AWAITING ORDERS";
             }
+        }
+
+        public bool AwaitingExcavationOrders =>
+            _paintPlan.PendingDigCount <= 0 && !_paintPlan.IsStroking;
+
+        public bool AwaitingAccess =>
+            _awaitingAccess && _paintPlan.PendingDigCount > 0;
+
+        public bool ExecutionPaused => _executionPaused;
+
+        /// <summary>Pause dig execution without clearing player plan (claustro / manager gameplay).</summary>
+        public void PauseExecution(string reason)
+        {
+            _executionPaused = true;
+            _hasGoal = false;
+            IsActivelyDigging = false;
+            DigHoodLog.Push($"PAUSE | {reason} — plan retained ({_paintPlan.PendingDigCount} cells)");
+        }
+
+        public void ResumeExecutionIfPossible()
+        {
+            if (!_executionPaused) return;
+            var wr = _assignedWorker;
+            if (wr?.State != null && wr.State.ClaustroSeekingExit)
+            {
+                float ceiling = ResolveRefuseCeiling(wr);
+                if (wr.State.ClaustrophobicStress >= ceiling)
+                    return;
+            }
+            // SeekingExit cleared (e.g. returned to open camp) — resume even if stress still high
+            if (wr?.State != null)
+                wr.State.ClaustroSeekingExit = false;
+            _executionPaused = false;
+            // Re-acquire the same painted plan after pause/refusal
+            SyncGoalFromPaintPlan();
+            DigHoodLog.Push("RESUME | Excavation orders still pending");
+        }
+
+        float ResolveRefuseCeiling(WorkerRuntime wr)
+        {
+            if (ResolveClaustroRefuseCeiling != null)
+            {
+                float c = ResolveClaustroRefuseCeiling(wr);
+                if (c > 0f) return c;
+            }
+            return ClaustrophobiaBands.CriticalAt;
         }
 
         public void TeleportTo(Vector2 pos)
@@ -312,45 +472,34 @@ namespace DeepCore.FreeMovement
                 AssignedWorker != null ? AssignedWorker.DisplayName : "Excavator",
                 from, pos, "TeleportTo", "FreeWorkerController");
             IsActivelyDigging = false;
-            // Dig route / pins are instructions — keep them across sleep & commute snaps.
-            if (_route.Count > 0)
+            // Dig plan / pins are instructions — keep them across sleep & commute snaps.
+            if (_paintPlan.PendingDigCount > 0)
+                SyncGoalFromPaintPlan();
+            else if (_route.Count > 0)
                 ActivateCurrentPin();
             else
                 RefreshVisuals();
         }
 
         /// <summary>
-        /// End-of-shift bookmark: keep existing dig pins, or drop a small pin just ahead
-        /// of the bit so the excavator resumes into the wall tomorrow.
-        /// Returns the body resume position (snapped by caller).
+        /// End-of-shift bookmark: keep player dig plan only — never invent new excavation cells.
         /// </summary>
         public Vector2 CaptureShiftBreakBookmark()
         {
             Vector2 body = Position;
-            if (_route.Count == 0)
+            if (_paintPlan.PendingDigCount > 0 || _paintPlan.HasPlan)
             {
-                // Tip must land in a *different* cell ahead (AddPin snaps to centers —
-                // a tip still inside the body cell was clearing the route instantly).
-                Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
-                Vector2 tip = Position + dir * Mathf.Max(0.55f, _moveRadius * 1.6f);
-                if (_world != null)
-                {
-                    float cs = Mathf.Max(0.05f, _world.CellSize);
-                    for (int i = 0; i < 8; i++)
-                    {
-                        var c = _world.WorldToCell(tip);
-                        if (_world.InBounds(c.x, c.y) && _world.IsMovementBlocker(c.x, c.y))
-                            break;
-                        tip += dir * cs;
-                    }
-                }
-                AddPin(tip, replaceRoute: true);
-                DigHoodLog.Push("SHIFT BREAK | Left-off pin placed at dig face");
+                DigHoodLog.Push(
+                    $"SHIFT BREAK | Keeping dig plan | {_paintPlan.PendingDigCount} pending cell(s)");
             }
-            else
+            else if (_route.Count > 0)
             {
                 DigHoodLog.Push(
                     $"SHIFT BREAK | Keeping dig route | {_route.Count} pin{(_route.Count == 1 ? "" : "s")}");
+            }
+            else
+            {
+                DigHoodLog.Push("SHIFT BREAK | No dig plan — awaiting orders next shift");
             }
             return body;
         }
@@ -414,11 +563,14 @@ namespace DeepCore.FreeMovement
                 l.enabled = on;
         }
 
-        /// <summary>Dig pins / route line — intended for scan view only.</summary>
+        /// <summary>Dig paint preview — scan / excavation job view.</summary>
         public void SetRouteVisible(bool visible)
         {
             if (_pinsRoot != null)
                 _pinsRoot.gameObject.SetActive(visible);
+            _paintPreview?.SetVisible(visible);
+            if (!visible)
+                HideBrushWidthRing();
         }
 
         public void Setup(FineTerrainWorld world, Vector2 start, float footprintRadius,
@@ -426,9 +578,12 @@ namespace DeepCore.FreeMovement
             System.Action<TerrainCell, bool> onDigImpact = null, Sprite pinSprite = null)
         {
             _world = world;
+            _baseFootprintRadius = footprintRadius;
             _radius = footprintRadius;
-            _digHalf = footprintRadius * 0.72f;
-            _moveRadius = footprintRadius * 0.68f;
+            _plannedWidth = TunnelWidthSpec.Standard;
+            _activeWidth = TunnelWidthSpec.Standard;
+            _paintDrivenGeometry = false;
+            ApplyWidthGeometry(_activeWidth, paintDriven: false);
             transform.localPosition = start;
             _hasGoal = false;
             _stallFrames = 0;
@@ -445,6 +600,14 @@ namespace DeepCore.FreeMovement
             _pinsRoot = pinsRoot;
             if (string.IsNullOrEmpty(ProviderId) || ProviderId == "excavator.0")
                 ProviderId = $"excavator.{_nextProviderSerial++}";
+            _paintPlan.Bind(world);
+            _paintPlan.BrushWidth = _plannedWidth;
+            EnsureAccessNav();
+            if (_paintPreview == null)
+            {
+                _paintPreview = new ExcavatorPaintPreview();
+                _paintPreview.Setup(pinsRoot != null ? pinsRoot : transform.parent);
+            }
             EnsureRouteLine();
             ClearRoute();
         }
@@ -469,86 +632,98 @@ namespace DeepCore.FreeMovement
             _routeLine.positionCount = 0;
         }
 
-        /// <summary>LMB append pin. Shift+LMB replace route with one pin.</summary>
+        /// <summary>Begin LMB paint stroke at world position.</summary>
+        public void BeginPaintStroke(Vector2 terrainPos)
+        {
+            if (_world == null) return;
+            _paintPlan.BrushWidth = _plannedWidth;
+            _paintPlan.BeginStroke(terrainPos);
+            RefreshPaintPreview();
+        }
+
+        public void SamplePaintStroke(Vector2 terrainPos)
+        {
+            if (_world == null || !_paintPlan.IsStroking) return;
+            _paintPlan.SampleStroke(terrainPos);
+            RefreshPaintPreview();
+        }
+
+        public void CommitPaintStroke()
+        {
+            if (_world == null) return;
+            int n = _paintPlan.CommitStroke(Position);
+            DigHoodLog.Push(n > 0
+                ? $"DIG PLAN | Stroke +{n} cells · W{_plannedWidth}"
+                : "DIG PLAN | Stroke empty / invalid");
+            _route.Clear();
+            _routeI = 0;
+            // New player orders: try to leave claustro pause so dig can start again
+            if (_executionPaused)
+                ResumeExecutionIfPossible();
+            SyncGoalFromPaintPlan();
+            RefreshPaintPreview();
+        }
+
+        public void CancelPaintStroke()
+        {
+            _paintPlan.CancelStroke();
+            RefreshPaintPreview();
+        }
+
+        /// <summary>Legacy API — stamps a short paint stroke toward the point (Enter / tests).</summary>
         public void AddPin(Vector2 terrainPos, bool replaceRoute)
         {
             if (_world == null) return;
-            var size = _world.WorldSize;
-            var p = new Vector2(
-                Mathf.Clamp(terrainPos.x, _moveRadius, size.x - _moveRadius),
-                Mathf.Clamp(terrainPos.y, _moveRadius, size.y - _moveRadius));
-
-            // Snap to cell center — feels like placing a dig marker on the grid
-            var cell = _world.WorldToCell(p);
-            if (_world.InBounds(cell.x, cell.y))
-                p = _world.CellCenter(cell.x, cell.y);
-
-            p = EnsurePinBeyondNose(p);
-
             if (replaceRoute)
-            {
-                _route.Clear();
-                _routeI = 0;
-            }
-            _route.Add(p);
-            RefreshVisuals();
-            ActivateCurrentPin();
+                ClearRoute();
+            BeginPaintStroke(Position);
+            SamplePaintStroke(terrainPos);
+            CommitPaintStroke();
         }
 
-        /// <summary>
-        /// Pins snapped onto the excavator's own cell complete in one tick (arrive &lt; 0.1)
-        /// and leave the machine idle at the wall. Push at least one cell past the nose.
-        /// </summary>
-        Vector2 EnsurePinBeyondNose(Vector2 pin)
-        {
-            const float minDist = 0.2f; // must exceed Tick arrive threshold (0.1)
-            Vector2 pos = Position;
-            if (Vector2.Distance(pos, pin) >= minDist)
-                return pin;
-
-            Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
-            Vector2 fromPin = pin - pos;
-            if (fromPin.sqrMagnitude > 0.0001f)
-                dir = fromPin.normalized;
-
-            float cs = _world != null ? Mathf.Max(0.05f, _world.CellSize) : 0.2f;
-            Vector2 p = pin;
-            for (int i = 0; i < 12; i++)
-            {
-                p += dir * cs;
-                if (_world != null)
-                {
-                    var size = _world.WorldSize;
-                    p = new Vector2(
-                        Mathf.Clamp(p.x, _moveRadius, size.x - _moveRadius),
-                        Mathf.Clamp(p.y, _moveRadius, size.y - _moveRadius));
-                    var c = _world.WorldToCell(p);
-                    if (_world.InBounds(c.x, c.y))
-                        p = _world.CellCenter(c.x, c.y);
-                }
-                if (Vector2.Distance(pos, p) >= minDist)
-                    return p;
-            }
-            return pos + dir * Mathf.Max(minDist, cs);
-        }
-
-        /// <summary>Legacy single-goal API — replaces route with one pin.</summary>
+        /// <summary>Legacy single-goal API — replaces plan with one stroke to target.</summary>
         public void SetGoal(Vector2 terrainPos) => AddPin(terrainPos, replaceRoute: true);
 
         public void UndoLastPin()
         {
-            if (_route.Count == 0) return;
-            // If we're mid-route, prefer popping unvisited pins first
-            if (_route.Count > _routeI + 1)
-                _route.RemoveAt(_route.Count - 1);
-            else
+            if (_paintPlan.IsStroking)
             {
-                _route.RemoveAt(_route.Count - 1);
-                _routeI = Mathf.Max(0, _route.Count - 1);
+                CancelPaintStroke();
+                return;
             }
-            RefreshVisuals();
-            if (_route.Count == 0) ClearRoute();
-            else ActivateCurrentPin();
+            // Erase near excavator facing / last work cell
+            Vector2 eraseAt = _paintWorkX >= 0
+                ? _world.CellCenter(_paintWorkX, _paintWorkY)
+                : Position + Facing * (_world != null ? _world.CellSize * 2f : 0.2f);
+            int n = _paintPlan.EraseAt(eraseAt, _plannedWidth);
+            if (n == 0 && _route.Count > 0)
+            {
+                if (_route.Count > _routeI + 1)
+                    _route.RemoveAt(_route.Count - 1);
+                else
+                {
+                    _route.RemoveAt(_route.Count - 1);
+                    _routeI = Mathf.Max(0, _route.Count - 1);
+                }
+                if (_route.Count == 0) ClearRoute();
+                else ActivateCurrentPin();
+                RefreshVisuals();
+                return;
+            }
+            DigHoodLog.Push(n > 0 ? $"DIG PLAN | Erased {n} cells" : "DIG PLAN | Nothing to erase");
+            _paintPlan.RevalidateConnectivity(Position);
+            SyncGoalFromPaintPlan();
+            RefreshPaintPreview();
+        }
+
+        public void ErasePaintAt(Vector2 worldPos)
+        {
+            int n = _paintPlan.EraseAt(worldPos, _plannedWidth);
+            if (n > 0)
+                DigHoodLog.Push($"DIG PLAN | Erased {n} cells");
+            _paintPlan.RevalidateConnectivity(Position);
+            SyncGoalFromPaintPlan();
+            RefreshPaintPreview();
         }
 
         public void ClearGoal() => ClearRoute();
@@ -559,18 +734,102 @@ namespace DeepCore.FreeMovement
             _routeI = 0;
             _hasGoal = false;
             _stallFrames = 0;
+            _paintWorkX = _paintWorkY = -1;
+            _paintPlan.CancelStroke();
+            _paintPlan.Clear();
+            _paintDrivenGeometry = false;
+            _awaitingAccess = false;
+            _accessNav?.Invalidate();
+            _executionPaused = false;
+            SetActiveTunnelWidth(_plannedWidth);
             RefreshVisuals();
+            RefreshPaintPreview();
+        }
+
+        void EnsureAccessNav()
+        {
+            if (_world == null) return;
+            if (_accessNav == null)
+                _accessNav = new ExcavatedPathfinder(_world, _moveRadius);
+            else
+                _accessNav.Bind(_world);
+            // Clearance 1 — excavator must traverse its own narrow painted tunnels
+            _accessNav.SetMachineProfile(_moveRadius, minClearance: TunnelWidthSpec.WorkerMinClearance);
+        }
+
+        void SyncGoalFromPaintPlan()
+        {
+            if (_executionPaused)
+            {
+                _hasGoal = false;
+                return;
+            }
+            // PendingDigCount = Valid + Excavating (not only Valid — MarkExcavating must not empty the queue)
+            if (_paintPlan.PendingDigCount <= 0)
+            {
+                _paintWorkX = _paintWorkY = -1;
+                _awaitingAccess = false;
+                _accessNav?.Invalidate();
+                if (_route.Count == 0)
+                {
+                    _hasGoal = false;
+                    _paintDrivenGeometry = false;
+                    ApplyWidthGeometry(_activeWidth, paintDriven: false);
+                }
+                return;
+            }
+
+            EnsureAccessNav();
+            int minC = TunnelWidthSpec.WorkerMinClearance;
+            // Do NOT RevalidateConnectivity here — that path can mark Valid painted cells
+            // Invalid when access BFS fails for loco reasons, wiping player orders.
+            if (!_paintPlan.TryPickAccessibleWorkFront(Position, minC,
+                    out int x, out int y, out int w, out Vector2 stand))
+            {
+                _hasGoal = false;
+                _paintWorkX = _paintWorkY = -1;
+                _awaitingAccess = true;
+                _accessNav?.Invalidate();
+                DigHoodLog.Push(
+                    $"DIG PLAN | AWAITING ACCESS — {_paintPlan.PendingDigCount} pending, no open-tunnel work front");
+                return;
+            }
+
+            bool retarget = _paintWorkX != x || _paintWorkY != y
+                            || (_goal - stand).sqrMagnitude > 0.0025f;
+            _paintWorkX = x;
+            _paintWorkY = y;
+            _paintPlan.MarkExcavating(x, y);
+            _goal = stand; // stand on open floor beside the painted face — never the rock cell
+            _paintDrivenGeometry = true;
+            _awaitingAccess = false;
+            SetActiveTunnelWidth(w);
+            _hasGoal = true;
+            _stallFrames = 0;
+            if (retarget)
+                _accessNav?.Invalidate();
+            // Hide legacy pin line authority
+            if (_routeLine != null) _routeLine.positionCount = 0;
+            for (int i = 0; i < _pinVisuals.Count; i++)
+                _pinVisuals[i].gameObject.SetActive(false);
         }
 
         void ActivateCurrentPin()
         {
+            if (_paintPlan.PendingDigCount > 0)
+            {
+                SyncGoalFromPaintPlan();
+                return;
+            }
             if (_route.Count == 0)
             {
                 _hasGoal = false;
                 return;
             }
             _routeI = Mathf.Clamp(_routeI, 0, _route.Count - 1);
-            _goal = _route[_routeI];
+            _goal = _route[_routeI].Pos;
+            _paintDrivenGeometry = false;
+            SetActiveTunnelWidth(_route[_routeI].Width);
             _hasGoal = true;
             _stallFrames = 0;
             RefreshVisuals();
@@ -578,59 +837,68 @@ namespace DeepCore.FreeMovement
 
         void AdvanceRoute()
         {
+            if (_paintPlan.PendingDigCount > 0 || _paintWorkX >= 0)
+            {
+                // Only complete a planned cell once the world tile is actually clear.
+                // False-completing here skipped dig when unsupervised (WASD=0 / other worker selected).
+                if (_paintWorkX >= 0)
+                {
+                    if (PaintWorkCellStillBlocks())
+                    {
+                        SyncGoalFromPaintPlan();
+                        return;
+                    }
+                    _paintPlan.NotifyCellExcavated(_paintWorkX, _paintWorkY);
+                }
+                _paintPlan.RevalidateConnectivity(Position);
+                SyncGoalFromPaintPlan();
+                // Never invent new dig cells — idle when plan exhausted
+                if (!_hasGoal)
+                {
+                    _paintWorkX = _paintWorkY = -1;
+                    DigHoodLog.Push("DIG PLAN | Complete — awaiting excavation orders");
+                }
+                RefreshPaintPreview();
+                return;
+            }
+
             _routeI++;
             if (_routeI >= _route.Count)
             {
-                if (TryContinueChewingAtFace())
-                    return;
                 ClearRoute();
+                DigHoodLog.Push("DIG PLAN | Complete — awaiting excavation orders");
                 return;
             }
             ActivateCurrentPin();
         }
 
         /// <summary>
-        /// Route finished but bit is still against rock — keep a face pin so we don't
-        /// ParkMachineIdle mid-wall (looks like Mara "suddenly stopped").
+        /// V1.1: Excavator must NEVER invent excavation targets. Kept as dead stub for safety.
         /// </summary>
-        bool TryContinueChewingAtFace()
+        bool TryContinueChewingAtFace() => false;
+
+        void RefreshPaintPreview()
         {
-            if (_assignedWorker == null || _world == null) return false;
-            if (IsOverheated || _isCooling || Conditions.IsResting || IsTooInjuredToMine)
-                return false;
-
-            Vector2 dir = Facing.sqrMagnitude > 0.0001f ? Facing.normalized : Vector2.up;
-            if (!PathBlockedByRock(Position, dir))
-            {
-                bool found = false;
-                for (int i = -3; i <= 3; i++)
-                {
-                    if (i == 0) continue;
-                    float rad = i * 22f * Mathf.Deg2Rad;
-                    float cos = Mathf.Cos(rad), sin = Mathf.Sin(rad);
-                    Vector2 d = new(dir.x * cos - dir.y * sin, dir.x * sin + dir.y * cos);
-                    if (!PathBlockedByRock(Position, d)) continue;
-                    dir = d.normalized;
-                    Face(dir);
-                    found = true;
-                    break;
-                }
-                if (!found) return false;
-            }
-
-            Vector2 tip = Position + dir * Mathf.Max(_moveRadius * 1.55f, DigTipDepth + _world.CellSize);
-            tip = EnsurePinBeyondNose(tip);
-            _route.Clear();
-            _routeI = 0;
-            _route.Add(tip);
-            ActivateCurrentPin();
-            DigHoodLog.Push("DIG | Continue chewing at face");
-            return true;
+            if (_paintPreview == null || _world == null) return;
+            _strokePreviewScratch.Clear();
+            if (_paintPlan.IsStroking)
+                _paintPlan.GetStrokePreview(_strokePreviewScratch, Position);
+            _paintPreview.Rebuild(_world, _paintPlan, _strokePreviewScratch);
         }
 
         void RefreshVisuals()
         {
+            // Legacy pin/line kept for debug but not authoritative when paint plan exists
             EnsureRouteLine();
+            if (_paintPlan.HasPlan || _paintPlan.IsStroking)
+            {
+                if (_routeLine != null) _routeLine.positionCount = 0;
+                for (int i = 0; i < _pinVisuals.Count; i++)
+                    _pinVisuals[i].gameObject.SetActive(false);
+                RefreshPaintPreview();
+                return;
+            }
+
             while (_pinVisuals.Count < _route.Count)
             {
                 var pin = new GameObject($"Pin{_pinVisuals.Count}").transform;
@@ -648,17 +916,19 @@ namespace DeepCore.FreeMovement
                 bool on = i < _route.Count;
                 _pinVisuals[i].gameObject.SetActive(on);
                 if (!on) continue;
-                _pinVisuals[i].localPosition = _route[i];
+                byte w = _route[i].Width;
+                _pinVisuals[i].localPosition = _route[i].Pos;
                 var sr = _pinVisuals[i].GetComponent<SpriteRenderer>();
                 if (sr == null) continue;
-                // Current = soft neon; upcoming = quieter; past = near-gone
+                Color baseCol = TunnelWidthSpec.PreviewColor(w);
                 if (i < _routeI)
-                    sr.color = new Color(0.35f, 0.7f, 0.45f, 0.18f);
+                    sr.color = new Color(baseCol.r, baseCol.g, baseCol.b, 0.2f);
                 else if (i == _routeI)
-                    sr.color = new Color(0.4f, 1f, 0.55f, 0.55f);
+                    sr.color = new Color(baseCol.r, baseCol.g, baseCol.b, 0.9f);
                 else
-                    sr.color = new Color(0.4f, 0.95f, 0.55f, 0.32f);
-                _pinVisuals[i].localScale = Vector3.one * (i == _routeI ? 0.26f : 0.18f);
+                    sr.color = new Color(baseCol.r, baseCol.g, baseCol.b, 0.45f);
+                float pinScale = 0.14f + w * 0.028f;
+                _pinVisuals[i].localScale = Vector3.one * (i == _routeI ? pinScale * 1.25f : pinScale);
             }
 
             if (_routeLine == null) return;
@@ -668,16 +938,24 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
-            // Path from excavator through remaining pins
             int remaining = _route.Count - _routeI;
             _routeLine.positionCount = remaining + 1;
             _routeLine.SetPosition(0, Position);
             for (int i = 0; i < remaining; i++)
-                _routeLine.SetPosition(i + 1, _route[_routeI + i]);
-            _routeLine.startWidth = 0.012f;
-            _routeLine.endWidth = 0.007f;
-            _routeLine.startColor = new Color(0.35f, 1f, 0.55f, 0.28f);
-            _routeLine.endColor = new Color(0.35f, 1f, 0.55f, 0.1f);
+                _routeLine.SetPosition(i + 1, _route[_routeI + i].Pos);
+
+            float half = _digHalf;
+            if (_routeI < _route.Count)
+            {
+                float cs = _world != null ? _world.CellSize : 0.1f;
+                half = TunnelWidthSpec.DigHalfCells(_route[_routeI].Width) * cs;
+            }
+            float visualW = Mathf.Clamp(half * 0.55f, 0.04f, 0.55f);
+            _routeLine.startWidth = visualW;
+            _routeLine.endWidth = visualW * 0.72f;
+            var col = TunnelWidthSpec.PreviewColor(_activeWidth);
+            _routeLine.startColor = new Color(col.r, col.g, col.b, 0.38f);
+            _routeLine.endColor = new Color(col.r, col.g, col.b, 0.14f);
         }
 
         public void Tick(Vector2 wasd) => Tick(wasd, clearGoalOnWasd: true);
@@ -707,21 +985,42 @@ namespace DeepCore.FreeMovement
 
             if (wasd.sqrMagnitude > 0.01f)
             {
-                if (clearGoalOnWasd) ClearRoute();
-                Step(wasd.normalized, dig: true);
+                // Player drive: move freely; dig only against player-painted cells
+                if (clearGoalOnWasd && _paintPlan.PendingDigCount <= 0)
+                {
+                    // Don't wipe a committed plan just for steering — only clear empty legacy routes
+                    if (_route.Count > 0) ClearRoute();
+                }
+                bool mayDig = (_paintPlan.PendingDigCount > 0 || _paintWorkX >= 0)
+                              && !_executionPaused;
+                Step(wasd.normalized, dig: mayDig);
                 TickPassiveHeat();
                 TickStaminaRecovery();
                 return;
             }
 
+            if (_executionPaused)
+            {
+                ResumeExecutionIfPossible();
+                if (_executionPaused)
+                {
+                    ParkMachineIdle();
+                    TickPassiveHeat();
+                    TickStaminaRecovery();
+                    return;
+                }
+            }
+
+            // Unsupervised dig: keep a live work front. Do not re-pick every frame while still
+            // chewing the current painted face (avoids post-pause target thrash / no Damage).
+            if (_paintPlan.PendingDigCount > 0
+                && (_paintWorkX < 0 || !PaintWorkCellStillBlocks() || !_hasGoal || _awaitingAccess))
+                SyncGoalFromPaintPlan();
+
             if (!_hasGoal)
             {
-                // Empty route but still nose-into-rock (shift pin snapped away, Escape, etc.)
-                if (TryContinueChewingAtFace())
-                {
-                    // Goal armed — fall through to route follow this tick
-                }
-                else
+                SyncGoalFromPaintPlan();
+                if (!_hasGoal)
                 {
                     ParkMachineIdle();
                     TickPassiveHeat();
@@ -735,9 +1034,69 @@ namespace DeepCore.FreeMovement
                 _routeLine.SetPosition(0, Position);
 
             Vector2 pos = transform.localPosition;
-            Vector2 to = _goal - pos;
-            float dist = to.magnitude;
-            if (dist < 0.1f)
+
+            // Paint work cell cleared while approaching — retarget
+            if (_paintWorkX >= 0 && _world != null
+                && !_world.IsMovementBlocker(_paintWorkX, _paintWorkY)
+                && !_world.HasBlockingDebris(_paintWorkX, _paintWorkY))
+            {
+                _paintPlan.NotifyCellExcavated(_paintWorkX, _paintWorkY);
+                SyncGoalFromPaintPlan();
+                RefreshPaintPreview();
+                if (!_hasGoal)
+                {
+                    TickPassiveHeat();
+                    TickStaminaRecovery();
+                    return;
+                }
+                pos = transform.localPosition;
+            }
+
+            float standArrive = Mathf.Max(0.1f, _moveRadius * 1.15f);
+            bool atStand = (_goal - pos).sqrMagnitude <= standArrive * standArrive;
+
+            // Painted work in dig reach: excavate it. Large chassis often intersects the
+            // painted face before standArrive / while dig:false approach is body-blocked —
+            // without this, orders stall forever with dig disabled.
+            if (_paintWorkX >= 0 && PaintWorkCellStillBlocks())
+            {
+                Vector2 workCenter = _world.CellCenter(_paintWorkX, _paintWorkY);
+                float digReach = _digHalf + _moveRadius + _world.CellSize * 1.25f;
+                bool workInReach = (workCenter - pos).sqrMagnitude <= digReach * digReach;
+                if (atStand || workInReach)
+                {
+                    Vector2 digDir = workCenter - pos;
+                    if (digDir.sqrMagnitude < 0.0001f)
+                        digDir = Facing.sqrMagnitude > 0.0001f ? Facing : Vector2.up;
+                    else
+                        digDir.Normalize();
+                    Step(digDir, dig: true);
+                    TickPassiveHeat();
+                    TickStaminaRecovery();
+                    return;
+                }
+            }
+
+            // Far from face — walk EXISTING tunnels only (never dig unpainted rock en route)
+            if (_paintWorkX >= 0 && !atStand)
+            {
+                EnsureAccessNav();
+                _accessNav.Follow(
+                    pos, _goal, moveSpeed, _moveRadius,
+                    face: Face,
+                    tryStep: (dir, _) =>
+                    {
+                        Vector2 before = transform.localPosition;
+                        Step(dir, dig: false);
+                        Vector2 after = transform.localPosition;
+                        return (after - before).sqrMagnitude > 1e-8f;
+                    });
+                TickPassiveHeat();
+                TickStaminaRecovery();
+                return;
+            }
+
+            if (atStand)
             {
                 AdvanceRoute();
                 TickPassiveHeat();
@@ -745,9 +1104,25 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
-            Step(to.normalized, dig: true);
-            TickPassiveHeat();
+            // Legacy pin route (no paint plan): walk without inventing digs
+            Vector2 to = _goal - pos;
+            if (to.sqrMagnitude < 0.01f)
+            {
+                AdvanceRoute();
+                TickPassiveHeat();
                 TickStaminaRecovery();
+                return;
+            }
+            Step(to.normalized, dig: false);
+            TickPassiveHeat();
+            TickStaminaRecovery();
+        }
+
+        bool PaintWorkCellStillBlocks()
+        {
+            if (_paintWorkX < 0 || _world == null) return false;
+            return _world.IsMovementBlocker(_paintWorkX, _paintWorkY)
+                   || _world.HasBlockingDebris(_paintWorkX, _paintWorkY);
         }
 
         /// <summary>
@@ -900,12 +1275,18 @@ namespace DeepCore.FreeMovement
             int x1 = Mathf.FloorToInt((bodyPos.x + half + cs) / cs);
             int y0 = Mathf.FloorToInt((bodyPos.y - half - along1) / cs);
             int y1 = Mathf.FloorToInt((bodyPos.y + half + along1) / cs);
-            Vector2 perp = new(-dir.y, dir.x);
+            bool paintOnly = _paintPlan.PendingDigCount > 0 || _paintWorkX >= 0;
 
             for (int ty = y0; ty <= y1; ty++)
             for (int tx = x0; tx <= x1; tx++)
             {
                 if (!_world.IsMovementBlocker(tx, ty)) continue;
+                if (paintOnly && !_paintPlan.IsPendingDig(tx, ty))
+                {
+                    // Body footprint blockers still count even if unplanned
+                    if (!CellOverlapsCircle(tx, ty, bodyPos, _moveRadius * 1.05f))
+                        continue;
+                }
                 Vector2 c = _world.CellCenter(tx, ty);
                 if (!InDigFaceEnvelope(bodyPos, dir, c)) continue;
                 fn(tx, ty);
@@ -940,32 +1321,82 @@ namespace DeepCore.FreeMovement
         {
             if (IsOverheated || _isCooling || Conditions.IsResting || IsTooInjuredToMine)
                 return false;
+            // Absolute authority: no dig without player-painted pending cells
+            if (_paintPlan.PendingDigCount <= 0 && _paintWorkX < 0)
+                return false;
+            if (_executionPaused)
+                return false;
+            if (ShouldRefuseDeeperDig(dir))
+                return false;
             if (!AllowDigByHeatControl())
                 return false;
             return TryDigOnce(pos, tryPos, dir);
         }
 
         /// <summary>
-        /// One dig action: pick one clearance tile and apply damage once.
+        /// Critical confinement — refuse digging further. Plan is retained (never cleared).
+        /// Accepted manager PUSH HARDER temporarily raises the refuse ceiling.
         /// </summary>
+        bool ShouldRefuseDeeperDig(Vector2 digDir)
+        {
+            var wr = _assignedWorker;
+            if (wr?.State == null) return false;
+            float stress = wr.State.ClaustrophobicStress;
+            if (stress < ClaustrophobiaBands.CriticalAt && !wr.State.ClaustroSeekingExit)
+                return false;
+
+            float ceiling = ResolveRefuseCeiling(wr);
+            // Still willing under an accepted push — stress keeps rising; not "fine"
+            if (stress < ceiling)
+                return false;
+
+            // Soft grit without a push: very determined/brave can scrape until ~95
+            if (ceiling <= ClaustrophobiaBands.CriticalAt + 0.01f)
+            {
+                int det = wr.Stats != null ? wr.Stats.Get(WorkerStatId.Determination) : 10;
+                int brav = wr.Stats != null ? wr.Stats.Get(WorkerStatId.Bravery) : 10;
+                if (det + brav >= 30 && stress < 95f)
+                    return false;
+            }
+
+            PauseExecution("CLAUSTROPHOBIA | REFUSES TO CONTINUE — plan retained");
+            EmitOperatorState(WorkerStateEventType.WorkBlocked, 4.5f, "ClaustroRefuse");
+            OnClaustroRefusePause?.Invoke(wr);
+            return true;
+        }
+
         bool TryDigOnce(Vector2 pos, Vector2 tryPos, Vector2 dir)
         {
-            if (!TryPickDigTarget(pos, tryPos, dir, out int tx, out int ty))
+            if (_paintPlan.PendingDigCount <= 0 && _paintWorkX < 0)
                 return false;
-            return StrikeCell(tx, ty);
+            if (TryPickDigTarget(pos, tryPos, dir, out int tx, out int ty))
+                return StrikeCell(tx, ty);
+
+            // Fallback after pause / envelope miss: strike the live paint work cell if still solid
+            if (_paintWorkX >= 0 && _world != null && PaintWorkCellStillBlocks())
+            {
+                float cs = _world.CellSize;
+                Vector2 cc = _world.CellCenter(_paintWorkX, _paintWorkY);
+                float reach = _digHalf + _moveRadius + cs * 1.25f;
+                if ((cc - pos).sqrMagnitude <= reach * reach)
+                    return StrikeCell(_paintWorkX, _paintWorkY);
+            }
+            return false;
         }
 
         bool TryPickDigTarget(Vector2 pos, Vector2 tryPos, Vector2 dir, out int bestX, out int bestY)
         {
             bestX = -1;
             bestY = -1;
+            // Only player-painted cells — never auto-select arbitrary rock
+            if (_paintPlan.PendingDigCount <= 0 && _paintWorkX < 0)
+                return false;
+
             float bestScore = float.MaxValue;
             float cs = _world.CellSize;
             Vector2 perp = new(-dir.y, dir.x);
-            Vector2 tip = pos + dir * (_moveRadius * 0.25f);
 
             // Pass A: solids overlapping body / next step (must clear to advance).
-            // Mild center bias — still clear shoulders so we don't squeeze into a 1-tile shaft.
             float r = _moveRadius + cs * 0.25f;
             float minX = Mathf.Min(pos.x, tryPos.x) - r;
             float maxX = Mathf.Max(pos.x, tryPos.x) + r;
@@ -986,21 +1417,30 @@ namespace DeepCore.FreeMovement
                     var cell = _world.Get(tx, ty);
                     if (cell.IsUndamageableBorder) continue;
                 }
-                if (!CellOverlapsCircle(tx, ty, pos, _moveRadius * 1.05f) &&
-                    !CellOverlapsCircle(tx, ty, tryPos, _moveRadius * 1.05f))
+                bool pending = _paintPlan.IsPendingDig(tx, ty);
+                bool bodyHit = CellOverlapsCircle(tx, ty, pos, _moveRadius * 1.05f)
+                               || CellOverlapsCircle(tx, ty, tryPos, _moveRadius * 1.05f);
+                // HARD AUTHORITY: only player-painted pending cells (debris may clear body)
+                if (!debris && !pending)
+                    continue;
+                if (debris && !pending && !bodyHit)
+                    continue;
+                if (!bodyHit)
                     continue;
                 Vector2 c = _world.CellCenter(tx, ty);
                 Vector2 d = c - pos;
                 float along = Vector2.Dot(d, dir);
                 float side = Mathf.Abs(Vector2.Dot(d, perp));
                 float score = Vector2.Distance(c, pos) + side * 1.1f - along * 0.15f;
+                if (pending) score -= 2.5f;
+                if (tx == _paintWorkX && ty == _paintWorkY) score -= 2f;
                 if (!debris)
                 {
                     var cell = _world.Get(tx, ty);
                     score -= (cell.MaxHp - cell.Hp) * 0.05f;
                 }
                 else
-                    score -= 0.8f; // prefer clearing blocking debris when pressed against it
+                    score -= 0.8f;
                 if (score < bestScore)
                 {
                     bestScore = score;
@@ -1010,8 +1450,7 @@ namespace DeepCore.FreeMovement
             }
             if (bestX >= 0) return true;
 
-            // Pass B: fill the pointy half-circle dig face (ellipse), nearest tip first.
-            float along0 = -cs * 0.15f;
+            Vector2 tip = pos + dir * (_moveRadius * 0.25f);
             float along1 = DigTipDepth + cs * 0.35f;
             float bound = _digHalf + cs * 1.2f;
             int fx0 = Mathf.FloorToInt((pos.x - bound - along1) / cs);
@@ -1025,15 +1464,16 @@ namespace DeepCore.FreeMovement
                 if (!_world.IsMovementBlocker(tx, ty)) continue;
                 var cell = _world.Get(tx, ty);
                 if (cell.IsUndamageableBorder) continue;
+                if (!_paintPlan.IsPendingDig(tx, ty)) continue;
                 Vector2 c = _world.CellCenter(tx, ty);
                 if (!InDigFaceEnvelope(pos, dir, c)) continue;
 
                 Vector2 dTip = c - tip;
                 float along = Vector2.Dot(c - pos, dir);
                 float side = Mathf.Abs(Vector2.Dot(c - pos, perp));
-                // Carve the rounded tip as a blob: closest to tip center, slight center bias.
                 float score = dTip.magnitude + side * 0.55f - along * 0.25f
                     - (cell.MaxHp - cell.Hp) * 0.05f;
+                if (tx == _paintWorkX && ty == _paintWorkY) score -= 1.5f;
                 if (score < bestScore)
                 {
                     bestScore = score;
@@ -1048,6 +1488,13 @@ namespace DeepCore.FreeMovement
 
         bool StrikeCell(int x, int y)
         {
+            // Hard simulation guard — unpainted solid rock is never excavated
+            if (!_world.HasBlockingDebris(x, y) && !_paintPlan.IsPendingDig(x, y))
+            {
+                DigHoodLog.Push($"DIG BLOCKED | Unpainted cell ({x},{y}) — no authority");
+                return false;
+            }
+
             if (_world.HasBlockingDebris(x, y))
             {
                 DebrisStrike?.Invoke(x, y);
@@ -1090,7 +1537,19 @@ namespace DeepCore.FreeMovement
 
             _onDigImpact?.Invoke(before, broke);
             BalanceDigImpact?.Invoke(before, broke);
-            if (broke) _onBrokeCell?.Invoke(x, y);
+            if (broke)
+            {
+                _onBrokeCell?.Invoke(x, y);
+                _paintPlan.NotifyCellExcavated(x, y);
+                if (x == _paintWorkX && y == _paintWorkY)
+                    SyncGoalFromPaintPlan();
+                RefreshPaintPreview();
+            }
+            else if (_paintPlan.IsPendingDig(x, y))
+            {
+                _paintPlan.MarkExcavating(x, y);
+                RefreshPaintPreview();
+            }
             return true;
         }
 
@@ -1396,6 +1855,7 @@ namespace DeepCore.FreeMovement
                 if (ratio < StaminaExhaustedRatio) interval *= ExhaustedDigIntervalMul;
                 else if (ratio <= StaminaTiredRatio) interval *= TiredDigIntervalMul;
                 interval *= InjuryDigMul;
+                interval *= TunnelWidthSpec.DigCadenceMul(_activeWidth);
                 return interval;
             }
         }
@@ -1526,7 +1986,8 @@ namespace DeepCore.FreeMovement
 
         void ApplyDigStamina()
         {
-            Conditions.SpendStamina(StaminaCostPerDig);
+            float cost = StaminaCostPerDig * TunnelWidthSpec.StaminaPerStrikeMul(_activeWidth);
+            Conditions.SpendStamina(cost);
             LogStamina();
 
             if (!Conditions.IsResting && StaminaRatio <= StaminaRestEnterRatio)
@@ -1702,8 +2163,7 @@ namespace DeepCore.FreeMovement
             // Ellipse: (side/a)^2 + (along/b)^2 = 1  →  half-circle-ish when a≈b
             float t = along / b;
             float half = a * Mathf.Sqrt(Mathf.Max(0f, 1f - t * t));
-            // Floor width so the tip stays a blunt point (≥ ~2 cells), not a 1-tile line
-            float minHalf = cs * 0.85f;
+            float minHalf = TunnelWidthSpec.TipMinHalfCells(_activeWidth) * cs;
             return Mathf.Max(half, minHalf * (1f - t * t));
         }
 

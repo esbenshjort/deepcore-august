@@ -40,8 +40,8 @@ namespace DeepCore.FreeMovement
         ExcavatedPathfinder _nav;
         ProspectorInvestigationLoop _investigation;
         float _radius = 0.1f;
-        float _moveSpeed = 1.55f;
-        float _autoMoveSpeed = 1.15f;
+        float _moveSpeed = 0.58f;
+        float _autoMoveSpeed = 0.58f;
         Transform _facingRoot;
         Transform _coneRoot;
         readonly List<LineRenderer> _arcCore = new(3);
@@ -218,7 +218,7 @@ namespace DeepCore.FreeMovement
             _workstation != null ? _workstation.TableCenter
             : (_refiner != null ? _refiner.ConsultationMeetPoint : Position);
         public float BodyRadius => _radius;
-        public float InvestigationMoveSpeed => _autoMoveSpeed * 1.05f;
+        public float InvestigationMoveSpeed => _autoMoveSpeed;
 
         public ProspectorInvestigationLoop Investigation =>
             _investigation ??= new ProspectorInvestigationLoop(this);
@@ -559,7 +559,7 @@ namespace DeepCore.FreeMovement
             }
 
             _nav ??= new ExcavatedPathfinder(_world);
-            bool arrived = NavFollow(_assignedScanner.Position, _autoMoveSpeed * 1.1f);
+            bool arrived = NavFollow(_assignedScanner.Position, _autoMoveSpeed);
             if (!arrived)
             {
                 float moved = Vector2.Distance(Position, _lastPos);
@@ -640,7 +640,7 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
-            bool arrived = NavFollow(_workGoal, _autoMoveSpeed * 1.15f);
+            bool arrived = NavFollow(_workGoal, _autoMoveSpeed);
             if (!arrived)
             {
                 float moved = Vector2.Distance(Position, _lastPos);
@@ -888,7 +888,7 @@ namespace DeepCore.FreeMovement
 
             // Prefer standing in open tunnel behind the bit (pathfind there)
             Vector2 behind = FindAssistStand(digger, fwd);
-            bool arrived = NavFollow(behind, _autoMoveSpeed * 1.2f);
+            bool arrived = NavFollow(behind, _autoMoveSpeed);
 
             if (arrived)
                 Face(fwd);

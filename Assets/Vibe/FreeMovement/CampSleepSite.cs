@@ -47,6 +47,14 @@ namespace DeepCore.FreeMovement
                 YardVisualKit.SleepPad, 9, 2.35f);
             DigVisualKit.ApplyLit(pad);
 
+            // Extra lived-in contact wear (grime / traffic) under fire, crates, tent apron
+            DigVisualKit.PlaceGroundingPad(transform, FirePos + new Vector2(0f, -0.12f), 0.95f,
+                new Color(0.12f, 0.09f, 0.06f, 0.55f), sortingOrder: 8);
+            DigVisualKit.PlaceGroundingPad(transform, TentDoor + new Vector2(0.2f, -0.55f), 1.1f,
+                new Color(0.18f, 0.14f, 0.1f, 0.4f), sortingOrder: 8);
+            DigVisualKit.PlaceGroundingPad(transform, TentDoor + new Vector2(1.4f, -0.55f), 0.7f,
+                new Color(0.2f, 0.16f, 0.12f, 0.38f), sortingOrder: 8);
+
             // Large marquee / wall tent
             var tent = MakeSpriteGo("Tent", TentDoor + new Vector2(0.45f, 0.1f),
                 YardVisualKit.Tent, 16, 1.55f);
@@ -174,12 +182,12 @@ namespace DeepCore.FreeMovement
             fireLightGo.transform.localPosition = FirePos + new Vector2(0f, 0.05f);
             _fireLight = fireLightGo.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(_fireLight,
-                new Color(1f, 0.42f, 0.14f),
+                new Color(1f, 0.38f, 0.1f),
                 intensity: _fireBaseIntensity,
-                outer: 2.55f,
-                inner: 0.08f,
+                outer: 2.45f,
+                inner: 0.1f,
                 shadows: false,
-                falloff: 0.66f);
+                falloff: 0.58f);
             _fireLantern = fireLightGo.AddComponent<CosyLantern>();
             _fireLantern.Init(fireLightGo.transform.position, _fireLight, _fireBaseIntensity);
 

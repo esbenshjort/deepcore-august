@@ -19,7 +19,7 @@ namespace DeepCore.FreeMovement
         BasecampYard _yard;
         DeliveryCalculator _calc;
         WashMachine _washer;
-        float _moveSpeed = 1.25f;
+        float _moveSpeed = 0.58f;
 
         State _state = State.Idle;
         State _resumeAfterConsult = State.Idle;

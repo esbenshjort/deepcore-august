@@ -71,6 +71,21 @@ namespace DeepCore.FreeMovement
             DigVisualKit.ApplyLit(bsr);
             body.transform.localScale = Vector3.one * 0.95f;
 
+            // Process / wet apron under washer — industrial work light identity (amber), not cyan
+            DigVisualKit.PlaceGroundingPad(go.transform, new Vector2(0f, -0.28f), 0.85f,
+                new Color(0.16f, 0.18f, 0.2f, 0.45f), sortingOrder: 8);
+            var processLightGo = new GameObject("ProcessLight");
+            processLightGo.transform.SetParent(go.transform, false);
+            processLightGo.transform.localPosition = new Vector3(0f, -0.15f, 0f);
+            var processLight = processLightGo.AddComponent<Light2D>();
+            DigVisualKit.ConfigurePointLight(processLight,
+                new Color(1f, 0.55f, 0.22f),
+                intensity: 0.38f,
+                outer: 0.85f,
+                inner: 0.05f,
+                shadows: false,
+                falloff: 0.8f);
+
             var drum = new GameObject("Drum");
             drum.transform.SetParent(go.transform, false);
             drum.transform.localPosition = new Vector3(0f, 0.02f, 0f);
@@ -97,11 +112,11 @@ namespace DeepCore.FreeMovement
             var hoodLight = hoodGlow.AddComponent<Light2D>();
             DigVisualKit.ConfigurePointLight(hoodLight,
                 new Color(0.3f, 0.9f, 1f),
-                intensity: 0.55f,
-                outer: 0.55f,
+                intensity: 0.42f,
+                outer: 0.48f,
                 inner: 0.03f,
                 shadows: false,
-                falloff: 0.78f);
+                falloff: 0.82f);
             var unlitHood = Shader.Find("Sprites/Default");
             var hoodHalo = new GameObject("HoodHalo");
             hoodHalo.transform.SetParent(hoodGlow.transform, false);

@@ -19,6 +19,13 @@ namespace DeepCore.FreeMovement
             "I'll dig in.",
             "Copy that.",
         };
+        static readonly string[] PushReluctant =
+        {
+            "…Fine. Same route. Don't ask again.",
+            "I'll do it. Doesn't mean I like it.",
+            "Alright. Deeper. Then I'm done.",
+            "Against my better judgment.",
+        };
         static readonly string[] PushAnnoyed =
         {
             "I've been working eleven hours.",
@@ -31,12 +38,20 @@ namespace DeepCore.FreeMovement
             "No.",
             "I'm done being yelled at.",
             "Find someone else to break.",
+            "Not deeper. Not for you.",
         };
         static readonly string[] PushRefused =
         {
             "I'm fine — but I'm not accelerating.",
             "Not today.",
             "I hear you. Still no.",
+            "Not deeper. Not like this.",
+        };
+        static readonly string[] PushPanicked =
+        {
+            "I can't — I can't stay down here!",
+            "Get me out. Now.",
+            "Walls are closing. I'm going.",
         };
 
         static readonly string[] KeepOk =
@@ -138,9 +153,12 @@ namespace DeepCore.FreeMovement
             {
                 (ManagerTalkAction.PushHarder, ManagerReactionKind.Motivated) => PickArr(PushMotivated),
                 (ManagerTalkAction.PushHarder, ManagerReactionKind.Accepted) => PickArr(PushAccepted),
+                (ManagerTalkAction.PushHarder, ManagerReactionKind.ReluctantlyAccepted) =>
+                    PickArr(PushReluctant),
                 (ManagerTalkAction.PushHarder, ManagerReactionKind.Annoyed) => PickArr(PushAnnoyed),
                 (ManagerTalkAction.PushHarder, ManagerReactionKind.Angered) => PickArr(PushAngered),
                 (ManagerTalkAction.PushHarder, ManagerReactionKind.Refused) => PickArr(PushRefused),
+                (ManagerTalkAction.PushHarder, ManagerReactionKind.Panicked) => PickArr(PushPanicked),
 
                 (ManagerTalkAction.KeepItUp, ManagerReactionKind.Hollow) => PickArr(KeepHollow),
                 (ManagerTalkAction.KeepItUp, _) => PickArr(KeepOk),

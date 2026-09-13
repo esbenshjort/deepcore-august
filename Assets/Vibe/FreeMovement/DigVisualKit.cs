@@ -54,7 +54,7 @@ namespace DeepCore.FreeMovement
             get
             {
                 if (_pixel != null) return _pixel;
-                var tex = new Texture2D(4, 4, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                var tex = new Texture2D(4, 4, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
                 for (int y = 0; y < 4; y++)
                 for (int x = 0; x < 4; x++)
                     tex.SetPixel(x, y, Color.white);
@@ -732,18 +732,54 @@ namespace DeepCore.FreeMovement
             if (sh != null) gsr.sharedMaterial = new Material(sh);
             gsr.color = new Color(1f, 0.75f, 0.35f, 0.85f);
 
-            // Warm industrial amber pool — no 2D shadows (per-cell casters × lanterns is too costly)
+            // Controlled warm industrial amber pool — distinct from fire / excavator / cyan tech
             var light = go.AddComponent<Light2D>();
             ConfigurePointLight(light,
-                new Color(1f, 0.52f, 0.18f),
+                new Color(1f, 0.5f, 0.16f),
                 intensity,
-                outer: 3.15f,
+                outer: 2.85f,
                 inner: 0.12f,
                 shadows: false,
-                falloff: 0.7f);
+                falloff: 0.86f);
 
             go.AddComponent<CosyLantern>().Init(go.transform.position, light, intensity);
             return go;
+        }
+
+        /// <summary>
+        /// Soft elliptical contact dirt / wear under machines and camp props.
+        /// Sorting below platforms; restrained alpha so it grounds without muddy blobs.
+        /// </summary>
+        public static SpriteRenderer PlaceGroundingPad(Transform parent, Vector2 local, float scale,
+            Color? tint = null, int sortingOrder = 9)
+        {
+            var go = new GameObject("GroundingPad");
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = local;
+            go.transform.localScale = Vector3.one * scale;
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = YardVisualKit.SleepPad;
+            sr.sortingOrder = sortingOrder;
+            ApplyLit(sr);
+            sr.color = tint ?? new Color(0.2f, 0.15f, 0.1f, 0.52f);
+            return sr;
+        }
+
+        /// <summary>Utility cable / hose as a rotated PowerCable sprite.</summary>
+        public static SpriteRenderer PlaceUtilityCable(Transform parent, Vector2 local, float scale,
+            float zRotDeg, Color? tint = null, int sortingOrder = 14)
+        {
+            var go = new GameObject("UtilityCable");
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = local;
+            go.transform.localScale = Vector3.one * scale;
+            go.transform.localRotation = Quaternion.Euler(0f, 0f, zRotDeg);
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = YardVisualKit.PowerCable;
+            sr.sortingOrder = sortingOrder;
+            ApplyLit(sr);
+            if (tint.HasValue) sr.color = tint.Value;
+            return sr;
         }
 
         /// <summary>
@@ -756,7 +792,7 @@ namespace DeepCore.FreeMovement
 
         static Sprite MakeBlobSprite(int s, bool rock)
         {
-            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var tex = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point };
             Clear(tex, s);
             float cx = (s - 1) * 0.5f, cy = (s - 1) * 0.42f;
             for (int y = 0; y < s; y++)

@@ -86,9 +86,16 @@ namespace DeepCore.FreeMovement
             bool moving = moved > 0.0004f;
             _lastPos = pos;
 
-            // Walk bob — slower / flatter when injured or exhausted
-            float bobAmp = 0.018f;
-            float bobHz = 9.5f;
+            // Walk bob — cadence tracks locomotion speed (no high-frequency slide bob)
+            float bobAmp = 0.014f;
+            float bobHz = 5.2f;
+            float speed01 = 1f;
+            if (_wr?.Locomotion != null && _wr.Locomotion.LastEffectiveSpeed > 0.01f)
+            {
+                speed01 = Mathf.Clamp01(
+                    _wr.Locomotion.LastEffectiveSpeed / WorkerPhysicalProfile.ReferenceWalkSpeed);
+                bobHz = Mathf.Lerp(3.6f, 6.2f, speed01);
+            }
             if (_wr?.State != null)
             {
                 if (_wr.State.ExhaustionLatched) { bobAmp *= 0.55f; bobHz *= 0.72f; }
@@ -100,7 +107,10 @@ namespace DeepCore.FreeMovement
                 }
             }
             if (moving && bobAmp > 0.001f)
-                _bobPhase += Time.deltaTime * bobHz * Mathf.Clamp(moved / 0.02f, 0.4f, 1.6f);
+            {
+                float stride = Mathf.Clamp(moved / 0.012f, 0.35f, 1.25f);
+                _bobPhase += Time.deltaTime * bobHz * stride;
+            }
             float bob = moving ? Mathf.Sin(_bobPhase) * bobAmp : 0f;
 
             // Stumble kick — one brief tilt + dust when locomotion reports stumble/fall
