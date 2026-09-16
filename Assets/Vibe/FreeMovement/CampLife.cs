@@ -48,6 +48,14 @@ namespace DeepCore.FreeMovement
         public bool InjuryReturnActive;
         /// <summary>At camp awaiting / receiving Steward treatment.</summary>
         public bool SeekingStewardCare;
+        /// <summary>Universal rescue: this person yielded specialization and is on rescue duty.</summary>
+        public bool RescueDutyActive;
+        /// <summary>Universal rescue: casualty — person avatar is sole physical authority.</summary>
+        public bool BeingRescued;
+        /// <summary>After rescue: walking back to reserved assignment post (no snap).</summary>
+        public bool RescueReturning;
+        /// <summary>Priority System: yielded specialization for a non-host or cross-task duty.</summary>
+        public bool PriorityDutyActive;
         public float ToiletUseSecondsLeft;
         public float LastToiletGameHours = -99f;
 

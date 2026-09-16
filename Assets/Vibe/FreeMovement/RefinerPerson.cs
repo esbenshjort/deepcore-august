@@ -381,6 +381,12 @@ namespace DeepCore.FreeMovement
 
         bool TryBeginFetch()
         {
+            return CanFetchOre();
+        }
+
+        /// <summary>Priority System availability probe — stockpile has ore cells.</summary>
+        public bool CanFetchOre()
+        {
             Stockpile primary = PickPrimary();
             Stockpile secondary = PickSecondary();
             Stockpile tertiary = PickTertiary();

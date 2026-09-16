@@ -51,6 +51,11 @@ namespace DeepCore.FreeMovement
         /// </summary>
         public WorkerCampBody CampBody { get; private set; } = new();
 
+        /// <summary>
+        /// Universal priority prefs + shift task clocks. Same task list for every worker.
+        /// </summary>
+        public WorkerPriorityPrefs Priorities { get; set; } = new();
+
         /// <summary>Obsolete name — use <see cref="State"/>.</summary>
         [Obsolete("V1.2A: use WorkerRuntime.State")]
         public WorkerState PersonalConditions => State;
@@ -65,6 +70,8 @@ namespace DeepCore.FreeMovement
             Stats.ClampAll();
             if (Injuries == null) Injuries = new WorkerInjuryStore();
             if (CampBody == null) CampBody = new WorkerCampBody();
+            if (Priorities == null) Priorities = new WorkerPriorityPrefs();
+            Priorities.EnsureAllTasksRegistered();
             ById[workerId] = this;
         }
 

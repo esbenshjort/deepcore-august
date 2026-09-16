@@ -263,7 +263,10 @@ namespace DeepCore.FreeMovement
             // F0.5b vacancy: no repair / infra / lantern labour
             if (_assignedWorker == null) return;
 
-            bool needsRepair = _excavator != null && _excavator.IsOverheated;
+            EnforcePriorityAuthority();
+
+            bool needsRepair = _excavator != null && _excavator.IsOverheated
+                               && TaskAllowed(WorkerGenericTaskIds.RepairEquipment);
 
             if (needsRepair && IsInfrastructureWork)
             {
@@ -425,7 +428,7 @@ namespace DeepCore.FreeMovement
             }
 
             // 1) Critical tunnel support
-            if (critOk)
+            if (critOk && TaskAllowed(WorkerGenericTaskIds.InstallSupports))
             {
                 BeginSupportJob(crit, critical: true);
                 DigHoodLog.Push($"ENGINEER | CRITICAL support ({crit.x},{crit.y}) score {critScore:0.0}");
@@ -433,7 +436,7 @@ namespace DeepCore.FreeMovement
             }
 
             // 2) Needed lantern on dark corridor
-            if (lanOk)
+            if (lanOk && TaskAllowed(WorkerGenericTaskIds.InstallLighting))
             {
                 _jobCell = lan;
                 _jobWorld = _world.CellCenter(lan.x, lan.y);
@@ -453,7 +456,7 @@ namespace DeepCore.FreeMovement
                 _evalSupportDebug = _infra.LastSupportEvalDebug;
             }
 
-            if (prevOk)
+            if (prevOk && TaskAllowed(WorkerGenericTaskIds.InstallSupports))
             {
                 BeginSupportJob(prev, critical: false);
                 DigHoodLog.Push($"ENGINEER | preventative support ({prev.x},{prev.y}) score {prevScore:0.0}");
@@ -542,6 +545,45 @@ namespace DeepCore.FreeMovement
                 || _state == State.BuildingSupport)
             {
                 _nav?.Invalidate();
+            }
+        }
+
+        bool TaskAllowed(string taskId) =>
+            _assignedWorker?.Priorities == null
+            || !_assignedWorker.Priorities.IsOff(taskId);
+
+        /// <summary>Priority OFF stops the matching voluntary infra/repair work without deleting world need.</summary>
+        void EnforcePriorityAuthority()
+        {
+            bool support = _state == State.WalkingToSupport || _state == State.BuildingSupport
+                           || _workKind == EngineerWorkKind.SupportNeeded;
+            bool lantern = _state == State.WalkingToLantern || _state == State.InstallingLantern
+                           || _workKind == EngineerWorkKind.DarkAreaFound
+                           || _workKind == EngineerWorkKind.InstallingLantern;
+            bool repair = _state == State.ToExcavator || _state == State.Repairing
+                          || _workKind == EngineerWorkKind.RepairEnRoute
+                          || _workKind == EngineerWorkKind.Repairing;
+
+            if (support && !TaskAllowed(WorkerGenericTaskIds.InstallSupports))
+            {
+                AbortInfraJob();
+                FinishInfraJob();
+                return;
+            }
+            if (lantern && !TaskAllowed(WorkerGenericTaskIds.InstallLighting))
+            {
+                AbortInfraJob();
+                FinishInfraJob();
+                return;
+            }
+            if (repair && !TaskAllowed(WorkerGenericTaskIds.RepairEquipment))
+            {
+                OnRepairInterrupted?.Invoke();
+                _repairStrandTimer = 0f;
+                _nav?.Invalidate();
+                _state = State.ReturnToPost;
+                _workKind = EngineerWorkKind.Returning;
+                SetStatus("RETURNING");
             }
         }
 

@@ -163,6 +163,12 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
+            if (!EnforcePriorityAuthority())
+            {
+                if (_camp != null) _camp.StewardActivity = _debugStatus;
+                return;
+            }
+
             float cleanPush = 0f;
             if (_workKind == StewardWorkKind.CleaningCamp
                 || _workKind == StewardWorkKind.AfterMealCleanup
@@ -255,35 +261,47 @@ namespace DeepCore.FreeMovement
             }
 
             int roll = _rng.Next(100);
-            if (injured != null && roll < 55)
+            if (injured != null && roll < 55 && TaskAllowed(WorkerGenericTaskIds.TreatInjuries))
             {
                 _workKind = StewardWorkKind.TendingWounds;
                 _debugStatus = $"TEND {injured.DisplayName}";
                 _dutyTarget = _post + new Vector2(0.35f, -0.2f);
             }
-            else if (_camp != null && _camp.Hygiene01 < 0.55f && roll < 70)
+            else if (_camp != null && _camp.Hygiene01 < 0.55f && roll < 70
+                     && TaskAllowed(WorkerGenericTaskIds.CleanCamp))
             {
                 _workKind = StewardWorkKind.CleaningCamp;
                 _debugStatus = "CLEAN CAMP";
                 _dutyTarget = _post + new Vector2(-0.4f, 0.15f);
             }
-            else if (roll < 55)
+            else if (roll < 55 && TaskAllowed(WorkerGenericTaskIds.TendCampSystems))
             {
                 _workKind = StewardWorkKind.KitchenDuty;
                 _debugStatus = "KITCHEN";
                 _dutyTarget = _post + new Vector2(0.15f, 0.25f);
             }
-            else if (roll < 75)
+            else if (roll < 75 && TaskAllowed(WorkerGenericTaskIds.PrepareMeals))
             {
                 _workKind = StewardWorkKind.PreparingMeal;
                 _debugStatus = "PREP MEAL";
                 _dutyTarget = _post + new Vector2(0.2f, 0.1f);
             }
-            else
+            else if (TaskAllowed(WorkerGenericTaskIds.TendCampSystems)
+                     || TaskAllowed(WorkerGenericTaskIds.CleanCamp))
             {
                 _workKind = StewardWorkKind.AfterMealCleanup;
                 _debugStatus = "CLEANUP";
                 _dutyTarget = _post + new Vector2(-0.2f, -0.15f);
+            }
+            else
+            {
+                // All camp tasks OFF — stay idle; do not invent duty
+                _workKind = StewardWorkKind.Idle;
+                _debugStatus = "IDLE (PRIORITY OFF)";
+                _hasDutyTarget = false;
+                _state = State.IdleAtPost;
+                if (_camp != null) _camp.StewardActivity = _debugStatus;
+                return;
             }
 
             _dutyHoursLeft = _workKind switch
@@ -299,6 +317,31 @@ namespace DeepCore.FreeMovement
             _state = State.WalkingDuty;
             _nav.Invalidate();
             if (_camp != null) _camp.StewardActivity = _debugStatus;
+        }
+
+        bool TaskAllowed(string taskId) =>
+            _assignedWorker?.Priorities == null
+            || !_assignedWorker.Priorities.IsOff(taskId);
+
+        /// <summary>Returns false when current duty was aborted due to priority OFF.</summary>
+        bool EnforcePriorityAuthority()
+        {
+            string taskId = _workKind switch
+            {
+                StewardWorkKind.TendingWounds => WorkerGenericTaskIds.TreatInjuries,
+                StewardWorkKind.CleaningCamp => WorkerGenericTaskIds.CleanCamp,
+                StewardWorkKind.PreparingMeal => WorkerGenericTaskIds.PrepareMeals,
+                StewardWorkKind.KitchenDuty => WorkerGenericTaskIds.TendCampSystems,
+                StewardWorkKind.AfterMealCleanup => WorkerGenericTaskIds.TendCampSystems,
+                _ => null,
+            };
+            if (taskId == null || TaskAllowed(taskId)) return true;
+            _workKind = StewardWorkKind.Idle;
+            _debugStatus = "IDLE (PRIORITY OFF)";
+            _hasDutyTarget = false;
+            _state = State.IdleAtPost;
+            _nav?.Invalidate();
+            return false;
         }
 
         bool PatientAtCamp(WorkerRuntime wr)

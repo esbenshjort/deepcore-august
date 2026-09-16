@@ -100,6 +100,14 @@ namespace DeepCore.FreeMovement
         InfrastructureDebugOverlay _infraDebug;
         TunnelCollapseSystem _collapse;
         bool _devCollapsePanel;
+        RescueMission _activeRescue;
+        int _nextRescueMissionId = 1;
+        readonly WorkPriorityDirector _priorities = new();
+        int _prioUiSelectedWorkerId;
+        string _prioUiSelectedTaskId = WorkerGenericTaskIds.Rescue;
+        bool _devPriorityPanel;
+        string _prioHoverTaskTip;
+        string _prioHoverCellTip;
         Transform _trackRoot;
         DeliveryCalculator _calc;
         BasecampYard _yard;
@@ -804,6 +812,13 @@ namespace DeepCore.FreeMovement
                 _workerSteward,
             };
 
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                if (_crewWorkers[i] == null) continue;
+                WorkerPriorityPrefs.ApplyCrewDefaults(_crewWorkers[i], _crewWorkers[i].DisplayName);
+            }
+            _prioUiSelectedWorkerId = _workerLewis != null ? _workerLewis.WorkerId : 0;
+
             BindWorkerStateEventService();
 
             _prospector?.BindWorker(_workerLewis);
@@ -1185,8 +1200,12 @@ namespace DeepCore.FreeMovement
                 var wr = _crewWorkers[i];
                 if (wr == null) continue;
                 if (wr.CampBody != null
-                    && (wr.CampBody.InjuryReturnActive || wr.CampBody.ToiletTripActive))
+                    && (wr.CampBody.InjuryReturnActive || wr.CampBody.ToiletTripActive
+                        || wr.CampBody.RescueDutyActive || wr.CampBody.BeingRescued
+                        || wr.CampBody.RescueReturning || wr.CampBody.SeekingStewardCare
+                        || wr.CampBody.PriorityDutyActive))
                     continue;
+                if (wr.State != null && wr.State.Incapacitated) continue;
                 var L = _dayTracker.Get(wr.WorkerId);
                 if (L == null || !L.ArrivedWork) continue;
                 var asg = _assignments.GetAssignment(wr.WorkerId);
@@ -1463,6 +1482,12 @@ namespace DeepCore.FreeMovement
             if (!wr.IsAlive) return WorkerPhysicalState.Dead;
             if (wr.State != null && wr.State.Incapacitated)
                 return WorkerPhysicalState.Incapacitated;
+            if (PersonTaskAuthority(wr))
+            {
+                if (wr.CampBody != null && wr.CampBody.SeekingStewardCare)
+                    return WorkerPhysicalState.AtCamp;
+                return WorkerPhysicalState.Idle;
+            }
             switch (_crewPhase)
             {
                 case CrewPhase.HeadingHome: return WorkerPhysicalState.CommutingHome;
@@ -1482,6 +1507,18 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        /// <summary>
+        /// Person avatar is sole physical authority (not job host). Used by rescue / care / toilet.
+        /// </summary>
+        static bool PersonTaskAuthority(WorkerRuntime wr)
+        {
+            if (wr?.CampBody == null) return false;
+            var b = wr.CampBody;
+            return b.RescueDutyActive || b.BeingRescued || b.RescueReturning
+                   || b.InjuryReturnActive || b.ToiletTripActive
+                   || b.SeekingStewardCare || b.PriorityDutyActive;
+        }
+
         /// <summary>Assignment alone is not enough — person must be OnShift (or morning arrive), Operating, and arrived at work.</summary>
         bool CanPerformJobActions(WorkerRuntime wr)
         {
@@ -1489,6 +1526,10 @@ namespace DeepCore.FreeMovement
             if (_crewPhase != CrewPhase.OnShift && _crewPhase != CrewPhase.HeadingOut) return false;
             if (wr.State != null && wr.State.Incapacitated) return false;
             if (wr.CampBody != null && wr.CampBody.ToiletTripActive) return false;
+            if (wr.CampBody != null && wr.CampBody.RescueDutyActive) return false;
+            if (wr.CampBody != null && wr.CampBody.BeingRescued) return false;
+            if (wr.CampBody != null && wr.CampBody.RescueReturning) return false;
+            if (wr.CampBody != null && wr.CampBody.PriorityDutyActive) return false;
             // Care commute blocks work. Stale SeekingStewardCare after NeedsCare cleared must not soft-lock jobs.
             if (wr.CampBody != null && wr.CampBody.InjuryReturnActive) return false;
             if (wr.CampBody != null && wr.CampBody.SeekingStewardCare
@@ -2025,6 +2066,7 @@ namespace DeepCore.FreeMovement
             TickClock();
             TickCrewPhase();
             TickTunnelCollapse();
+            TickPrioritySystem();
 
             var kb = Keyboard.current;
             Vector2 wasd = Vector2.zero;
@@ -2179,17 +2221,20 @@ namespace DeepCore.FreeMovement
                     && CanPerformJobActions(ctl.Worker));
                 bool ToiletBusy(WorkerRuntime wr) =>
                     wr?.CampBody != null && wr.CampBody.ToiletTripActive;
-                // Excavation simulation: AssignedWorker + CanPerform — NOT SelectedJobIs / selection
+                // Excavation simulation: AssignedWorker + CanPerform + priority authority
                 if (!ToiletBusy(_worker?.AssignedWorker)
-                    && CanPerformJobActions(_worker?.AssignedWorker))
+                    && CanPerformJobActions(_worker?.AssignedWorker)
+                    && PriorityAllowsHostTick(_worker?.AssignedWorker, JobType.Excavation))
                     _worker.Tick(digWasd);
                 else if (_worker != null)
                     _worker.TickPassiveOnly();
                 if (!ToiletBusy(_prospector?.AssignedWorker)
-                    && CanPerformJobActions(_prospector?.AssignedWorker))
+                    && CanPerformJobActions(_prospector?.AssignedWorker)
+                    && PriorityAllowsHostTick(_prospector?.AssignedWorker, JobType.Prospecting))
                     _prospector?.Tick(prosWasd, prosPulse);
                 if (!ToiletBusy(_refiner?.AssignedWorker)
-                    && CanPerformJobActions(_refiner?.AssignedWorker))
+                    && CanPerformJobActions(_refiner?.AssignedWorker)
+                    && PriorityAllowsHostTick(_refiner?.AssignedWorker, JobType.Refining))
                     _refiner?.Tick(refWasd);
 
                 if (ctl.IsIdlePerson && GetPhysicalState(ctl.Worker) == WorkerPhysicalState.Idle
@@ -2197,15 +2242,18 @@ namespace DeepCore.FreeMovement
                     TickIdleAvatarMovement(ctl.Avatar, wasd);
 
                 if (!ToiletBusy(_hauler?.AssignedWorker)
-                    && CanPerformJobActions(_hauler?.AssignedWorker))
+                    && CanPerformJobActions(_hauler?.AssignedWorker)
+                    && PriorityAllowsHostTick(_hauler?.AssignedWorker, JobType.Hauling))
                     _hauler?.Tick();
                 float hoursNow = Time.deltaTime / SecondsPerGameHour;
                 _hauler?.SetGameHours(_absoluteGameHours);
                 if (!ToiletBusy(_engineer?.AssignedWorker)
-                    && CanPerformJobActions(_engineer?.AssignedWorker))
+                    && CanPerformJobActions(_engineer?.AssignedWorker)
+                    && PriorityAllowsHostTick(_engineer?.AssignedWorker, JobType.Engineering))
                     _engineer?.Tick(hoursNow, _absoluteGameHours);
                 if (!ToiletBusy(_steward?.AssignedWorker)
-                    && CanPerformJobActions(_steward?.AssignedWorker))
+                    && CanPerformJobActions(_steward?.AssignedWorker)
+                    && PriorityAllowsHostTick(_steward?.AssignedWorker, JobType.Steward))
                     _steward?.Tick(hoursNow, onShift: _crewPhase == CrewPhase.OnShift
                         || _crewPhase == CrewPhase.HeadingOut);
                 if (_engineer != null)
@@ -2564,6 +2612,12 @@ namespace DeepCore.FreeMovement
         Vector2 CrewWorldPos(WorkerRuntime wr)
         {
             if (wr == null) return BasecampPos;
+            // Person-task / incap: avatar is sole physical authority — never snap to host/machine
+            if ((wr.State != null && wr.State.Incapacitated) || PersonTaskAuthority(wr))
+            {
+                var avAuth = _presence.Get(wr.WorkerId);
+                return avAuth != null ? avAuth.PresencePosition : BasecampPos;
+            }
             // Prefer live host when operating; else avatar presence
             if (_crewPhase == CrewPhase.OnShift && wr.State != null && !wr.State.Incapacitated)
             {
@@ -2592,14 +2646,44 @@ namespace DeepCore.FreeMovement
             if (av != null)
             {
                 av.SetPresencePosition(pos);
+                av.ClearFollowing();
                 av.Show();
             }
-            // Keep excavator host with casualty if they're the excavator
+        }
+
+        /// <summary>Yield job host; person avatar becomes physical authority. Assignment reserved.</summary>
+        void LeaveHostForPersonTask(WorkerRuntime wr, string reason)
+        {
+            if (wr == null) return;
             var asg = _assignments.GetAssignment(wr.WorkerId);
-            if (asg != null && asg.JobType == JobType.Excavation && _worker != null
-                && wr.State != null && wr.State.Incapacitated)
+            var av = _presence.Get(wr.WorkerId);
+            if (asg != null && asg.JobType != JobType.Unassigned)
             {
-                // Machine stays — person avatar is what we move in rescue
+                YieldHost(asg.JobType);
+                PersistentWorkerBody.SetOperatorBodyVisibleForJob(
+                    asg.JobType, _worker, _prospector, _hauler, _refiner, _engineer, _steward, false);
+                if (av != null)
+                {
+                    if (PersistentWorkerBody.IsMachineCabinJob(asg.JobType) && _worker != null)
+                        ExcavatorCabin.Exit(av, _worker.Position);
+                    else
+                    {
+                        Vector2 exit = GetProviderExitPoint(asg.JobType);
+                        float d = Vector2.Distance(av.PresencePosition, exit);
+                        if (d > 0.85f)
+                            RelocateAvatar(av, exit, reason, "LeaveHostForPersonTask");
+                        else
+                            av.SetPresencePosition(exit);
+                        av.ClearFollowing();
+                        av.Show();
+                    }
+                    av.SetDevForceShowHidden(_devForceShowHiddenAvatars);
+                }
+            }
+            else if (av != null)
+            {
+                av.ClearFollowing();
+                av.Show();
             }
         }
 
@@ -2622,49 +2706,883 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        void TickPrioritySystem()
+        {
+            if (_crewWorkers == null || _crewPhase != CrewPhase.OnShift) return;
+            float hoursDelta = Time.deltaTime / SecondsPerGameHour;
+            _priorities.BindHosts(
+                _world, _collapse, _mineInfra, _worker, _hauler, _refiner, _engineer,
+                _prospector, _scanHistory != null ? _scanHistory.Analyst : null,
+                _steward, _campLife, _crewWorkers, CrewWorldPos, BasecampPos);
+
+            // Continuous active-task validation (OFF / unavailable must stop voluntary work)
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null) continue;
+                bool incap = wr.State != null && wr.State.Incapacitated;
+                if (!wr.IsAlive || incap)
+                {
+                    ReleaseUnavailableWorkerClaims(wr, incap ? "incapacitated" : "worker dead");
+                    continue;
+                }
+                if (wr.Priorities == null) continue;
+                if (_priorities.InvalidateActiveIfNeeded(wr))
+                    TemporaryYieldHostForPriority(wr, "priority invalidate");
+                else
+                    TemporaryYieldHostForPriority(wr, "priority host gate");
+            }
+
+            bool eval = _priorities.ShouldEvaluate(hoursDelta, _crewWorkers);
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null || !wr.IsAlive) continue;
+                if (wr.Priorities == null)
+                {
+                    wr.Priorities = new WorkerPriorityPrefs();
+                    WorkerPriorityPrefs.ApplyCrewDefaults(wr, wr.DisplayName);
+                }
+
+                // Accrue only while actually performing the active task (not idle on station)
+                if (!WorkPriorityResolver.IsHardBlocked(wr, out _)
+                    && !string.IsNullOrEmpty(wr.Priorities.ActiveTaskId)
+                    && !wr.Priorities.IsOff(wr.Priorities.ActiveTaskId)
+                    && IsActuallyPerformingPriorityTask(wr, wr.Priorities.ActiveTaskId))
+                {
+                    _priorities.AccrueActive(wr, hoursDelta);
+                }
+
+                if (wr.CampBody != null && wr.CampBody.PriorityDutyActive)
+                {
+                    string duty = wr.Priorities.ActiveTaskId ?? "";
+                    if (!string.IsNullOrEmpty(duty) && wr.Priorities.IsOff(duty))
+                    {
+                        wr.CampBody.PriorityDutyActive = false;
+                        wr.CampBody.RescueReturning = true;
+                        wr.Priorities.ClearActiveTask("priority OFF");
+                    }
+                    else
+                        TickPriorityDutyLifecycle(wr);
+                }
+
+                if (!eval) continue;
+                if (WorkPriorityResolver.IsHardBlocked(wr, out string block))
+                {
+                    wr.Priorities.LastUnavailableReason = block;
+                    wr.Priorities.ResolverDirty = false;
+                    continue;
+                }
+
+                var job = GetAssignmentJob(wr);
+                var result = _priorities.ResolveFor(
+                    wr, job, CrewWorldPos(wr), _absoluteGameHours, emergencyOk: true);
+                _priorities.ApplyResolve(wr, result, _absoluteGameHours);
+                SyncHostToActivePriorityTask(wr);
+
+                if (string.IsNullOrEmpty(result.TaskId)) continue;
+
+                // Dispatch side-effects (existing systems)
+                DispatchPriorityTask(wr, result.TaskId, hoursDelta);
+            }
+
+            if (eval)
+                TryClaimStationsByPriority();
+        }
+
+        /// <summary>
+        /// Persistent assignment stays. Yield execution only when priority forbids this host tick.
+        /// Never TryUnassignJob from priority paths.
+        /// </summary>
+        void TemporaryYieldHostForPriority(WorkerRuntime wr, string reason)
+        {
+            if (wr == null) return;
+            var job = GetAssignmentJob(wr);
+            if (job == JobType.Unassigned) return;
+            if (WorkPriorityResolver.HostAllowsVoluntaryWork(wr, job)) return;
+            // Already yielded (body vacant) — keep assignment
+            if (!ReferenceEquals(GetBodyAssignedWorker(job), wr)) return;
+            LeaveHostForPersonTask(wr, reason);
+            if (wr.Priorities != null)
+                wr.Priorities.LastHostYieldedForOff = true;
+        }
+
+        /// <summary>
+        /// Match host execution to ActiveTask without destroying persistent JobType assignment.
+        /// Cross-station work uses soft claim (TryClaimStations) or person duty — not Unassign.
+        /// </summary>
+        void SyncHostToActivePriorityTask(WorkerRuntime wr)
+        {
+            if (wr?.Priorities == null) return;
+            if (wr.CampBody != null
+                && (wr.CampBody.RescueDutyActive || wr.CampBody.BeingRescued
+                    || wr.CampBody.PriorityDutyActive))
+                return;
+
+            var have = GetAssignmentJob(wr);
+            if (have == JobType.Unassigned) return; // do not invent specialization here
+
+            string active = wr.Priorities.ActiveTaskId ?? "";
+            var want = WorkPriorityResolver.StationJobForTask(active);
+
+            // Priority forbids running home host right now → temporary yield only
+            if (!WorkPriorityResolver.HostAllowsVoluntaryWork(wr, have))
+            {
+                TemporaryYieldHostForPriority(wr, "sync yield " + active);
+                // Soft claim may later TryAssignJob to want (exclusive station) — that is
+                // an explicit reassignment, not a blanket Unassign-to-none.
+                return;
+            }
+
+            // Allowed on home station — rebind if previously yielded and seat is free
+            if (ReferenceEquals(GetBodyAssignedWorker(have), wr)) return;
+            if (GetBodyAssignedWorker(have) != null) return;
+            BindHost(have, wr);
+            NotifyProviderAssigned(have, wr);
+            var av = _presence.Get(wr.WorkerId);
+            if (av != null)
+                SeatAvatarAtWork(wr, av);
+            if (wr.CampBody != null)
+                wr.CampBody.RescueReturning = false;
+        }
+
+        /// <summary>
+        /// Specialization host may tick only if priority authority allows voluntary work.
+        /// </summary>
+        bool PriorityAllowsHostTick(WorkerRuntime wr, JobType job) =>
+            wr != null && WorkPriorityResolver.HostAllowsVoluntaryWork(wr, job);
+
+        /// <summary>Dead/incap workers must not hold exclusive station claims.</summary>
+        void ReleaseUnavailableWorkerClaims(WorkerRuntime wr, string reason)
+        {
+            if (wr == null) return;
+            if (wr.Priorities != null && !string.IsNullOrEmpty(wr.Priorities.ActiveTaskId))
+                wr.Priorities.ClearActiveTask(reason);
+            var job = GetAssignmentJob(wr);
+            if (job != JobType.Unassigned)
+                TryUnassignJob(job, out _);
+            if (wr.CampBody != null)
+            {
+                if (wr.CampBody.RescueDutyActive)
+                    AbortRescueMission(reason);
+                wr.CampBody.PriorityDutyActive = false;
+                wr.CampBody.RescueDutyActive = false;
+            }
+            _priorities.RequestImmediateEval();
+        }
+
+        /// <summary>
+        /// Hour targets accrue only during real performance — not while assigned but idle.
+        /// </summary>
+        bool IsActuallyPerformingPriorityTask(WorkerRuntime wr, string taskId)
+        {
+            if (wr == null || string.IsNullOrEmpty(taskId)) return false;
+            if (taskId == WorkerGenericTaskIds.Rescue)
+                return wr.CampBody != null && wr.CampBody.RescueDutyActive;
+            if (taskId == WorkerGenericTaskIds.ClearDebris)
+            {
+                if (!CanPerformJobActions(wr)
+                    && (wr.CampBody == null || !wr.CampBody.PriorityDutyActive))
+                    return false;
+                Vector2 pos = CrewWorldPos(wr);
+                var field = _collapse?.FindNearestClearable(pos, 2.6f);
+                // Accrue only while at debris — not while walking PriorityDuty
+                return field != null && Vector2.Distance(pos, field.Epicenter) <= 2.6f;
+            }
+            if (taskId == WorkerGenericTaskIds.TreatInjuries)
+            {
+                if (Vector2.Distance(CrewWorldPos(wr), BasecampPos) > 5.5f) return false;
+                for (int i = 0; _crewWorkers != null && i < _crewWorkers.Length; i++)
+                {
+                    var p = _crewWorkers[i];
+                    if (p?.State != null && p.State.NeedsCare && !p.State.Incapacitated)
+                        return true;
+                }
+                return false;
+            }
+
+            if (!CanPerformJobActions(wr)) return false;
+            var job = GetAssignmentJob(wr);
+            var station = WorkPriorityResolver.StationJobForTask(taskId);
+            if (station != JobType.Unassigned && job != station) return false;
+
+            switch (taskId)
+            {
+                case WorkerGenericTaskIds.Excavate:
+                    // Dig time only — not idle on machine with paint pending
+                    return _worker != null && _worker.IsActivelyDigging;
+                case WorkerGenericTaskIds.HaulMaterials:
+                    if (_hauler == null) return false;
+                    string hl = _hauler.ActivityLabel ?? "";
+                    // Not SEEK travel — only load / haul / unload
+                    return (hl.IndexOf("LOADING", System.StringComparison.OrdinalIgnoreCase) >= 0
+                            || hl.IndexOf("HAUL", System.StringComparison.OrdinalIgnoreCase) >= 0
+                            || hl.IndexOf("UNLOAD", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                           && (LoosePile.LiveCount > 0 || _hauler.CargoCount > 0);
+                case WorkerGenericTaskIds.RefineOre:
+                    if (_refiner == null) return false;
+                    string rl = _refiner.ActivityLabel ?? "";
+                    // Wash / carry work — not idle fetch travel alone
+                    return rl.IndexOf("WASH", System.StringComparison.OrdinalIgnoreCase) >= 0
+                           || rl.IndexOf("CARRY", System.StringComparison.OrdinalIgnoreCase) >= 0
+                           || rl.IndexOf("UNLOAD", System.StringComparison.OrdinalIgnoreCase) >= 0;
+                case WorkerGenericTaskIds.Prospect:
+                    return _prospector != null
+                           && (_prospector.WorkMode != ProspectorWorkMode.Manual
+                               || _prospector.HasScannerAssignment
+                               || _prospector.IsSettingUpScanner);
+                case WorkerGenericTaskIds.AnalyseSurvey:
+                    return _scanHistory != null && _scanHistory.Analyst != null
+                           && _scanHistory.Analyst.HasWork;
+                case WorkerGenericTaskIds.InstallSupports:
+                    return _engineer != null
+                           && _engineer.WorkKind == EngineerWorkKind.BuildingSupport;
+                case WorkerGenericTaskIds.InstallLighting:
+                    return _engineer != null
+                           && _engineer.WorkKind == EngineerWorkKind.InstallingLantern;
+                case WorkerGenericTaskIds.RepairEquipment:
+                    return _engineer != null && _engineer.IsRepairing;
+                case WorkerGenericTaskIds.PrepareMeals:
+                case WorkerGenericTaskIds.CleanCamp:
+                case WorkerGenericTaskIds.TendCampSystems:
+                    return _steward != null && _steward.WorkKind != StewardWorkKind.Idle
+                           && _steward.WorkKind != StewardWorkKind.TendingWounds;
+                default:
+                    return false;
+            }
+        }
+
+        void TickPriorityDutyLifecycle(WorkerRuntime wr)
+        {
+            if (wr?.CampBody == null || !wr.CampBody.PriorityDutyActive) return;
+            string active = wr.Priorities != null ? wr.Priorities.ActiveTaskId : "";
+            if (active == WorkerGenericTaskIds.ClearDebris)
+            {
+                var field = _collapse?.FindNearestClearable(CrewWorldPos(wr), 3.5f);
+                if (field == null)
+                {
+                    wr.CampBody.PriorityDutyActive = false;
+                    wr.CampBody.RescueReturning = true;
+                    DigHoodLog.Push($"PRIORITY | {wr.DisplayName} clear-debris duty ended — returning");
+                }
+                return;
+            }
+            if (active == WorkerGenericTaskIds.TreatInjuries)
+            {
+                if (Vector2.Distance(CrewWorldPos(wr), BasecampPos) <= 5.5f)
+                {
+                    // Stay at camp while treating; release when no patients
+                    bool any = false;
+                    for (int i = 0; _crewWorkers != null && i < _crewWorkers.Length; i++)
+                    {
+                        var p = _crewWorkers[i];
+                        if (p?.State != null && p.State.NeedsCare && !p.State.Incapacitated)
+                            any = true;
+                    }
+                    if (!any)
+                    {
+                        wr.CampBody.PriorityDutyActive = false;
+                        wr.CampBody.RescueReturning = true;
+                    }
+                }
+                return;
+            }
+            // Other priority duties: release when active task is a station job again
+            if (WorkPriorityResolver.StationJobForTask(active) != JobType.Unassigned
+                || string.IsNullOrEmpty(active))
+            {
+                wr.CampBody.PriorityDutyActive = false;
+                wr.CampBody.RescueReturning = true;
+            }
+        }
+
+        void DispatchPriorityTask(WorkerRuntime wr, string taskId, float hoursDelta)
+        {
+            if (wr == null || string.IsNullOrEmpty(taskId)) return;
+
+            // Rescue — existing universal rescue accepts via PickUniversalRescuer (respects OFF)
+            if (taskId == WorkerGenericTaskIds.Rescue)
+                return;
+
+            // Clear debris — any eligible worker near field (not JobType-locked)
+            if (taskId == WorkerGenericTaskIds.ClearDebris && _collapse != null)
+            {
+                if (!CanPerformJobActions(wr) && (wr.CampBody == null || !wr.CampBody.PriorityDutyActive))
+                    return;
+                Vector2 pos = CrewWorldPos(wr);
+                var field = _collapse.FindNearestClearable(pos, 2.6f);
+                if (field == null || !_collapse.CanClearDebris(wr, asExcavator: false)) return;
+                if (!_collapse.IsReachableFromCamp(pos) && !_collapse.HasOpenTunnelPath(pos, field.Epicenter))
+                    return;
+                // If on specialization host far from debris, leave for person clear duty
+                if (CanPerformJobActions(wr) && Vector2.Distance(pos, field.Epicenter) > 2.6f)
+                {
+                    // Walk as person toward debris
+                    BeginPriorityDuty(wr, taskId);
+                    return;
+                }
+                if (wr.CampBody != null && wr.CampBody.PriorityDutyActive)
+                {
+                    var av = _presence.Get(wr.WorkerId);
+                    int idx = CrewRosterIndex(wr);
+                    if (av != null && idx >= 0)
+                        TryStepRescueAvatar(idx, av, field.Epicenter, 0.9f);
+                    pos = CrewWorldPos(wr);
+                    field = _collapse.FindNearestClearable(pos, 2.6f);
+                }
+                if (field != null && Vector2.Distance(CrewWorldPos(wr), field.Epicenter) <= 2.6f)
+                {
+                    _collapse.TickClearance(field, wr, hoursDelta * 0.85f, asExcavator: false, out _);
+                    _collapse.RefreshTrappedFlags(_crewWorkers, CrewWorldPos);
+                }
+                return;
+            }
+
+            // Treat injuries at camp — StewardWoundCare (any worker with Treat priority)
+            if (taskId == WorkerGenericTaskIds.TreatInjuries)
+            {
+                if (Vector2.Distance(CrewWorldPos(wr), BasecampPos) > 5.5f)
+                {
+                    BeginPriorityDuty(wr, taskId);
+                    var av = _presence.Get(wr.WorkerId);
+                    int idx = CrewRosterIndex(wr);
+                    if (av != null && idx >= 0)
+                        TryStepRescueAvatar(idx, av, CampNavDestination, 0.95f);
+                    return;
+                }
+                // Tend nearest NeedsCare patient
+                WorkerRuntime patient = null;
+                for (int i = 0; i < _crewWorkers.Length; i++)
+                {
+                    var p = _crewWorkers[i];
+                    if (p == null || p.WorkerId == wr.WorkerId || !p.IsAlive) continue;
+                    if (p.State != null && p.State.Incapacitated) continue;
+                    if (p.State == null || !p.State.NeedsCare) continue;
+                    patient = p;
+                    break;
+                }
+                if (patient != null)
+                {
+                    SocialMemoryStore mem = _socialAura != null && _socialAura.IsBootstrapped
+                        ? _socialAura.Memory : null;
+                    if (StewardWoundCare.TryTend(wr, patient, out string res, mem, _absoluteGameHours)
+                        && Time.frameCount % 90 == 0)
+                        DigHoodLog.Push($"TREAT | {wr.DisplayName}: {res} → {patient.DisplayName}");
+                }
+            }
+        }
+
+        void BeginPriorityDuty(WorkerRuntime wr, string taskId)
+        {
+            if (wr?.CampBody == null) return;
+            if (wr.CampBody.PriorityDutyActive) return;
+            if (wr.CampBody.RescueDutyActive) return;
+            LeaveHostForPersonTask(wr, "priority duty " + taskId);
+            wr.CampBody.PriorityDutyActive = true;
+            if (wr.Priorities != null)
+            {
+                wr.Priorities.ActiveTaskId = taskId;
+                wr.Priorities.ActiveTaskStartedGameHours = _absoluteGameHours;
+            }
+        }
+
+        void EndPriorityDutyIfIdle(WorkerRuntime wr)
+        {
+            if (wr?.CampBody == null || !wr.CampBody.PriorityDutyActive) return;
+            // Return when active task is station work again or empty
+            string active = wr.Priorities != null ? wr.Priorities.ActiveTaskId : "";
+            var station = WorkPriorityResolver.StationJobForTask(active);
+            if (station != JobType.Unassigned || string.IsNullOrEmpty(active)
+                || active == WorkerGenericTaskIds.Rescue)
+            {
+                wr.CampBody.PriorityDutyActive = false;
+                wr.CampBody.RescueReturning = true;
+            }
+        }
+
+        /// <summary>
+        /// Soft station claim: if exclusive host work exists, prefer highest-priority eligible worker.
+        /// Anti-thrash via MinCommit on ActiveTaskStartedGameHours.
+        /// </summary>
+        void TryClaimStationsByPriority()
+        {
+            if (_crewWorkers == null || _assignments == null) return;
+            TryClaimStation(JobType.Excavation, WorkerGenericTaskIds.Excavate);
+            TryClaimStation(JobType.Hauling, WorkerGenericTaskIds.HaulMaterials);
+            TryClaimStation(JobType.Refining, WorkerGenericTaskIds.RefineOre);
+            TryClaimStation(JobType.Prospecting, WorkerGenericTaskIds.Prospect);
+            TryClaimStation(JobType.Engineering, WorkerGenericTaskIds.InstallSupports);
+            TryClaimStation(JobType.Steward, WorkerGenericTaskIds.TreatInjuries);
+        }
+
+        void TryClaimStation(JobType stationJob, string primaryTaskId)
+        {
+            var avail = _priorities.Context.Probe(primaryTaskId);
+            // Engineering: also lighting/repair
+            if (stationJob == JobType.Engineering && !avail.Available)
+            {
+                avail = _priorities.Context.Probe(WorkerGenericTaskIds.InstallLighting);
+                if (!avail.Available)
+                    avail = _priorities.Context.Probe(WorkerGenericTaskIds.RepairEquipment);
+            }
+            if (stationJob == JobType.Prospecting && !avail.Available)
+                avail = _priorities.Context.Probe(WorkerGenericTaskIds.AnalyseSurvey);
+            if (stationJob == JobType.Steward && !avail.Available)
+            {
+                avail = _priorities.Context.Probe(WorkerGenericTaskIds.PrepareMeals);
+                if (!avail.Available)
+                    avail = _priorities.Context.Probe(WorkerGenericTaskIds.CleanCamp);
+            }
+            if (!avail.Available) return;
+
+            int currentId = _assignments.GetWorkerIdForJob(stationJob);
+            WorkerRuntime best = null;
+            float bestScore = -1f;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null || !wr.IsAlive) continue;
+                if (WorkPriorityResolver.IsHardBlocked(wr, out _)) continue;
+                if (wr.Priorities != null && wr.Priorities.IsOff(primaryTaskId)
+                    && stationJob != JobType.Engineering && stationJob != JobType.Steward
+                    && stationJob != JobType.Prospecting)
+                    continue;
+                // Must not be OFF for at least one relevant task
+                if (wr.Priorities != null)
+                {
+                    bool any = !wr.Priorities.IsOff(primaryTaskId);
+                    if (stationJob == JobType.Engineering)
+                        any = any || !wr.Priorities.IsOff(WorkerGenericTaskIds.InstallLighting)
+                              || !wr.Priorities.IsOff(WorkerGenericTaskIds.RepairEquipment);
+                    if (stationJob == JobType.Prospecting)
+                        any = any || !wr.Priorities.IsOff(WorkerGenericTaskIds.AnalyseSurvey);
+                    if (stationJob == JobType.Steward)
+                        any = any || !wr.Priorities.IsOff(WorkerGenericTaskIds.PrepareMeals)
+                              || !wr.Priorities.IsOff(WorkerGenericTaskIds.CleanCamp)
+                              || !wr.Priorities.IsOff(WorkerGenericTaskIds.TreatInjuries);
+                    if (!any) continue;
+                }
+
+                var job = GetAssignmentJob(wr);
+                var res = _priorities.ResolveFor(
+                    wr, job, CrewWorldPos(wr), _absoluteGameHours, true);
+                // Hard rule: only workers whose winning resolve wants this station
+                if (WorkPriorityResolver.StationJobForTask(res.TaskId) != stationJob)
+                    continue;
+
+                // Band-first score, then soft factors — never let P2 beat P1 for the seat
+                float score = (5 - (int)wr.Priorities.GetPriority(primaryTaskId)) * 1000f
+                              + WorkPriorityResolver.Suitability01(
+                                  wr, WorkTaskRegistry.Get(primaryTaskId), job) * 20f
+                              + wr.Priorities.TargetDeficit(primaryTaskId) * 15f;
+                if (wr.WorkerId == currentId) score += 25f; // same-band continuity
+                if (score > bestScore) { bestScore = score; best = wr; }
+            }
+
+            if (best == null) return;
+            if (best.WorkerId == currentId) return;
+            // Only fill vacant exclusive seats. Stealing via TryAssignJob Unassigns the
+            // previous specialist (→ "Unassigned · …"). Soft claim must not do that.
+            // Higher-band workers yield their home host via TemporaryYieldHostForPriority
+            // and wait for a free seat / player reassignment.
+            if (currentId > 0)
+            {
+                var cur = FindCrewWorker(currentId);
+                if (cur != null && cur.IsAlive) return;
+            }
+
+            if (!TryAssignJob(best, stationJob, out string reason))
+            {
+                if (DevMode.Enabled && Time.frameCount % 180 == 0)
+                    DigHoodLog.Push($"PRIORITY | claim {stationJob} → {best.DisplayName} failed: {reason}");
+                return;
+            }
+            DigHoodLog.Push($"PRIORITY | {best.DisplayName} claimed {stationJob} for {primaryTaskId}");
+        }
+
+
         void TickDebrisClearanceAndRescue(float hoursDelta, SocialMemoryStore mem)
         {
             if (_collapse == null || _crewWorkers == null) return;
 
-            // Hauler auto-clear when near debris and on shift
+            // Hauler auto-clear when near debris — only if Clear Debris not OFF
             if (_hauler != null && CanPerformJobActions(_hauler.AssignedWorker))
             {
                 var hWr = _hauler.AssignedWorker;
+                if (hWr.Priorities == null || !hWr.Priorities.IsOff(WorkerGenericTaskIds.ClearDebris))
+                {
                 Vector2 hPos = _hauler.transform.localPosition;
                 var field = _collapse.FindNearestClearable(hPos, 2.4f);
                 if (field != null && _collapse.CanClearDebris(hWr, asExcavator: false)
                     && _collapse.IsReachableFromCamp(hPos))
                 {
-                    // Only clear from accessible (camp) side
                     if (_collapse.TickClearance(field, hWr, hoursDelta * 0.85f, asExcavator: false, out string st))
                         DigHoodLog.Push($"HAULER | {st}");
                     else if (!string.IsNullOrEmpty(st) && Time.frameCount % 90 == 0)
                         DigHoodLog.Push($"HAULER | {st}");
                 }
-            }
-
-            // Rescue: hauler or engineer reaches incapacitated
-            var casualty = _collapse.FindIncapacitatedNeedingRescue(_crewWorkers, CrewWorldPos);
-            if (casualty != null)
-            {
-                WorkerRuntime rescuer = null;
-                if (_hauler != null && CanPerformJobActions(_hauler.AssignedWorker))
-                    rescuer = _hauler.AssignedWorker;
-                else if (_engineer != null && CanPerformJobActions(_engineer.AssignedWorker))
-                    rescuer = _engineer.AssignedWorker;
-
-                if (rescuer != null
-                    && _collapse.IsReachableFromCamp(CrewWorldPos(rescuer))
-                    && Vector2.Distance(CrewWorldPos(rescuer), CrewWorldPos(casualty)) < 8f)
-                {
-                    _collapse.TryRescueTick(
-                        rescuer, casualty, hoursDelta, CrewWorldPos, SetCrewWorldPos, mem, out string rst);
-                    if (!string.IsNullOrEmpty(rst) && Time.frameCount % 60 == 0)
-                        DigHoodLog.Push($"RESCUE | {rst}");
                 }
             }
 
+            TickUniversalRescue(hoursDelta, mem);
+            TickRescueReturning(hoursDelta);
             _collapse.RefreshTrappedFlags(_crewWorkers, CrewWorldPos);
+        }
+
+        void TickUniversalRescue(float hoursDelta, SocialMemoryStore mem)
+        {
+            if (_collapse == null || _crewWorkers == null) return;
+            EnsurePersonNav();
+
+            // Drop stale mission
+            if (_activeRescue != null)
+            {
+                var r = FindCrewWorker(_activeRescue.RescuerId);
+                var c = FindCrewWorker(_activeRescue.CasualtyId);
+                if (r == null || c == null || !r.IsAlive || !c.IsAlive
+                    || (c.State != null && !c.State.Incapacitated
+                        && (c.CampBody == null || !c.CampBody.BeingRescued)))
+                {
+                    AbortRescueMission("casualty recovered or invalid");
+                }
+                else if (r.Priorities != null && r.Priorities.IsOff(WorkerGenericTaskIds.Rescue))
+                {
+                    // Voluntary Rescue OFF aborts mid-mission (hard casualty state remains)
+                    if (r.Priorities != null)
+                        r.Priorities.ClearActiveTask("priority OFF");
+                    AbortRescueMission("rescuer Rescue priority OFF");
+                }
+            }
+
+            if (_activeRescue == null)
+            {
+                var casualty = _collapse.FindIncapacitatedNeedingRescue(_crewWorkers, CrewWorldPos);
+                if (casualty == null || !WorkerRescue.NeedsRescue(casualty)) return;
+                if (casualty.CampBody != null && casualty.CampBody.BeingRescued) return;
+
+                var rescuer = PickUniversalRescuer(casualty);
+                if (rescuer == null) return;
+                BeginUniversalRescue(rescuer, casualty);
+            }
+
+            if (_activeRescue == null) return;
+            var rescuerWr = FindCrewWorker(_activeRescue.RescuerId);
+            var casualtyWr = FindCrewWorker(_activeRescue.CasualtyId);
+            if (rescuerWr == null || casualtyWr == null) return;
+
+            int rIdx = CrewRosterIndex(rescuerWr);
+            var rAv = _presence.Get(rescuerWr.WorkerId);
+            var cAv = _presence.Get(casualtyWr.WorkerId);
+            if (rAv == null || cAv == null) return;
+
+            Vector2 rPos = rAv.PresencePosition;
+            Vector2 cPos = cAv.PresencePosition;
+            bool pathOpen = _collapse.HasOpenTunnelPath(rPos, cPos);
+
+            switch (_activeRescue.Phase)
+            {
+                case RescueMissionPhase.Approach:
+                {
+                    if (!pathOpen)
+                    {
+                        _activeRescue.LastStatus = "ACCESS BLOCKED";
+                        if (Time.frameCount % 120 == 0)
+                            DigHoodLog.Push(
+                                $"RESCUE | {rescuerWr.DisplayName} — ACCESS BLOCKED (no walk through debris)");
+                        // Path as far as open tunnel allows toward casualty (no teleport)
+                        TryStepRescueAvatar(rIdx, rAv, cPos,
+                            WorkerRescue.ApproachSpeedMul(rescuerWr) * 0.55f);
+                        break;
+                    }
+
+                    float arrive = 0.55f;
+                    if ((cPos - rPos).sqrMagnitude <= arrive * arrive)
+                    {
+                        _activeRescue.Phase = RescueMissionPhase.Assist;
+                        _activeRescue.AssistHoursLeft = WorkerRescue.AssistDurationHours(rescuerWr);
+                        _activeRescue.LastStatus = $"ASSIST {casualtyWr.DisplayName}";
+                        DigHoodLog.Push(
+                            $"RESCUE | {rescuerWr.DisplayName} reached {casualtyWr.DisplayName} — assisting");
+                        break;
+                    }
+
+                    float spdMul = WorkerRescue.ApproachSpeedMul(rescuerWr);
+                    TryStepRescueAvatar(rIdx, rAv, cPos, spdMul);
+                    rescuerWr.State.SpendStamina(
+                        WorkerRescue.StaminaTaxPerGameHour(rescuerWr, false) * hoursDelta * 10f);
+                    _activeRescue.LastStatus = $"REACHING {casualtyWr.DisplayName}";
+                    break;
+                }
+                case RescueMissionPhase.Assist:
+                {
+                    if (!pathOpen)
+                    {
+                        _activeRescue.LastStatus = "ACCESS BLOCKED";
+                        break;
+                    }
+                    _activeRescue.AssistHoursLeft -= hoursDelta;
+                    rescuerWr.State.SpendStamina(
+                        WorkerRescue.StaminaTaxPerGameHour(rescuerWr, false) * hoursDelta * 10f);
+                    // Empathy/composure: slight frustration relief for casualty while assisted
+                    float emp = rescuerWr.Stats.Get(WorkerStatId.Empathy) / 20f;
+                    casualtyWr.State.Frustration = Mathf.Max(0f,
+                        casualtyWr.State.Frustration - hoursDelta * (1.2f + emp * 2f));
+                    _activeRescue.LastStatus = $"ASSIST {casualtyWr.DisplayName}";
+                    if (_activeRescue.AssistHoursLeft <= 0f)
+                    {
+                        _activeRescue.Phase = RescueMissionPhase.Carry;
+                        DigHoodLog.Push(
+                            $"RESCUE | {rescuerWr.DisplayName} carrying {casualtyWr.DisplayName} → camp");
+                    }
+                    break;
+                }
+                case RescueMissionPhase.Carry:
+                {
+                    Vector2 door = CampNavDestination;
+                    bool pathToCamp = _collapse.HasOpenTunnelPath(rPos, door)
+                                     || _collapse.IsReachableFromCamp(rPos);
+                    if (!pathToCamp)
+                    {
+                        _activeRescue.LastStatus = "ACCESS BLOCKED";
+                        if (Time.frameCount % 120 == 0)
+                            DigHoodLog.Push($"RESCUE | CARRY BLOCKED — clear debris first");
+                        break;
+                    }
+                    if (!pathOpen && Vector2.Distance(rPos, cPos) > 0.7f)
+                    {
+                        // Stay with casualty — do not leave them behind through solid rubble
+                        _activeRescue.LastStatus = "ACCESS BLOCKED";
+                        break;
+                    }
+
+                    float carryMul = WorkerRescue.CarrySpeedMul(rescuerWr);
+                    // Move rescuer toward camp; casualty stays with rescuer (no teleport)
+                    TryStepRescueAvatar(rIdx, rAv, door, carryMul);
+                    Vector2 after = rAv.PresencePosition;
+                    cAv.SetPresencePosition(after + (cPos - rPos).normalized * 0.12f);
+                    cAv.ClearFollowing();
+                    cAv.Show();
+
+                    rescuerWr.State.SpendStamina(
+                        WorkerRescue.StaminaTaxPerGameHour(rescuerWr, true) * hoursDelta * 10f);
+                    rescuerWr.State.AddFrustration(hoursDelta * 1.5f);
+                    _activeRescue.LastStatus = $"CARRY {casualtyWr.DisplayName}";
+
+                    float arriveCamp = 1.35f;
+                    if ((door - after).sqrMagnitude <= arriveCamp * arriveCamp
+                        || Vector2.Distance(after, BasecampPos) < 2.2f)
+                    {
+                        CompleteUniversalRescue(rescuerWr, casualtyWr, mem);
+                    }
+                    break;
+                }
+            }
+
+            if (_activeRescue != null && !string.IsNullOrEmpty(_activeRescue.LastStatus)
+                && Time.frameCount % 60 == 0)
+                DigHoodLog.Push($"RESCUE | {_activeRescue.LastStatus}");
+        }
+
+        void TryStepRescueAvatar(int rosterIndex, WorkerAvatar avatar, Vector2 target, float speedMul)
+        {
+            if (avatar == null || _world == null) return;
+            if (rosterIndex < 0 || rosterIndex >= _personNav.Length) return;
+            float speed = WorkerLocomotion.WalkSpeedAt(
+                FindCrewWorker(avatar.WorkerId), _world, avatar.PresencePosition,
+                AvatarCommuteRadius, roleBias: 1f, carriedLoad01: speedMul < 0.5f ? 0.55f : 0.15f,
+                isMoving: true) * Mathf.Max(0.35f, speedMul);
+            if (_personNav[rosterIndex] == null) return;
+            _personNav[rosterIndex].CampReturnMode = false;
+            _personNav[rosterIndex].Follow(
+                avatar.PresencePosition,
+                target,
+                speed,
+                AvatarCommuteRadius,
+                face: _ => { },
+                tryStep: (dir, step) => PersonAvatarTryStep(avatar, dir, step));
+        }
+
+        WorkerRuntime PickUniversalRescuer(WorkerRuntime casualty)
+        {
+            if (casualty == null || _crewWorkers == null) return null;
+            Vector2 cPos = CrewWorldPos(casualty);
+            WorkerRuntime best = null;
+            float bestScore = -1f;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr == null || wr.WorkerId == casualty.WorkerId) continue;
+                if (!WorkerRescue.CanAcceptRescueDuty(wr)) continue;
+                if (wr.Priorities != null && wr.Priorities.IsOff(WorkerGenericTaskIds.Rescue))
+                    continue;
+                // Must be on shift and arrived (same gate as work — not JobType)
+                if (_crewPhase != CrewPhase.OnShift && _crewPhase != CrewPhase.HeadingOut)
+                    continue;
+                var L = _dayTracker.Get(wr.WorkerId);
+                if (L == null || !L.ArrivedWork) continue;
+                // Seeking care at camp: Kit may still leave to rescue
+                if (wr.CampBody != null && wr.CampBody.SeekingStewardCare
+                    && wr.State != null && wr.State.NeedsCare
+                    && wr.WorkerId != (_workerSteward != null ? _workerSteward.WorkerId : -1))
+                    continue;
+
+                Vector2 rPos = CrewWorldPos(wr);
+                // Rescuer cut off from camp AND no path to casualty → cannot help yet
+                bool pathCas = _collapse != null && _collapse.HasOpenTunnelPath(rPos, cPos);
+                if (!pathCas && _collapse != null && !_collapse.IsReachableFromCamp(rPos))
+                    continue;
+
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                var job = asg != null ? asg.JobType : JobType.Unassigned;
+                float score = WorkerRescue.ScoreCandidate(wr, job, rPos, cPos, pathCas);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = wr;
+                }
+            }
+            return best;
+        }
+
+        void BeginUniversalRescue(WorkerRuntime rescuer, WorkerRuntime casualty)
+        {
+            if (rescuer == null || casualty == null) return;
+
+            // Casualty: yield host so dig/haul does not continue while body lies injured
+            LeaveHostForPersonTask(casualty, "rescue casualty leave host");
+            if (casualty.CampBody != null)
+            {
+                casualty.CampBody.BeingRescued = true;
+                casualty.CampBody.InjuryReturnActive = false;
+            }
+
+            LeaveHostForPersonTask(rescuer, "rescue duty leave host");
+            if (rescuer.CampBody != null)
+            {
+                rescuer.CampBody.RescueDutyActive = true;
+                rescuer.CampBody.RescueReturning = false;
+                rescuer.CampBody.SeekingStewardCare = false;
+            }
+
+            _activeRescue = new RescueMission
+            {
+                MissionId = _nextRescueMissionId++,
+                RescuerId = rescuer.WorkerId,
+                CasualtyId = casualty.WorkerId,
+                Phase = RescueMissionPhase.Approach,
+                AssistHoursLeft = WorkerRescue.AssistDurationHours(rescuer),
+                StartedGameHours = _absoluteGameHours,
+                LastStatus = $"RESCUE → {casualty.DisplayName}",
+            };
+            _activeRescue.ContributorIds.Add(rescuer.WorkerId);
+
+            DigHoodLog.Push(
+                $"RESCUE | {rescuer.DisplayName} accepted {WorkerRescue.TaskId} for {casualty.DisplayName} "
+                + $"(job was {GetAssignmentJob(rescuer)} — specialization yielded, not permission)");
+            if (rescuer.Priorities != null)
+            {
+                rescuer.Priorities.ActiveTaskId = WorkerGenericTaskIds.Rescue;
+                rescuer.Priorities.ActiveTaskStartedGameHours = _absoluteGameHours;
+                rescuer.Priorities.LastResolveReason = "emergency rescue";
+            }
+        }
+
+        void CompleteUniversalRescue(WorkerRuntime rescuer, WorkerRuntime casualty, SocialMemoryStore mem)
+        {
+            if (_collapse == null || rescuer == null || casualty == null) return;
+            _collapse.FinalizeRescueAtCamp(rescuer, casualty, mem, out _);
+
+            if (rescuer.CampBody != null)
+            {
+                rescuer.CampBody.RescueDutyActive = false;
+                rescuer.CampBody.RescueReturning = true;
+            }
+
+            // Park casualty at camp slot — seeking Steward (no host snap)
+            int cIdx = CrewRosterIndex(casualty);
+            var cAv = _presence.Get(casualty.WorkerId);
+            if (cAv != null)
+            {
+                Vector2 slot = cIdx >= 0 ? CampSlot(cIdx) : CampNavDestination;
+                cAv.SetPresencePosition(slot);
+                cAv.ClearFollowing();
+                cAv.Show();
+            }
+
+            DigHoodLog.Push(
+                $"RESCUE | COMPLETE — {casualty.DisplayName} SeekingStewardCare; "
+                + $"{rescuer.DisplayName} returning to assignment");
+            _activeRescue = null;
+        }
+
+        void AbortRescueMission(string reason)
+        {
+            if (_activeRescue == null) return;
+            var r = FindCrewWorker(_activeRescue.RescuerId);
+            var c = FindCrewWorker(_activeRescue.CasualtyId);
+            if (r?.CampBody != null)
+            {
+                r.CampBody.RescueDutyActive = false;
+                if (!r.CampBody.RescueReturning)
+                    r.CampBody.RescueReturning = true;
+            }
+            if (c?.CampBody != null)
+                c.CampBody.BeingRescued = false;
+            DigHoodLog.Push($"RESCUE | aborted — {reason}");
+            _activeRescue = null;
+        }
+
+        void TickRescueReturning(float hoursDelta)
+        {
+            if (_crewWorkers == null) return;
+            EnsurePersonNav();
+            for (int i = 0; i < _crewWorkers.Length; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr?.CampBody == null || !wr.CampBody.RescueReturning || !wr.IsAlive)
+                    continue;
+                if (wr.CampBody.RescueDutyActive) continue;
+
+                var asg = _assignments.GetAssignment(wr.WorkerId);
+                var av = _presence.Get(wr.WorkerId);
+                if (av == null)
+                {
+                    wr.CampBody.RescueReturning = false;
+                    continue;
+                }
+
+                if (asg == null || asg.JobType == JobType.Unassigned)
+                {
+                    wr.CampBody.RescueReturning = false;
+                    continue;
+                }
+
+                Vector2 target = GetProviderExitPoint(asg.JobType);
+                float arrive = 0.55f;
+                if ((target - av.PresencePosition).sqrMagnitude <= arrive * arrive)
+                {
+                    wr.CampBody.RescueReturning = false;
+                    BindHost(asg.JobType, wr);
+                    NotifyProviderAssigned(asg.JobType, wr);
+                    SeatAvatarAtWork(wr, av);
+                    DigHoodLog.Push($"RESCUE | {wr.DisplayName} resumed {asg.JobType}");
+                    continue;
+                }
+
+                float mul = WorkerRescue.ApproachSpeedMul(wr);
+                TryStepRescueAvatar(i, av, target, mul);
+                wr.State?.SpendStamina(
+                    WorkerRescue.StaminaTaxPerGameHour(wr, false) * hoursDelta * 6f);
+            }
+        }
+
+        int CrewRosterIndex(WorkerRuntime wr)
+        {
+            if (wr == null || _crewWorkers == null) return -1;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+                if (_crewWorkers[i] != null && _crewWorkers[i].WorkerId == wr.WorkerId)
+                    return i;
+            return -1;
         }
 
         void TickCrewPhase()
@@ -3572,6 +4490,354 @@ namespace DeepCore.FreeMovement
             }
         }
 
+        void DrawPrioritiesPanel()
+        {
+            if (_crewWorkers == null) return;
+            _prioHoverTaskTip = null;
+            _prioHoverCellTip = null;
+            _priorities.BindHosts(
+                _world, _collapse, _mineInfra, _worker, _hauler, _refiner, _engineer,
+                _prospector, _scanHistory != null ? _scanHistory.Analyst : null,
+                _steward, _campLife, _crewWorkers, CrewWorldPos, BasecampPos);
+            int nWorkers = _crewWorkers.Length;
+            var tasks = WorkTaskRegistry.All;
+            const float nameCol = 108f;
+            const float cellW = 52f;
+            const float rowH = 26f;
+            const float headerH = 36f;
+            float gridW = nameCol + nWorkers * cellW + 16f;
+            float detailH = 118f;
+            float catPad = 18f * 4f;
+            float gridH = headerH + tasks.Count * rowH + catPad + 8f;
+            float pw = Mathf.Max(420f, gridW + 28f);
+            float ph = Mathf.Min(Screen.height - 100f, gridH + detailH + 56f);
+            float bx = Screen.width - pw - 12f - HudToolStripReserve;
+            float by = 56f;
+            var panel = new Rect(bx, by, pw, ph);
+            DrawCyberPanel(panel, lit: true, accentOverride: UiGreen);
+            Block(panel);
+
+            float x = panel.x + 12f;
+            float y = panel.y + 8f;
+            float inner = pw - 24f;
+            GUI.Label(new Rect(x, y, inner * 0.7f, 16f), "PRIORITIES",
+                LabelStyle(12, UiGreen, bold: true));
+            GUI.Label(new Rect(x + inner * 0.55f, y + 2f, inner * 0.45f, 14f),
+                "LMB cycle · RMB reverse", LabelStyle(9, UiMute));
+            y += 20f;
+            GUI.Label(new Rect(x, y, inner, 12f),
+                "Same task list for every worker — jobs are specialization, not permission",
+                LabelStyle(9, UiDim));
+            y += 16f;
+
+            // Header workers
+            GUI.Label(new Rect(x, y, nameCol, headerH - 8f), "TASK", LabelStyle(9, UiCyan, bold: true));
+            for (int w = 0; w < nWorkers; w++)
+            {
+                var wr = _crewWorkers[w];
+                if (wr == null) continue;
+                float cx = x + nameCol + w * cellW;
+                bool selW = wr.WorkerId == _prioUiSelectedWorkerId;
+                var hr = new Rect(cx, y, cellW - 2f, headerH - 8f);
+                Block(hr);
+                Color hc = selW ? UiCyan : AccentForWorkerId(wr.WorkerId);
+                string shortN = wr.DisplayName.Length <= 5
+                    ? wr.DisplayName.ToUpperInvariant()
+                    : wr.DisplayName.Substring(0, 4).ToUpperInvariant();
+                GUI.Label(hr, shortN, LabelStyle(9, hc, bold: true));
+                if (GUI.Button(hr, GUIContent.none, GUIStyle.none))
+                    _prioUiSelectedWorkerId = wr.WorkerId;
+            }
+            y += headerH - 4f;
+
+            WorkTaskCategory lastCat = (WorkTaskCategory)255;
+            Event e = Event.current;
+            for (int t = 0; t < tasks.Count; t++)
+            {
+                var def = tasks[t];
+                if (def.Category != lastCat)
+                {
+                    lastCat = def.Category;
+                    GUI.Label(new Rect(x, y, inner, 14f), WorkTaskRegistry.CategoryLabel(def.Category),
+                        LabelStyle(8, UiAmber, bold: true));
+                    y += 15f;
+                }
+
+                var nameR = new Rect(x, y, nameCol - 4f, rowH - 2f);
+                Block(nameR);
+                bool hoverTask = nameR.Contains(e.mousePosition);
+                GUI.Label(nameR, def.ShortName, LabelStyle(10, hoverTask ? UiWhite : UiCyan, bold: true));
+                if (hoverTask)
+                {
+                    var tip = new Rect(panel.x + 8f, panel.yMax - detailH + 4f, inner, 40f);
+                    // tip drawn in detail zone
+                    _prioHoverTaskTip = $"{def.DisplayName}\n{def.Tooltip}";
+                }
+
+                bool taskSel = def.Id == _prioUiSelectedTaskId;
+                if (GUI.Button(nameR, GUIContent.none, GUIStyle.none))
+                    _prioUiSelectedTaskId = def.Id;
+
+                for (int w = 0; w < nWorkers; w++)
+                {
+                    var wr = _crewWorkers[w];
+                    if (wr?.Priorities == null) continue;
+                    float cx = x + nameCol + w * cellW;
+                    var cell = new Rect(cx, y, cellW - 3f, rowH - 3f);
+                    Block(cell);
+                    var prio = wr.Priorities.GetPriority(def.Id);
+                    float tgt = wr.Priorities.GetTargetHours(def.Id);
+                    bool active = wr.Priorities.ActiveTaskId == def.Id;
+                    bool selected = wr.WorkerId == _prioUiSelectedWorkerId && def.Id == _prioUiSelectedTaskId;
+
+                    Color fill = prio switch
+                    {
+                        WorkPriorityLevel.P1 => new Color(0.08f, 0.22f, 0.2f, 0.92f),
+                        WorkPriorityLevel.P2 => new Color(0.06f, 0.14f, 0.18f, 0.88f),
+                        WorkPriorityLevel.P3 => new Color(0.05f, 0.08f, 0.1f, 0.82f),
+                        WorkPriorityLevel.P4 => new Color(0.04f, 0.05f, 0.06f, 0.75f),
+                        _ => new Color(0.03f, 0.03f, 0.04f, 0.65f),
+                    };
+                    var prev = GUI.color;
+                    GUI.color = fill;
+                    GUI.DrawTexture(cell, Texture2D.whiteTexture);
+                    GUI.color = prev;
+                    Color border = selected ? UiCyan
+                        : active ? UiGreen
+                        : prio == WorkPriorityLevel.P1 ? UiGreen
+                        : prio == WorkPriorityLevel.Off ? UiMute
+                        : UiDim;
+                    DrawRectBorder(cell, border, selected || active ? 2f : 1f);
+
+                    string lab = prio == WorkPriorityLevel.Off ? "OFF" : ((int)prio).ToString();
+                    Color tc = prio == WorkPriorityLevel.Off ? UiMute
+                        : prio == WorkPriorityLevel.P1 ? UiGreen
+                        : prio == WorkPriorityLevel.P2 ? UiCyan
+                        : UiWhite;
+                    GUI.Label(new Rect(cell.x, cell.y + 1f, cell.width, 14f), lab,
+                        LabelStyle(11, tc, bold: true));
+                    if (tgt > 0.01f && def.SupportsHourTarget)
+                    {
+                        GUI.Label(new Rect(cell.x, cell.y + 13f, cell.width, 11f),
+                            $"{tgt:0.#}h", LabelStyle(8, UiDim));
+                    }
+                    if (active)
+                        GUI.Label(new Rect(cell.xMax - 10f, cell.y + 2f, 9f, 9f), "•",
+                            LabelStyle(10, UiGreen, bold: true));
+
+                    if (cell.Contains(e.mousePosition))
+                    {
+                        _prioHoverCellTip =
+                            $"{wr.DisplayName} // {def.ShortName}\n" +
+                            $"Priority: {lab}\n" +
+                            $"Target: {tgt:0.0}h\n" +
+                            $"Completed: {wr.Priorities.GetWorkedHours(def.Id):0.0}h\n" +
+                            WorkPriorityResolver.WhySuitable(wr, def, GetAssignmentJob(wr));
+                        if (e.type == EventType.MouseDown && e.button == 0)
+                        {
+                            wr.Priorities.CyclePriority(def.Id, reverse: false);
+                            _prioUiSelectedWorkerId = wr.WorkerId;
+                            _prioUiSelectedTaskId = def.Id;
+                            e.Use();
+                        }
+                        else if (e.type == EventType.MouseDown && e.button == 1)
+                        {
+                            wr.Priorities.CyclePriority(def.Id, reverse: true);
+                            _prioUiSelectedWorkerId = wr.WorkerId;
+                            _prioUiSelectedTaskId = def.Id;
+                            e.Use();
+                        }
+                    }
+                }
+                y += rowH;
+            }
+
+            // Detail panel
+            y = panel.yMax - detailH + 2f;
+            DrawRectBorder(new Rect(panel.x + 8f, y - 4f, inner + 8f, 1f), UiDim, 1f);
+            var selWr = FindCrewWorker(_prioUiSelectedWorkerId);
+            var selDef = WorkTaskRegistry.Get(_prioUiSelectedTaskId);
+            if (selWr?.Priorities != null && selDef != null)
+            {
+                var pref = selWr.Priorities;
+                var prio = pref.GetPriority(selDef.Id);
+                float tgt = pref.GetTargetHours(selDef.Id);
+                float done = pref.GetWorkedHours(selDef.Id);
+                var avail = _priorities.Context.World != null
+                    ? _priorities.Context.Probe(selDef.Id)
+                    : WorkAvailabilityResult.None("—");
+                string status = pref.ActiveTaskId == selDef.Id ? "ACTIVE"
+                    : avail.Available ? "AVAILABLE" : "NO WORK";
+                GUI.Label(new Rect(x, y, inner, 14f),
+                    $"{selDef.DisplayName.ToUpperInvariant()}  ·  {selWr.DisplayName.ToUpperInvariant()}",
+                    LabelStyle(10, UiWhite, bold: true));
+                y += 16f;
+                GUI.Label(new Rect(x, y, inner, 12f),
+                    $"Priority: {(prio == WorkPriorityLevel.Off ? "OFF" : ((int)prio).ToString())}    " +
+                    $"Shift target: {tgt:0.0}h    Completed: {done:0.0}h    {status}",
+                    LabelStyle(9, UiCyan));
+                y += 16f;
+
+                if (selDef.SupportsHourTarget)
+                {
+                    float bw = 36f;
+                    if (DrawCyberButton(new Rect(x, y, bw, 20f), "−", false, UiDim))
+                        pref.AdjustTargetHours(selDef.Id, -WorkerPriorityPrefs.HourStep);
+                    GUI.Label(new Rect(x + bw + 6f, y + 2f, 64f, 16f), $"{tgt:0.0}h",
+                        LabelStyle(10, UiWhite, bold: true));
+                    if (DrawCyberButton(new Rect(x + bw + 70f, y, bw, 20f), "+", false, UiCyan))
+                        pref.AdjustTargetHours(selDef.Id, WorkerPriorityPrefs.HourStep);
+                    if (DrawCyberButton(new Rect(x + bw + 114f, y, 88f, 20f), "CLEAR TARGET", false, UiAmber))
+                        pref.SetTargetHours(selDef.Id, 0f);
+                    y += 24f;
+                }
+
+                string tip = !string.IsNullOrEmpty(_prioHoverCellTip) ? _prioHoverCellTip
+                    : !string.IsNullOrEmpty(_prioHoverTaskTip) ? _prioHoverTaskTip
+                    : WorkPriorityResolver.WhySuitable(selWr, selDef, GetAssignmentJob(selWr));
+                GUI.Label(new Rect(x, y, inner, 48f), tip, LabelStyle(8, UiDim));
+            }
+
+            if (DevMode.Enabled && _devPriorityPanel)
+            {
+                // filled via DEV strip separately
+            }
+        }
+
+        static void DrawRectBorder(Rect r, Color c, float thickness)
+        {
+            var old = GUI.color;
+            GUI.color = c;
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, thickness), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.yMax - thickness, r.width, thickness), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.x, r.y, thickness, r.height), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(r.xMax - thickness, r.y, thickness, r.height), Texture2D.whiteTexture);
+            GUI.color = old;
+        }
+
+        void DrawPriorityDevDiag()
+        {
+            if (_crewWorkers == null) return;
+            _priorities.BindHosts(
+                _world, _collapse, _mineInfra, _worker, _hauler, _refiner, _engineer,
+                _prospector, _scanHistory != null ? _scanHistory.Analyst : null,
+                _steward, _campLife, _crewWorkers, CrewWorldPos, BasecampPos);
+
+            var focus = FindCrewWorker(_selectedWorkerId) ?? _crewWorkers[0];
+            float pw = 400f;
+            float ph = 460f;
+            var panel = new Rect(12f, 56f, pw, ph);
+            DrawCyberPanel(panel, lit: false, accentOverride: UiAmber);
+            Block(panel);
+            float x = panel.x + 10f;
+            float y = panel.y + 6f;
+            GUI.Label(new Rect(x, y, pw - 20f, 14f), "PRIORITY DIAG (DEV)",
+                LabelStyle(10, UiAmber, bold: true));
+            y += 16f;
+            if (focus?.Priorities == null)
+            {
+                GUI.Label(new Rect(x, y, pw - 20f, 12f), "No worker / prefs", LabelStyle(9, UiDim));
+                return;
+            }
+            var p = focus.Priorities;
+            string task = WorkPriorityDirector.ActiveTaskShortLabel(focus);
+            if (string.IsNullOrEmpty(task)) task = "—";
+            string prioLab = string.IsNullOrEmpty(p.ActiveTaskId) ? "—"
+                : p.IsOff(p.ActiveTaskId) ? "OFF"
+                : ((int)p.GetPriority(p.ActiveTaskId)).ToString();
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"{focus.DisplayName}  task={task}  prio={prioLab}",
+                LabelStyle(9, UiWhite, bold: true));
+            y += 14f;
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"WinningPriorityBand: {(p.LastWinningPriorityBand > 0 ? p.LastWinningPriorityBand.ToString() : "—")}",
+                LabelStyle(9, UiGreen, bold: true));
+            y += 13f;
+            if (!string.IsNullOrEmpty(p.LastBandRejectHint))
+            {
+                GUI.Label(new Rect(x, y, pw - 20f, 12f), p.LastBandRejectHint,
+                    LabelStyle(8, UiAmber));
+                y += 13f;
+            }
+            var avail = string.IsNullOrEmpty(p.ActiveTaskId)
+                ? WorkAvailabilityResult.None("—")
+                : _priorities.Context.Probe(p.ActiveTaskId);
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"Avail={(avail.Available ? "Y" : "N")} ({avail.Reason})  " +
+                $"Valid={(p.ActiveTaskValid ? "Y" : "N")}  inv={p.ActiveInvalidationReason}",
+                LabelStyle(8, avail.Available && p.ActiveTaskValid ? UiCyan : UiAmber));
+            y += 13f;
+            // Compact band candidates for Haul / Refine / active
+            void BandLine(string tid)
+            {
+                var def = WorkTaskRegistry.Get(tid);
+                if (def == null) return;
+                var pr = p.GetPriority(tid);
+                var av = _priorities.Context.Probe(tid);
+                string rej = pr == WorkPriorityLevel.Off ? "OFF"
+                    : !av.Available ? "NO WORK"
+                    : (p.LastWinningPriorityBand > 0 && (int)pr > p.LastWinningPriorityBand)
+                        ? "LOWER PRIORITY BAND"
+                        : (p.ActiveTaskId == tid ? "SELECTED" : "cand");
+                GUI.Label(new Rect(x, y, pw - 20f, 11f),
+                    $"{def.ShortName} P{(pr == WorkPriorityLevel.Off ? "OFF" : ((int)pr).ToString())} " +
+                    $"avail={(av.Available ? "Y" : "N")} → {rej}",
+                    LabelStyle(8, rej == "SELECTED" ? UiGreen
+                        : rej == "LOWER PRIORITY BAND" ? UiAmber : UiDim));
+                y += 11f;
+            }
+            BandLine(WorkerGenericTaskIds.HaulMaterials);
+            BandLine(WorkerGenericTaskIds.RefineOre);
+            BandLine(WorkerGenericTaskIds.Excavate);
+            BandLine(WorkerGenericTaskIds.InstallSupports);
+            y += 2f;
+            var asgJob = GetAssignmentJob(focus);
+            bool hostOk = WorkPriorityResolver.HostAllowsVoluntaryWork(focus, asgJob);
+            bool performing = IsActuallyPerformingPriorityTask(focus, p.ActiveTaskId);
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"Host {asgJob} allow={hostOk}  performing={performing}  dirty={(p.ResolverDirty ? "Y" : "N")}  yieldedOff={(p.LastHostYieldedForOff ? "Y" : "N")}",
+                LabelStyle(8, UiMute));
+            y += 13f;
+            float tgt = string.IsNullOrEmpty(p.ActiveTaskId) ? 0f : p.GetTargetHours(p.ActiveTaskId);
+            float done = string.IsNullOrEmpty(p.ActiveTaskId) ? 0f : p.GetWorkedHours(p.ActiveTaskId);
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"Target {tgt:0.0}h  Worked {done:0.0}h  Deficit {p.TargetDeficit(p.ActiveTaskId):0.0}h",
+                LabelStyle(8, UiCyan));
+            y += 13f;
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"Score {p.LastScoreTotal:0}  emerg={(p.LastEmergencyOverride ? "Y" : "N")}  hint={p.LastTargetHint}",
+                LabelStyle(8, UiWhite));
+            y += 13f;
+            GUI.Label(new Rect(x, y, pw - 20f, 36f),
+                $"Prio {p.LastScorePriority:0}  Def {p.LastScoreDeficit:0}  Suit {p.LastScoreSuit:0}\n" +
+                $"Dist {p.LastScoreDistance:0}  Cond {p.LastScoreCondition:0}  Cont {p.LastScoreContinuity:0}  Emg {p.LastScoreEmergency:0}",
+                LabelStyle(8, UiDim));
+            y += 38f;
+            GUI.Label(new Rect(x, y, pw - 20f, 24f),
+                $"Selected: {p.LastResolveReason}\nRejected/Unavailable: {p.LastUnavailableReason}",
+                LabelStyle(8, UiDim));
+            y += 28f;
+            GUI.Label(new Rect(x, y, pw - 20f, 12f),
+                $"Duty={focus.CampBody != null && focus.CampBody.PriorityDutyActive}  " +
+                $"Rescue={focus.CampBody != null && focus.CampBody.RescueDutyActive}",
+                LabelStyle(8, UiMute));
+            y += 16f;
+            // Compact crew active list
+            for (int i = 0; i < _crewWorkers.Length && i < 6; i++)
+            {
+                var wr = _crewWorkers[i];
+                if (wr?.Priorities == null) continue;
+                string t = WorkPriorityDirector.ActiveTaskShortLabel(wr);
+                if (string.IsNullOrEmpty(t)) t = "—";
+                string offMark = !string.IsNullOrEmpty(wr.Priorities.ActiveTaskId)
+                                 && wr.Priorities.IsOff(wr.Priorities.ActiveTaskId) ? "!" : "";
+                GUI.Label(new Rect(x, y, pw - 20f, 11f),
+                    $"{wr.DisplayName}: {t}{offMark}",
+                    LabelStyle(8, wr.WorkerId == focus.WorkerId ? UiGreen : UiDim));
+                y += 11f;
+            }
+        }
+
         void DrawDailySummaryOverlay()
         {
             var s = _dayTracker.LastSummary;
@@ -3600,6 +4866,36 @@ namespace DeepCore.FreeMovement
             GUI.Label(new Rect(x, y, inner, 12f),
                 $"Sleep: {_shiftPlanner.FormatHours(s.AvgSleepHours)}", LabelStyle(9, UiCyan));
             y += 16f;
+            // Light priority breakdown for selected / first workers
+            if (_crewWorkers != null)
+            {
+                int shownP = 0;
+                for (int wi = 0; wi < _crewWorkers.Length && shownP < 3; wi++)
+                {
+                    var wr = _crewWorkers[wi];
+                    if (wr?.Priorities == null) continue;
+                    var all = WorkTaskRegistry.All;
+                    var bits = new System.Text.StringBuilder();
+                    bits.Append(wr.DisplayName).Append(':');
+                    int n = 0;
+                    for (int ti = 0; ti < all.Count && n < 4; ti++)
+                    {
+                        float wh = wr.Priorities.GetWorkedHours(all[ti].Id);
+                        if (wh < 0.05f) continue;
+                        float tg = wr.Priorities.GetTargetHours(all[ti].Id);
+                        bits.Append(' ').Append(all[ti].ShortName).Append(' ')
+                            .Append(wh.ToString("0.0"));
+                        if (tg > 0.01f) bits.Append('/').Append(tg.ToString("0.0"));
+                        bits.Append('h');
+                        n++;
+                    }
+                    if (n == 0) continue;
+                    GUI.Label(new Rect(x, y, inner, 12f), bits.ToString(), LabelStyle(8, UiDim));
+                    y += 12f;
+                    shownP++;
+                }
+                y += 4f;
+            }
             int shown = 0;
             for (int i = 0; i < s.Lines.Count && shown < 5; i++)
             {
@@ -4216,6 +5512,7 @@ namespace DeepCore.FreeMovement
             {
                 if (sel == null || !sel.IsAlive) return;
                 sel.State.MarkDead(_absoluteGameHours, 0);
+                ReleaseUnavailableWorkerClaims(sel, "worker dead");
                 DigHoodLog.Push($"DEV | mark dead → {sel.DisplayName}");
             });
             DevBtn(new Rect(x + bw + 4f, y, bw, bh), "CLEAR STATUS", () => DevRosterClearStatus(sel));
@@ -4755,6 +6052,11 @@ namespace DeepCore.FreeMovement
 
             _socialAura.NotifyShiftStart(_crewWorkers);
             _dayTracker.BeginNewDayKeepStreaks(_crewWorkers);
+            if (_crewWorkers != null)
+            {
+                for (int pi = 0; pi < _crewWorkers.Length; pi++)
+                    _crewWorkers[pi]?.Priorities?.ResetShiftAccumulation();
+            }
             // Ledger reset wipes ArrivedWork — restore anyone who already physically arrived this morning
             if (_crewWorkers != null)
             {
@@ -5877,6 +7179,7 @@ namespace DeepCore.FreeMovement
             Mission,
             Camp,
             Shift,
+            Priorities,
             Talk,
             CrewTalk,
         }
@@ -6104,6 +7407,9 @@ namespace DeepCore.FreeMovement
                     var asg = _assignments.GetAssignment(wr.WorkerId);
                     var job = asg != null ? asg.JobType : JobType.Unassigned;
                     string jobLine = JobStatPreview.DisplayName(job);
+                    string taskLab = WorkPriorityDirector.ActiveTaskShortLabel(wr);
+                    if (!string.IsNullOrEmpty(taskLab))
+                        jobLine = $"{jobLine} · {taskLab}";
                     string provLine = job == JobType.Unassigned
                         ? "none"
                         : ProviderLabelForAssignment(asg);
@@ -6331,8 +7637,10 @@ namespace DeepCore.FreeMovement
             if (_hudPopup == HudPopupKind.Comms) DrawDigHoodLog();
             if (_hudPopup == HudPopupKind.Camp) DrawCampLifePanel();
             if (_hudPopup == HudPopupKind.Shift) DrawShiftPlannerPanel();
+            if (_hudPopup == HudPopupKind.Priorities) DrawPrioritiesPanel();
             if (_hudPopup == HudPopupKind.Talk) DrawManagerTalkPanel();
             if (_hudPopup == HudPopupKind.CrewTalk) DrawManagerCrewTalkPanel();
+            if (DevMode.Enabled && _devPriorityPanel) DrawPriorityDevDiag();
             if (_showDailySummary) DrawDailySummaryOverlay();
             DrawManagerInterveneOverlay();
             DrawLastManagerTalkFlash();
@@ -6446,6 +7754,7 @@ namespace DeepCore.FreeMovement
             StripBtn("KEYS", HudPopupKind.Keys, UiDim);
             StripBtn("CAMP", HudPopupKind.Camp, UiAmber);
             StripBtn("SHIFT", HudPopupKind.Shift, UiCyan);
+            StripBtn("PRIORITIES", HudPopupKind.Priorities, UiGreen);
             StripBtn("TALK", HudPopupKind.Talk, UiGreen);
             StripBtn("CREW", HudPopupKind.CrewTalk, UiAmber);
 
@@ -6464,6 +7773,16 @@ namespace DeepCore.FreeMovement
             StripBtn("ACTIVITY", HudPopupKind.Activity, UiAmber);
             StripBtn("BALANCE", HudPopupKind.Balance, UiAmber);
             StripBtn("MISSION", HudPopupKind.Mission, UiGreen);
+            if (DevMode.Enabled)
+            {
+                y += 4f;
+                var pr = new Rect(x, y, w, 22f);
+                Block(pr);
+                if (DrawCyberButton(pr, _devPriorityPanel ? "PRIO DIAG ON" : "PRIO DIAG",
+                        selected: _devPriorityPanel, accent: UiAmber))
+                    _devPriorityPanel = !_devPriorityPanel;
+                y += 24f;
+            }
         }
 
         /// <summary>Right margin reserved for the always-visible panel tool strip.</summary>

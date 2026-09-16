@@ -176,6 +176,18 @@ namespace DeepCore.FreeMovement
 
         [MenuItem("DeepCore/Diagnostics/Run Debris Collapse V1 Audit")]
         public static void RunDebrisCollapseV1() => DebrisCollapseV1Audit.RunFromEditor();
+
+        [MenuItem("DeepCore/Diagnostics/Run Universal Rescue V1 Audit")]
+        public static void RunUniversalRescueV1() => UniversalRescueV1Audit.RunFromEditor();
+
+        [MenuItem("DeepCore/Diagnostics/Run Priority System V1 Audit")]
+        public static void RunPrioritySystemV1() => PrioritySystemV1Audit.RunFromEditor();
+
+        [MenuItem("DeepCore/Diagnostics/Run Priority System V1.1 Playmode Audit")]
+        public static void RunPrioritySystemV11() => PrioritySystemV11PlaymodeAudit.RunFromEditor();
+
+        [MenuItem("DeepCore/Diagnostics/Run Priority System V1.2 Full Authority Audit")]
+        public static void RunPrioritySystemV12() => PrioritySystemV12FullAuthorityAudit.RunFromEditor();
     }
 }
 #endif

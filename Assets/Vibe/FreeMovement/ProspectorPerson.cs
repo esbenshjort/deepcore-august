@@ -510,6 +510,14 @@ namespace DeepCore.FreeMovement
                 return;
             }
 
+            // Priority OFF for Prospect stops autonomous work modes (player Manual remains)
+            if (_assignedWorker.Priorities != null
+                && WorkMode != ProspectorWorkMode.Manual
+                && _assignedWorker.Priorities.IsOff(WorkerGenericTaskIds.Prospect))
+            {
+                SetWorkMode(ProspectorWorkMode.Manual);
+            }
+
             // Scanner assignment: travel then wait while Setting Up (game-time driven elsewhere)
             if (_assignedScanner != null && (_scannerTravelActive || _scannerSetupActive))
             {

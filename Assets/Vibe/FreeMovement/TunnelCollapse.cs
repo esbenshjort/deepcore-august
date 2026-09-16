@@ -644,6 +644,10 @@ namespace DeepCore.FreeMovement
             return HasOpenPath(_campWorld, worldPos);
         }
 
+        /// <summary>Open-tunnel BFS (debris blocks). Authoritative access check for rescue/clearance.</summary>
+        public bool HasOpenTunnelPath(Vector2 fromWorld, Vector2 toWorld) =>
+            HasOpenPath(fromWorld, toWorld);
+
         public void RefreshTrappedFlags(
             IReadOnlyList<WorkerRuntime> crew,
             Func<WorkerRuntime, Vector2> worldPosOf)
@@ -889,8 +893,76 @@ namespace DeepCore.FreeMovement
             TickClearance(f, wr, gameHoursHint, asExcavator: true, out _);
         }
 
-        // ——— Rescue ———
+        // ——— Rescue (state / memory — locomotion owned by runner person authority) ———
 
+        /// <summary>
+        /// Apply camp handoff after physical carry arrives. Keeps injuries; clears incap lock.
+        /// Does not move bodies — runner owns positions.
+        /// </summary>
+        public bool FinalizeRescueAtCamp(
+            WorkerRuntime rescuer,
+            WorkerRuntime casualty,
+            SocialMemoryStore memory,
+            out string status)
+        {
+            status = "";
+            if (rescuer?.State == null || casualty?.State == null) return false;
+            if (!rescuer.IsAlive || !casualty.IsAlive) return false;
+
+            casualty.State.ClearIncapacitated();
+            casualty.State.NeedsCare = true;
+            casualty.State.TrappedFromCamp = false;
+            if (casualty.CampBody != null)
+            {
+                casualty.CampBody.BeingRescued = false;
+                casualty.CampBody.InjuryReturnActive = false;
+                casualty.CampBody.SeekingStewardCare = true;
+            }
+
+            AuditRescues++;
+            DigHoodLog.Push($"RESCUE | {rescuer.DisplayName} recovered {casualty.DisplayName} — injuries remain");
+            PushBanner("RESCUED", casualty.DisplayName.ToUpperInvariant(),
+                $"Recovered by {rescuer.DisplayName}", "INJURIES REMAIN — NEEDS CARE", true);
+
+            memory?.Add(new SocialMemoryEntry
+            {
+                Type = SocialMemoryType.RescuedByWorker,
+                Strength = 0.78f,
+                GameTime = _gameHours,
+                ObserverId = casualty.WorkerId,
+                TargetId = rescuer.WorkerId,
+                Context = SocialContext.Emergency,
+                SourceRef = $"rescue:{casualty.WorkerId}",
+                Significance = SocialMemorySignificance.Major,
+            });
+            memory?.Add(new SocialMemoryEntry
+            {
+                Type = SocialMemoryType.HelpedMe,
+                Strength = 0.7f,
+                GameTime = _gameHours,
+                ObserverId = casualty.WorkerId,
+                TargetId = rescuer.WorkerId,
+                Context = SocialContext.Emergency,
+                SourceRef = $"rescuehelp:{casualty.WorkerId}",
+                Significance = SocialMemorySignificance.Significant,
+            });
+
+            // Soft state event — rare meaningful success (not spam)
+            WorkerStateEventHub.Emit(WorkerStateEvent.Create(
+                rescuer.WorkerId,
+                WorkerStateEventType.MajorSuccess,
+                8f,
+                $"rescued:{casualty.WorkerId}",
+                relatedWorkerId: casualty.WorkerId));
+
+            status = "RESCUE COMPLETE";
+            return true;
+        }
+
+        /// <summary>
+        /// Legacy tick retained for audits/DEV — prefers Finalize when near camp.
+        /// Production locomotion uses runner universal rescue (person path authority).
+        /// </summary>
         public bool TryRescueTick(
             WorkerRuntime rescuer,
             WorkerRuntime casualty,
@@ -903,15 +975,20 @@ namespace DeepCore.FreeMovement
             status = "";
             if (rescuer?.State == null || casualty?.State == null) return false;
             if (!rescuer.IsAlive || !casualty.IsAlive) return false;
-            if (!casualty.State.Incapacitated) { status = "not incapacitated"; return false; }
+            if (!casualty.State.Incapacitated && (casualty.CampBody == null || !casualty.CampBody.BeingRescued))
+            {
+                status = "not incapacitated";
+                return false;
+            }
             if (rescuer.State.Incapacitated) { status = "rescuer incapacitated"; return false; }
+            if (!WorkerRescue.CanAcceptRescueDuty(rescuer) && (rescuer.CampBody == null || !rescuer.CampBody.RescueDutyActive))
+            {
+                status = "rescuer unavailable";
+                return false;
+            }
 
             Vector2 a = worldPosOf(rescuer);
             Vector2 b = worldPosOf(casualty);
-            if (!IsReachableFromCamp(a) && Vector2.Distance(a, b) > 1.2f)
-            {
-                // Rescuer must be able to reach casualty through open path
-            }
             if (!HasOpenPath(a, b))
             {
                 status = "ACCESS BLOCKED";
@@ -921,60 +998,24 @@ namespace DeepCore.FreeMovement
             float dist = Vector2.Distance(a, b);
             if (dist > 0.55f)
             {
-                // Walk toward casualty
-                Vector2 step = Vector2.MoveTowards(a, b, 1.1f * gameHoursDelta * 8f);
+                float approach = WorkerRescue.ApproachSpeedMul(rescuer);
+                Vector2 step = Vector2.MoveTowards(a, b, approach * gameHoursDelta * 8f);
                 setWorldPos(rescuer, step);
                 status = $"REACHING {casualty.DisplayName}";
                 return false;
             }
 
-            // Assist then haul toward camp
-            float lift = rescuer.Stats.Get(WorkerStatId.HeavyLifting) / 20f;
-            float speed = RescueCarrySpeedMul * Mathf.Lerp(0.7f, 1.25f, lift);
-            speed *= WorkerInjuryConsequences.LoadCarryMul(rescuer.Injuries);
+            float speed = WorkerRescue.CarrySpeedMul(rescuer);
             Vector2 camp = _campWorld;
             Vector2 next = Vector2.MoveTowards(b, camp, speed * gameHoursDelta * 10f);
             setWorldPos(casualty, next);
             setWorldPos(rescuer, next + (a - b).normalized * 0.15f);
-            rescuer.State.SpendStamina(4f * gameHoursDelta * 10f);
+            rescuer.State.SpendStamina(WorkerRescue.StaminaTaxPerGameHour(rescuer, carrying: true) * gameHoursDelta * 10f);
             status = $"RESCUING {casualty.DisplayName}";
 
-            if (Vector2.Distance(next, camp) < 1.4f || IsReachableFromCamp(next) && Vector2.Distance(next, camp) < 2.5f)
-            {
-                // Arrived near camp — clear incapacitated movement lock but KEEP injuries
-                casualty.State.ClearIncapacitated();
-                casualty.State.NeedsCare = true;
-                casualty.State.TrappedFromCamp = false;
-                AuditRescues++;
-                DigHoodLog.Push($"RESCUE | {rescuer.DisplayName} recovered {casualty.DisplayName} — injuries remain");
-                PushBanner("RESCUED", casualty.DisplayName.ToUpperInvariant(),
-                    $"Recovered by {rescuer.DisplayName}", "INJURIES REMAIN — NEEDS CARE", true);
-
-                memory?.Add(new SocialMemoryEntry
-                {
-                    Type = SocialMemoryType.RescuedByWorker,
-                    Strength = 0.78f,
-                    GameTime = _gameHours,
-                    ObserverId = casualty.WorkerId,
-                    TargetId = rescuer.WorkerId,
-                    Context = SocialContext.Emergency,
-                    SourceRef = $"rescue:{casualty.WorkerId}",
-                    Significance = SocialMemorySignificance.Major,
-                });
-                memory?.Add(new SocialMemoryEntry
-                {
-                    Type = SocialMemoryType.HelpedMe,
-                    Strength = 0.7f,
-                    GameTime = _gameHours,
-                    ObserverId = casualty.WorkerId,
-                    TargetId = rescuer.WorkerId,
-                    Context = SocialContext.Emergency,
-                    SourceRef = $"rescuehelp:{casualty.WorkerId}",
-                    Significance = SocialMemorySignificance.Significant,
-                });
-                status = "RESCUE COMPLETE";
-                return true;
-            }
+            if (Vector2.Distance(next, camp) < 1.4f
+                || (IsReachableFromCamp(next) && Vector2.Distance(next, camp) < 2.5f))
+                return FinalizeRescueAtCamp(rescuer, casualty, memory, out status);
             return false;
         }
 
