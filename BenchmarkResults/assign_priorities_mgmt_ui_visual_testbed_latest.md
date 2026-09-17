@@ -1,46 +1,23 @@
 # Assign / Work Priorities — Management UI visual testbed
 
-**Generated:** 2026-09-17  
-**Scope:** Visual language only on the Priorities HUD popup. No gameplay, assignment, or resolver changes.
+**Generated:** 2026-09-17 (rev 2)  
+**Scope:** Visual + layout collision only on the Priorities HUD popup.
 
-## Direction
+## Rev 2 (after playtest feedback)
 
-Leave cyberpunk / chamfered HUD. Move to **clean + readable + modern + transparent + subtle neon blue** — premium management overlay over the mine.
+Problems in rev 1 screenshot:
+- Panel too transparent → Mission “NOT FOUND” bled through
+- Mission HUD still drew under the Priorities panel
+- Still read as HUD (ALL CAPS, cyan frame, dense tech copy)
 
-## What changed
+Fixes:
+- Panel opacity raised to **α 0.90** (no bleed)
+- **Mission HUD hidden** while any exclusive HUD popup is open
+- Panel kept clear of the right tool strip (`HudToolStripReserve`)
+- Dropped cyan panel border → quiet neutral hairline
+- Title case / larger type / more padding / quieter accents
+- Selection = soft blue wash only (no outline box)
 
-| Area | Change |
-|------|--------|
-| `DeepCoreBentoUi.cs` | New cached IMGUI primitives: rounded fills (9-slice), transparent charcoal panels, selected-row fill, priority chips, RESPOND controls, label cache |
-| `DrawPrioritiesPanel` | Restyled Assign / Work Priorities testbed using BentoUi only (not `DrawCyberPanel`) |
-| `WorkTaskRegistry.CollectForJob` | Presentation helper — profession-scoped task list for the detail section |
+## Still testbed-only
 
-## Visual rules applied (this panel only)
-
-1. **Background** — near-black / charcoal transparency (`OverlayBg` α≈0.42); mine stays visible  
-2. **Corners** — consistent rounded radii (main 8 / module 6 / control 5)  
-3. **Borders** — single subtle panel stroke; subsections use spacing + type, not nested boxes  
-4. **Color** — one cyan-blue accent for selection / active controls; primary text off-white; secondary muted grey  
-5. **Selected** — translucent blue fill + thin left accent edge (no double outlines)  
-6. **Controls** — rounded translucent chips / RESPOND buttons  
-7. **Perf** — rounded masks + label styles cached; no per-frame texture create; no blur  
-
-## Explicitly not changed
-
-- Worker roster cards / top bar / other HUD (still cyber helpers)  
-- Priority resolver, hosts, TemporaryYield, claims  
-- Assignment manager / JobType authority  
-
-## Evaluate in Game view
-
-Open **PRIORITIES** and judge:
-
-- overall transparency  
-- readability / hierarchy  
-- rounded panels  
-- selected states  
-- priority chips + RESPOND  
-- information density  
-- neon accent strength  
-
-**Stop here** — do not propagate style globally until this panel is approved.
+Roster cards, top bar, and tool strip remain on the old cyber helpers until this panel is approved.

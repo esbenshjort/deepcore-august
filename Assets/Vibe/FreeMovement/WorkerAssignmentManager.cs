@@ -232,7 +232,8 @@ namespace DeepCore.FreeMovement
                     || (expected[i] == JobType.Excavation && a.ProviderId.StartsWith("excavator."))
                     || (expected[i] == JobType.Hauling && a.ProviderId.StartsWith("hauler."))
                     || (expected[i] == JobType.Refining && a.ProviderId.StartsWith("washer."))
-                    || (expected[i] == JobType.Engineering && a.ProviderId.StartsWith("engineer."));
+                    || (expected[i] == JobType.Engineering && a.ProviderId.StartsWith("engineer."))
+                    || (expected[i] == JobType.Steward && a.ProviderId.StartsWith("steward."));
                 Debug.Assert(providerOk,
                     $"Worker {w.WorkerId} provider mismatch: {a.ProviderId}");
             }

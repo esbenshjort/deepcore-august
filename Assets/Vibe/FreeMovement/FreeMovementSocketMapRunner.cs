@@ -4515,40 +4515,39 @@ namespace DeepCore.FreeMovement
             var selJob = GetAssignmentJob(selWr);
             WorkTaskRegistry.CollectForJob(selJob, _prioJobTaskBuf);
 
-            const float rowH = 26f;
-            const float taskRowH = 28f;
-            const float dutyRowH = 28f;
-            const float sectionGap = 14f;
-            float assignH = 18f + nWorkers * rowH;
-            float detailH = 20f + Mathf.Max(1, _prioJobTaskBuf.Count) * taskRowH;
-            float dutiesH = 18f + 3 * dutyRowH;
-            float pw = 340f;
+            const float rowH = 30f;
+            const float taskRowH = 32f;
+            const float dutyRowH = 32f;
+            const float sectionGap = 18f;
+            float assignH = 20f + nWorkers * rowH;
+            float detailH = 22f + Mathf.Max(1, _prioJobTaskBuf.Count) * taskRowH;
+            float dutiesH = 20f + 3 * dutyRowH;
+            float pw = 360f;
             float ph = Mathf.Min(
-                Screen.height - 72f,
-                52f + assignH + sectionGap + detailH + sectionGap + dutiesH + 36f);
-            float bx = Screen.width - pw - 12f - HudToolStripReserve;
-            float by = 56f;
+                Screen.height - 80f,
+                64f + assignH + sectionGap + detailH + sectionGap + dutiesH + 40f);
+            // Clear of right tool strip — never sit under ASSIGN / PRIO buttons.
+            float bx = Screen.width - pw - 16f - HudToolStripReserve;
+            float by = 52f;
             var panel = new Rect(bx, by, pw, ph);
-            DeepCoreBentoUi.DrawPanel(panel, lit: true);
+            DeepCoreBentoUi.DrawPanel(panel);
             Block(panel);
 
-            float pad = 14f;
+            float pad = 18f;
             float x = panel.x + pad;
-            float y = panel.y + 12f;
+            float y = panel.y + 16f;
             float inner = pw - pad * 2f;
 
-            // Title — primary text dominates; accent only as quiet underline
-            GUI.Label(new Rect(x, y, inner, 18f), "ASSIGN / WORK PRIORITIES",
-                DeepCoreBentoUi.Label(13, DeepCoreBentoUi.TextPrimary, bold: true));
-            y += 18f;
-            GUI.Label(new Rect(x, y, inner, 14f),
-                "JobType persistent · priorities within profession · LMB cycle",
-                DeepCoreBentoUi.Label(9, DeepCoreBentoUi.TextMuted));
-            y += 18f;
+            GUI.Label(new Rect(x, y, inner, 22f), "Work Priorities",
+                DeepCoreBentoUi.Label(16, DeepCoreBentoUi.TextPrimary, bold: true));
+            y += 22f;
+            GUI.Label(new Rect(x, y, inner, 16f),
+                "Click a priority to cycle · right-click reverses",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted));
+            y += 22f;
 
-            // ——— ASSIGNMENT ———
-            GUI.Label(new Rect(x, y, inner, 14f), "ASSIGNMENT",
-                DeepCoreBentoUi.Label(10, DeepCoreBentoUi.TextSecondary, bold: true));
+            GUI.Label(new Rect(x, y, inner, 14f), "Crew",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted, bold: true));
             y += 16f;
 
             for (int i = 0; i < _crewWorkers.Length; i++)
@@ -4562,24 +4561,21 @@ namespace DeepCore.FreeMovement
                 bool hover = row.Contains(e.mousePosition);
                 DeepCoreBentoUi.DrawSelected(row, sel, hover);
 
-                Color nameCol = sel
-                    ? DeepCoreBentoUi.TextPrimary
-                    : AccentForWorkerId(wr.WorkerId);
-                GUI.Label(new Rect(row.x + 10f, row.y + 4f, 88f, 16f),
-                    wr.DisplayName.ToUpperInvariant(),
-                    DeepCoreBentoUi.Label(11, nameCol, bold: true));
+                Color nameCol = sel ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextSecondary;
+                GUI.Label(new Rect(row.x + 12f, row.y + 6f, 92f, 18f),
+                    wr.DisplayName,
+                    DeepCoreBentoUi.Label(13, nameCol, bold: sel));
 
-                string jobName = ProfessionLabel(job);
-                GUI.Label(new Rect(row.x + 100f, row.y + 4f, 100f, 16f), jobName,
-                    DeepCoreBentoUi.Label(10,
-                        sel ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextSecondary));
+                GUI.Label(new Rect(row.x + 108f, row.y + 7f, 110f, 16f), ProfessionLabel(job),
+                    DeepCoreBentoUi.Label(12,
+                        sel ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextMuted));
 
                 string taskLab = WorkPriorityDirector.ActiveTaskShortLabel(wr);
                 if (!string.IsNullOrEmpty(taskLab))
                 {
-                    GUI.Label(new Rect(row.x + 204f, row.y + 4f, inner - 214f, 16f),
-                        "· " + taskLab,
-                        DeepCoreBentoUi.Label(10, DeepCoreBentoUi.Positive));
+                    GUI.Label(new Rect(row.x + 220f, row.y + 7f, inner - 232f, 16f),
+                        taskLab,
+                        DeepCoreBentoUi.Label(12, DeepCoreBentoUi.Positive));
                 }
 
                 if (GUI.Button(row, GUIContent.none, GUIStyle.none))
@@ -4587,21 +4583,22 @@ namespace DeepCore.FreeMovement
                 y += rowH;
             }
 
-            y += sectionGap;
+            y += 8f;
+            DeepCoreBentoUi.DrawDivider(x, y, inner);
+            y += sectionGap - 4f;
 
-            // ——— Selected worker job tasks ———
             string detailTitle = selWr != null
-                ? $"{selWr.DisplayName.ToUpperInvariant()}  ·  {ProfessionLabel(selJob)}"
+                ? $"{selWr.DisplayName}  ·  {ProfessionLabel(selJob)}"
                 : "—";
-            GUI.Label(new Rect(x, y, inner, 14f), detailTitle,
-                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextPrimary, bold: true));
-            y += 18f;
+            GUI.Label(new Rect(x, y, inner, 16f), detailTitle,
+                DeepCoreBentoUi.Label(13, DeepCoreBentoUi.TextPrimary, bold: true));
+            y += 20f;
 
             if (selWr?.Priorities == null || selJob == JobType.Unassigned)
             {
-                GUI.Label(new Rect(x, y, inner, 16f),
-                    "No profession assignment — priorities appear after CREW assign.",
-                    DeepCoreBentoUi.Label(10, DeepCoreBentoUi.TextMuted));
+                GUI.Label(new Rect(x, y, inner, 18f),
+                    "Assign a profession in Crew to edit priorities.",
+                    DeepCoreBentoUi.Label(12, DeepCoreBentoUi.TextMuted));
                 y += taskRowH;
             }
             else
@@ -4621,12 +4618,12 @@ namespace DeepCore.FreeMovement
                     Color nameC = taskSel || active
                         ? DeepCoreBentoUi.TextPrimary
                         : DeepCoreBentoUi.TextSecondary;
-                    GUI.Label(new Rect(row.x + 10f, row.y + 5f, 150f, 16f),
-                        def.DisplayName.ToUpperInvariant(),
-                        DeepCoreBentoUi.Label(10, nameC, bold: taskSel || active));
+                    GUI.Label(new Rect(row.x + 12f, row.y + 7f, 168f, 18f),
+                        def.DisplayName,
+                        DeepCoreBentoUi.Label(13, nameC, bold: taskSel || active));
 
-                    string lab = prio == WorkPriorityLevel.Off ? "OFF" : ((int)prio).ToString();
-                    var chip = new Rect(row.x + 168f, row.y + 3f, 36f, 20f);
+                    string lab = prio == WorkPriorityLevel.Off ? "Off" : ((int)prio).ToString();
+                    var chip = new Rect(row.x + 188f, row.y + 4f, 40f, 22f);
                     Block(chip);
                     if (DeepCoreBentoUi.DrawPriorityChip(chip, lab, active, taskSel))
                     {
@@ -4640,10 +4637,10 @@ namespace DeepCore.FreeMovement
                         e.Use();
                     }
 
-                    string status = active ? "ACTIVE" : "IDLE";
+                    string status = active ? "Active" : "Idle";
                     Color statusC = active ? DeepCoreBentoUi.Positive : DeepCoreBentoUi.TextMuted;
-                    GUI.Label(new Rect(row.x + 214f, row.y + 5f, 70f, 16f), status,
-                        DeepCoreBentoUi.Label(10, statusC, bold: active));
+                    GUI.Label(new Rect(row.x + 240f, row.y + 7f, 70f, 18f), status,
+                        DeepCoreBentoUi.Label(12, statusC, bold: active));
 
                     if (hover)
                     {
@@ -4653,73 +4650,68 @@ namespace DeepCore.FreeMovement
                             $"Priority: {lab}\n" +
                             WorkPriorityResolver.WhySuitable(selWr, def, selJob);
                     }
-                    if (GUI.Button(new Rect(row.x, row.y, 160f, row.height), GUIContent.none, GUIStyle.none))
+                    if (GUI.Button(new Rect(row.x, row.y, 180f, row.height), GUIContent.none, GUIStyle.none))
                         _prioUiSelectedTaskId = def.Id;
 
                     y += taskRowH;
                 }
             }
 
-            y += sectionGap;
+            y += 8f;
+            DeepCoreBentoUi.DrawDivider(x, y, inner);
+            y += sectionGap - 4f;
 
-            // ——— CREW DUTIES ———
-            GUI.Label(new Rect(x, y, inner, 14f), "CREW DUTIES",
-                DeepCoreBentoUi.Label(10, DeepCoreBentoUi.TextSecondary, bold: true));
+            GUI.Label(new Rect(x, y, inner, 14f), "Crew duties",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted, bold: true));
             y += 16f;
 
             DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.Rescue,
-                "RESCUE", e);
+                "Rescue", e);
             DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.TreatInjuries,
-                "EMERGENCY FIRST AID", e);
+                "Emergency first aid", e);
             DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.ClearDebris,
-                "EMERGENCY ACCESS CLEARANCE", e);
+                "Emergency access clearance", e);
 
-            y += 8f;
-            GUI.Label(new Rect(x, y, inner, 28f),
-                "Priorities never reassign JobType. Use CREW assignment to change profession.",
-                DeepCoreBentoUi.LabelWrap(9, DeepCoreBentoUi.TextMuted));
-
-            if (DevMode.Enabled && _devPriorityPanel)
-            {
-                // filled via DEV strip separately
-            }
+            y += 10f;
+            GUI.Label(new Rect(x, y, inner, 32f),
+                "Priorities never change profession. Use Crew assignment to reassign jobs.",
+                DeepCoreBentoUi.LabelWrap(11, DeepCoreBentoUi.TextMuted));
         }
 
         static string ProfessionLabel(JobType job) => job switch
         {
-            JobType.Prospecting => "PROSPECTOR",
-            JobType.Excavation => "EXCAVATOR",
-            JobType.Hauling => "HAULER",
-            JobType.Refining => "REFINER",
-            JobType.Engineering => "ENGINEER",
-            JobType.Steward => "STEWARD",
-            _ => "UNASSIGNED",
+            JobType.Prospecting => "Prospector",
+            JobType.Excavation => "Excavator",
+            JobType.Hauling => "Hauler",
+            JobType.Refining => "Refiner",
+            JobType.Engineering => "Engineer",
+            JobType.Steward => "Steward",
+            _ => "Unassigned",
         };
 
         void DrawCrewDutyRow(
             ref float y, float x, float inner, WorkerRuntime selWr, string taskId, string label, Event e)
         {
-            const float dutyRowH = 28f;
+            const float dutyRowH = 32f;
             var row = new Rect(x, y, inner, dutyRowH - 2f);
             Block(row);
             bool hover = row.Contains(e.mousePosition);
             bool active = selWr?.Priorities != null && selWr.Priorities.ActiveTaskId == taskId;
             DeepCoreBentoUi.DrawSelected(row, false, hover);
 
-            GUI.Label(new Rect(row.x + 10f, row.y + 5f, inner - 110f, 16f), label,
-                DeepCoreBentoUi.Label(10,
+            GUI.Label(new Rect(row.x + 12f, row.y + 7f, inner - 120f, 18f), label,
+                DeepCoreBentoUi.Label(13,
                     active ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextSecondary));
 
-            var btn = new Rect(row.xMax - 88f, row.y + 2f, 78f, 22f);
+            var btn = new Rect(row.xMax - 92f, row.y + 3f, 82f, 24f);
             Block(btn);
             bool responding = selWr?.Priorities != null
                               && selWr.Priorities.GetPriority(taskId) != WorkPriorityLevel.Off
                               && (int)selWr.Priorities.GetPriority(taskId) <= 2;
-            if (DeepCoreBentoUi.DrawControl(btn, "RESPOND", active: responding || active))
+            if (DeepCoreBentoUi.DrawControl(btn, "Respond", active: responding || active))
             {
                 if (selWr?.Priorities != null)
                 {
-                    // Enable response: OFF → P1, else cycle forward (same as priority chip).
                     if (selWr.Priorities.GetPriority(taskId) == WorkPriorityLevel.Off)
                         selWr.Priorities.SetPriority(taskId, WorkPriorityLevel.P1);
                     else
@@ -7390,7 +7382,9 @@ namespace DeepCore.FreeMovement
                     SkipSleep();
             }
 
-            DrawMission01Hud(Mathf.Max(topBar.xMax + 8f, Screen.width - 360f), topBar.yMax + 6f);
+            // Mission HUD shares the right column with exclusive popups — hide while open.
+            if (_hudPopup == HudPopupKind.None)
+                DrawMission01Hud(Mathf.Max(topBar.xMax + 8f, Screen.width - 360f), topBar.yMax + 6f);
 
             // ——— Left crew column (scanner stacks above roster; never overlaps) ———
             float faceW = WorkerFaceMonitor.DefaultWidth;
