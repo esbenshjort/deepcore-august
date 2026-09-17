@@ -108,6 +108,7 @@ namespace DeepCore.FreeMovement
         bool _devPriorityPanel;
         string _prioHoverTaskTip;
         string _prioHoverCellTip;
+        readonly List<WorkTaskDefinition> _prioJobTaskBuf = new(12);
         Transform _trackRoot;
         DeliveryCalculator _calc;
         BasecampYard _yard;
@@ -4499,209 +4500,227 @@ namespace DeepCore.FreeMovement
                 _world, _collapse, _mineInfra, _worker, _hauler, _refiner, _engineer,
                 _prospector, _scanHistory != null ? _scanHistory.Analyst : null,
                 _steward, _campLife, _crewWorkers, CrewWorldPos, BasecampPos);
-            int nWorkers = _crewWorkers.Length;
-            var tasks = WorkTaskRegistry.All;
-            const float nameCol = 108f;
-            const float cellW = 52f;
-            const float rowH = 26f;
-            const float headerH = 36f;
-            float gridW = nameCol + nWorkers * cellW + 16f;
-            float detailH = 118f;
-            float catPad = 18f * 4f;
-            float gridH = headerH + tasks.Count * rowH + catPad + 8f;
-            float pw = Mathf.Max(420f, gridW + 28f);
-            float ph = Mathf.Min(Screen.height - 100f, gridH + detailH + 56f);
-            float bx = Screen.width - pw - 12f - HudToolStripReserve;
-            float by = 56f;
+
+            Event e = Event.current;
+            int nWorkers = 0;
+            for (int i = 0; i < _crewWorkers.Length; i++)
+                if (_crewWorkers[i] != null) nWorkers++;
+
+            var selWr = FindCrewWorker(_prioUiSelectedWorkerId);
+            if (selWr == null && _crewWorkers.Length > 0)
+            {
+                selWr = _crewWorkers[0];
+                if (selWr != null) _prioUiSelectedWorkerId = selWr.WorkerId;
+            }
+            var selJob = GetAssignmentJob(selWr);
+            WorkTaskRegistry.CollectForJob(selJob, _prioJobTaskBuf);
+
+            const float rowH = 30f;
+            const float taskRowH = 32f;
+            const float dutyRowH = 32f;
+            const float sectionGap = 18f;
+            float assignH = 20f + nWorkers * rowH;
+            float detailH = 22f + Mathf.Max(1, _prioJobTaskBuf.Count) * taskRowH;
+            float dutiesH = 20f + 3 * dutyRowH;
+            float pw = 360f;
+            float ph = Mathf.Min(
+                Screen.height - 80f,
+                64f + assignH + sectionGap + detailH + sectionGap + dutiesH + 40f);
+            // Clear of right tool strip — never sit under ASSIGN / PRIO buttons.
+            float bx = Screen.width - pw - 16f - HudToolStripReserve;
+            float by = 52f;
             var panel = new Rect(bx, by, pw, ph);
-            DrawCyberPanel(panel, lit: true, accentOverride: UiGreen);
+            DeepCoreBentoUi.DrawPanel(panel);
             Block(panel);
 
-            float x = panel.x + 12f;
-            float y = panel.y + 8f;
-            float inner = pw - 24f;
-            GUI.Label(new Rect(x, y, inner * 0.7f, 16f), "PRIORITIES",
-                LabelStyle(12, UiGreen, bold: true));
-            GUI.Label(new Rect(x + inner * 0.55f, y + 2f, inner * 0.45f, 14f),
-                "LMB cycle · RMB reverse", LabelStyle(9, UiMute));
-            y += 20f;
-            GUI.Label(new Rect(x, y, inner, 12f),
-                "Same task list for every worker — jobs are specialization, not permission",
-                LabelStyle(9, UiDim));
+            float pad = 18f;
+            float x = panel.x + pad;
+            float y = panel.y + 16f;
+            float inner = pw - pad * 2f;
+
+            GUI.Label(new Rect(x, y, inner, 22f), "Work Priorities",
+                DeepCoreBentoUi.Label(16, DeepCoreBentoUi.TextPrimary, bold: true));
+            y += 22f;
+            GUI.Label(new Rect(x, y, inner, 16f),
+                "Click a priority to cycle · right-click reverses",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted));
+            y += 22f;
+
+            GUI.Label(new Rect(x, y, inner, 14f), "Crew",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted, bold: true));
             y += 16f;
 
-            // Header workers
-            GUI.Label(new Rect(x, y, nameCol, headerH - 8f), "TASK", LabelStyle(9, UiCyan, bold: true));
-            for (int w = 0; w < nWorkers; w++)
+            for (int i = 0; i < _crewWorkers.Length; i++)
             {
-                var wr = _crewWorkers[w];
+                var wr = _crewWorkers[i];
                 if (wr == null) continue;
-                float cx = x + nameCol + w * cellW;
-                bool selW = wr.WorkerId == _prioUiSelectedWorkerId;
-                var hr = new Rect(cx, y, cellW - 2f, headerH - 8f);
-                Block(hr);
-                Color hc = selW ? UiCyan : AccentForWorkerId(wr.WorkerId);
-                string shortN = wr.DisplayName.Length <= 5
-                    ? wr.DisplayName.ToUpperInvariant()
-                    : wr.DisplayName.Substring(0, 4).ToUpperInvariant();
-                GUI.Label(hr, shortN, LabelStyle(9, hc, bold: true));
-                if (GUI.Button(hr, GUIContent.none, GUIStyle.none))
+                var job = GetAssignmentJob(wr);
+                bool sel = wr.WorkerId == _prioUiSelectedWorkerId;
+                var row = new Rect(x, y, inner, rowH - 2f);
+                Block(row);
+                bool hover = row.Contains(e.mousePosition);
+                DeepCoreBentoUi.DrawSelected(row, sel, hover);
+
+                Color nameCol = sel ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextSecondary;
+                GUI.Label(new Rect(row.x + 12f, row.y + 6f, 92f, 18f),
+                    wr.DisplayName,
+                    DeepCoreBentoUi.Label(13, nameCol, bold: sel));
+
+                GUI.Label(new Rect(row.x + 108f, row.y + 7f, 110f, 16f), ProfessionLabel(job),
+                    DeepCoreBentoUi.Label(12,
+                        sel ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextMuted));
+
+                string taskLab = WorkPriorityDirector.ActiveTaskShortLabel(wr);
+                if (!string.IsNullOrEmpty(taskLab))
+                {
+                    GUI.Label(new Rect(row.x + 220f, row.y + 7f, inner - 232f, 16f),
+                        taskLab,
+                        DeepCoreBentoUi.Label(12, DeepCoreBentoUi.Positive));
+                }
+
+                if (GUI.Button(row, GUIContent.none, GUIStyle.none))
                     _prioUiSelectedWorkerId = wr.WorkerId;
-            }
-            y += headerH - 4f;
-
-            WorkTaskCategory lastCat = (WorkTaskCategory)255;
-            Event e = Event.current;
-            for (int t = 0; t < tasks.Count; t++)
-            {
-                var def = tasks[t];
-                if (def.Category != lastCat)
-                {
-                    lastCat = def.Category;
-                    GUI.Label(new Rect(x, y, inner, 14f), WorkTaskRegistry.CategoryLabel(def.Category),
-                        LabelStyle(8, UiAmber, bold: true));
-                    y += 15f;
-                }
-
-                var nameR = new Rect(x, y, nameCol - 4f, rowH - 2f);
-                Block(nameR);
-                bool hoverTask = nameR.Contains(e.mousePosition);
-                GUI.Label(nameR, def.ShortName, LabelStyle(10, hoverTask ? UiWhite : UiCyan, bold: true));
-                if (hoverTask)
-                {
-                    var tip = new Rect(panel.x + 8f, panel.yMax - detailH + 4f, inner, 40f);
-                    // tip drawn in detail zone
-                    _prioHoverTaskTip = $"{def.DisplayName}\n{def.Tooltip}";
-                }
-
-                bool taskSel = def.Id == _prioUiSelectedTaskId;
-                if (GUI.Button(nameR, GUIContent.none, GUIStyle.none))
-                    _prioUiSelectedTaskId = def.Id;
-
-                for (int w = 0; w < nWorkers; w++)
-                {
-                    var wr = _crewWorkers[w];
-                    if (wr?.Priorities == null) continue;
-                    float cx = x + nameCol + w * cellW;
-                    var cell = new Rect(cx, y, cellW - 3f, rowH - 3f);
-                    Block(cell);
-                    var prio = wr.Priorities.GetPriority(def.Id);
-                    float tgt = wr.Priorities.GetTargetHours(def.Id);
-                    bool active = wr.Priorities.ActiveTaskId == def.Id;
-                    bool selected = wr.WorkerId == _prioUiSelectedWorkerId && def.Id == _prioUiSelectedTaskId;
-
-                    Color fill = prio switch
-                    {
-                        WorkPriorityLevel.P1 => new Color(0.08f, 0.22f, 0.2f, 0.92f),
-                        WorkPriorityLevel.P2 => new Color(0.06f, 0.14f, 0.18f, 0.88f),
-                        WorkPriorityLevel.P3 => new Color(0.05f, 0.08f, 0.1f, 0.82f),
-                        WorkPriorityLevel.P4 => new Color(0.04f, 0.05f, 0.06f, 0.75f),
-                        _ => new Color(0.03f, 0.03f, 0.04f, 0.65f),
-                    };
-                    var prev = GUI.color;
-                    GUI.color = fill;
-                    GUI.DrawTexture(cell, Texture2D.whiteTexture);
-                    GUI.color = prev;
-                    Color border = selected ? UiCyan
-                        : active ? UiGreen
-                        : prio == WorkPriorityLevel.P1 ? UiGreen
-                        : prio == WorkPriorityLevel.Off ? UiMute
-                        : UiDim;
-                    DrawRectBorder(cell, border, selected || active ? 2f : 1f);
-
-                    string lab = prio == WorkPriorityLevel.Off ? "OFF" : ((int)prio).ToString();
-                    Color tc = prio == WorkPriorityLevel.Off ? UiMute
-                        : prio == WorkPriorityLevel.P1 ? UiGreen
-                        : prio == WorkPriorityLevel.P2 ? UiCyan
-                        : UiWhite;
-                    GUI.Label(new Rect(cell.x, cell.y + 1f, cell.width, 14f), lab,
-                        LabelStyle(11, tc, bold: true));
-                    if (tgt > 0.01f && def.SupportsHourTarget)
-                    {
-                        GUI.Label(new Rect(cell.x, cell.y + 13f, cell.width, 11f),
-                            $"{tgt:0.#}h", LabelStyle(8, UiDim));
-                    }
-                    if (active)
-                        GUI.Label(new Rect(cell.xMax - 10f, cell.y + 2f, 9f, 9f), "•",
-                            LabelStyle(10, UiGreen, bold: true));
-
-                    if (cell.Contains(e.mousePosition))
-                    {
-                        _prioHoverCellTip =
-                            $"{wr.DisplayName} // {def.ShortName}\n" +
-                            $"Priority: {lab}\n" +
-                            $"Target: {tgt:0.0}h\n" +
-                            $"Completed: {wr.Priorities.GetWorkedHours(def.Id):0.0}h\n" +
-                            WorkPriorityResolver.WhySuitable(wr, def, GetAssignmentJob(wr));
-                        if (e.type == EventType.MouseDown && e.button == 0)
-                        {
-                            wr.Priorities.CyclePriority(def.Id, reverse: false);
-                            _prioUiSelectedWorkerId = wr.WorkerId;
-                            _prioUiSelectedTaskId = def.Id;
-                            e.Use();
-                        }
-                        else if (e.type == EventType.MouseDown && e.button == 1)
-                        {
-                            wr.Priorities.CyclePriority(def.Id, reverse: true);
-                            _prioUiSelectedWorkerId = wr.WorkerId;
-                            _prioUiSelectedTaskId = def.Id;
-                            e.Use();
-                        }
-                    }
-                }
                 y += rowH;
             }
 
-            // Detail panel
-            y = panel.yMax - detailH + 2f;
-            DrawRectBorder(new Rect(panel.x + 8f, y - 4f, inner + 8f, 1f), UiDim, 1f);
-            var selWr = FindCrewWorker(_prioUiSelectedWorkerId);
-            var selDef = WorkTaskRegistry.Get(_prioUiSelectedTaskId);
-            if (selWr?.Priorities != null && selDef != null)
-            {
-                var pref = selWr.Priorities;
-                var prio = pref.GetPriority(selDef.Id);
-                float tgt = pref.GetTargetHours(selDef.Id);
-                float done = pref.GetWorkedHours(selDef.Id);
-                var avail = _priorities.Context.World != null
-                    ? _priorities.Context.Probe(selDef.Id)
-                    : WorkAvailabilityResult.None("—");
-                string status = pref.ActiveTaskId == selDef.Id ? "ACTIVE"
-                    : avail.Available ? "AVAILABLE" : "NO WORK";
-                GUI.Label(new Rect(x, y, inner, 14f),
-                    $"{selDef.DisplayName.ToUpperInvariant()}  ·  {selWr.DisplayName.ToUpperInvariant()}",
-                    LabelStyle(10, UiWhite, bold: true));
-                y += 16f;
-                GUI.Label(new Rect(x, y, inner, 12f),
-                    $"Priority: {(prio == WorkPriorityLevel.Off ? "OFF" : ((int)prio).ToString())}    " +
-                    $"Shift target: {tgt:0.0}h    Completed: {done:0.0}h    {status}",
-                    LabelStyle(9, UiCyan));
-                y += 16f;
+            y += 8f;
+            DeepCoreBentoUi.DrawDivider(x, y, inner);
+            y += sectionGap - 4f;
 
-                if (selDef.SupportsHourTarget)
+            string detailTitle = selWr != null
+                ? $"{selWr.DisplayName}  ·  {ProfessionLabel(selJob)}"
+                : "—";
+            GUI.Label(new Rect(x, y, inner, 16f), detailTitle,
+                DeepCoreBentoUi.Label(13, DeepCoreBentoUi.TextPrimary, bold: true));
+            y += 20f;
+
+            if (selWr?.Priorities == null || selJob == JobType.Unassigned)
+            {
+                GUI.Label(new Rect(x, y, inner, 18f),
+                    "Assign a profession in Crew to edit priorities.",
+                    DeepCoreBentoUi.Label(12, DeepCoreBentoUi.TextMuted));
+                y += taskRowH;
+            }
+            else
+            {
+                for (int t = 0; t < _prioJobTaskBuf.Count; t++)
                 {
-                    float bw = 36f;
-                    if (DrawCyberButton(new Rect(x, y, bw, 20f), "−", false, UiDim))
-                        pref.AdjustTargetHours(selDef.Id, -WorkerPriorityPrefs.HourStep);
-                    GUI.Label(new Rect(x + bw + 6f, y + 2f, 64f, 16f), $"{tgt:0.0}h",
-                        LabelStyle(10, UiWhite, bold: true));
-                    if (DrawCyberButton(new Rect(x + bw + 70f, y, bw, 20f), "+", false, UiCyan))
-                        pref.AdjustTargetHours(selDef.Id, WorkerPriorityPrefs.HourStep);
-                    if (DrawCyberButton(new Rect(x + bw + 114f, y, 88f, 20f), "CLEAR TARGET", false, UiAmber))
-                        pref.SetTargetHours(selDef.Id, 0f);
-                    y += 24f;
+                    var def = _prioJobTaskBuf[t];
+                    var pref = selWr.Priorities;
+                    var prio = pref.GetPriority(def.Id);
+                    bool active = pref.ActiveTaskId == def.Id;
+                    bool taskSel = def.Id == _prioUiSelectedTaskId;
+                    var row = new Rect(x, y, inner, taskRowH - 2f);
+                    Block(row);
+                    bool hover = row.Contains(e.mousePosition);
+                    DeepCoreBentoUi.DrawSelected(row, taskSel, hover);
+
+                    Color nameC = taskSel || active
+                        ? DeepCoreBentoUi.TextPrimary
+                        : DeepCoreBentoUi.TextSecondary;
+                    GUI.Label(new Rect(row.x + 12f, row.y + 7f, 168f, 18f),
+                        def.DisplayName,
+                        DeepCoreBentoUi.Label(13, nameC, bold: taskSel || active));
+
+                    string lab = prio == WorkPriorityLevel.Off ? "Off" : ((int)prio).ToString();
+                    var chip = new Rect(row.x + 188f, row.y + 4f, 40f, 22f);
+                    Block(chip);
+                    if (DeepCoreBentoUi.DrawPriorityChip(chip, lab, active, taskSel))
+                    {
+                        pref.CyclePriority(def.Id, reverse: false);
+                        _prioUiSelectedTaskId = def.Id;
+                    }
+                    if (chip.Contains(e.mousePosition) && e.type == EventType.MouseDown && e.button == 1)
+                    {
+                        pref.CyclePriority(def.Id, reverse: true);
+                        _prioUiSelectedTaskId = def.Id;
+                        e.Use();
+                    }
+
+                    string status = active ? "Active" : "Idle";
+                    Color statusC = active ? DeepCoreBentoUi.Positive : DeepCoreBentoUi.TextMuted;
+                    GUI.Label(new Rect(row.x + 240f, row.y + 7f, 70f, 18f), status,
+                        DeepCoreBentoUi.Label(12, statusC, bold: active));
+
+                    if (hover)
+                    {
+                        _prioHoverTaskTip = $"{def.DisplayName}\n{def.Tooltip}";
+                        _prioHoverCellTip =
+                            $"{selWr.DisplayName} · {def.ShortName}\n" +
+                            $"Priority: {lab}\n" +
+                            WorkPriorityResolver.WhySuitable(selWr, def, selJob);
+                    }
+                    if (GUI.Button(new Rect(row.x, row.y, 180f, row.height), GUIContent.none, GUIStyle.none))
+                        _prioUiSelectedTaskId = def.Id;
+
+                    y += taskRowH;
                 }
-
-                string tip = !string.IsNullOrEmpty(_prioHoverCellTip) ? _prioHoverCellTip
-                    : !string.IsNullOrEmpty(_prioHoverTaskTip) ? _prioHoverTaskTip
-                    : WorkPriorityResolver.WhySuitable(selWr, selDef, GetAssignmentJob(selWr));
-                GUI.Label(new Rect(x, y, inner, 48f), tip, LabelStyle(8, UiDim));
             }
 
-            if (DevMode.Enabled && _devPriorityPanel)
+            y += 8f;
+            DeepCoreBentoUi.DrawDivider(x, y, inner);
+            y += sectionGap - 4f;
+
+            GUI.Label(new Rect(x, y, inner, 14f), "Crew duties",
+                DeepCoreBentoUi.Label(11, DeepCoreBentoUi.TextMuted, bold: true));
+            y += 16f;
+
+            DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.Rescue,
+                "Rescue", e);
+            DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.TreatInjuries,
+                "Emergency first aid", e);
+            DrawCrewDutyRow(ref y, x, inner, selWr, WorkerGenericTaskIds.ClearDebris,
+                "Emergency access clearance", e);
+
+            y += 10f;
+            GUI.Label(new Rect(x, y, inner, 32f),
+                "Priorities never change profession. Use Crew assignment to reassign jobs.",
+                DeepCoreBentoUi.LabelWrap(11, DeepCoreBentoUi.TextMuted));
+        }
+
+        static string ProfessionLabel(JobType job) => job switch
+        {
+            JobType.Prospecting => "Prospector",
+            JobType.Excavation => "Excavator",
+            JobType.Hauling => "Hauler",
+            JobType.Refining => "Refiner",
+            JobType.Engineering => "Engineer",
+            JobType.Steward => "Steward",
+            _ => "Unassigned",
+        };
+
+        void DrawCrewDutyRow(
+            ref float y, float x, float inner, WorkerRuntime selWr, string taskId, string label, Event e)
+        {
+            const float dutyRowH = 32f;
+            var row = new Rect(x, y, inner, dutyRowH - 2f);
+            Block(row);
+            bool hover = row.Contains(e.mousePosition);
+            bool active = selWr?.Priorities != null && selWr.Priorities.ActiveTaskId == taskId;
+            DeepCoreBentoUi.DrawSelected(row, false, hover);
+
+            GUI.Label(new Rect(row.x + 12f, row.y + 7f, inner - 120f, 18f), label,
+                DeepCoreBentoUi.Label(13,
+                    active ? DeepCoreBentoUi.TextPrimary : DeepCoreBentoUi.TextSecondary));
+
+            var btn = new Rect(row.xMax - 92f, row.y + 3f, 82f, 24f);
+            Block(btn);
+            bool responding = selWr?.Priorities != null
+                              && selWr.Priorities.GetPriority(taskId) != WorkPriorityLevel.Off
+                              && (int)selWr.Priorities.GetPriority(taskId) <= 2;
+            if (DeepCoreBentoUi.DrawControl(btn, "Respond", active: responding || active))
             {
-                // filled via DEV strip separately
+                if (selWr?.Priorities != null)
+                {
+                    if (selWr.Priorities.GetPriority(taskId) == WorkPriorityLevel.Off)
+                        selWr.Priorities.SetPriority(taskId, WorkPriorityLevel.P1);
+                    else
+                        selWr.Priorities.CyclePriority(taskId, reverse: false);
+                    _prioUiSelectedTaskId = taskId;
+                    if (selWr != null) _prioUiSelectedWorkerId = selWr.WorkerId;
+                }
             }
+            y += dutyRowH;
         }
 
         static void DrawRectBorder(Rect r, Color c, float thickness)
@@ -7363,7 +7382,9 @@ namespace DeepCore.FreeMovement
                     SkipSleep();
             }
 
-            DrawMission01Hud(Mathf.Max(topBar.xMax + 8f, Screen.width - 360f), topBar.yMax + 6f);
+            // Mission HUD shares the right column with exclusive popups — hide while open.
+            if (_hudPopup == HudPopupKind.None)
+                DrawMission01Hud(Mathf.Max(topBar.xMax + 8f, Screen.width - 360f), topBar.yMax + 6f);
 
             // ——— Left crew column (scanner stacks above roster; never overlaps) ———
             float faceW = WorkerFaceMonitor.DefaultWidth;

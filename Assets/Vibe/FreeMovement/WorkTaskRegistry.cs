@@ -161,6 +161,22 @@ namespace DeepCore.FreeMovement
             return null;
         }
 
+        /// <summary>
+        /// Profession-scoped task list for Assign / Work Priorities UI.
+        /// FamiliarJob match only — never a permission gate for the resolver.
+        /// </summary>
+        public static void CollectForJob(JobType job, List<WorkTaskDefinition> into)
+        {
+            into.Clear();
+            if (job == JobType.Unassigned) return;
+            for (int i = 0; i < Tasks.Length; i++)
+            {
+                var t = Tasks[i];
+                if (t.FamiliarJob == job)
+                    into.Add(t);
+            }
+        }
+
         public static string CategoryLabel(WorkTaskCategory c) => c switch
         {
             WorkTaskCategory.Emergency => "EMERGENCY",
