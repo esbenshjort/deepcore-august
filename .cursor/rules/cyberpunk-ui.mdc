@@ -1,0 +1,71 @@
+---
+description: Premium industrial cyberpunk mining UI — visual + motion standard for all existing and future UI
+alwaysApply: true
+---
+
+# Mining Game — UI Design & Motion Rules
+
+Apply this design and motion system to the project's existing UI and to any future UI that is **explicitly requested**.
+
+**Do not create new UI, screens, panels, systems, features, or components unless a separate instruction explicitly asks for them.**
+
+## Scope
+- Visual and motion standard only
+- When touching existing UI: preserve functionality, hierarchy, bindings, logic, navigation, and content unless told otherwise
+- Only restyle or animate what already exists
+
+## Visual identity
+**near-black industrial UI + transparent glass + cyan/blue neon + restrained green highlights + precise technical motion**
+
+Do not introduce other styles. Do not invent new UI structures to satisfy the style.
+
+## Color
+- Background / panel fill: near-black / very dark navy, transparent
+- Primary accent: electric cyan / blue — navigation, interaction, system info
+- Secondary accent: neon green — resources, positive states, success
+- Neutral text: cold white / light blue-gray — primary information
+- Warning: amber / orange
+- Critical: red
+
+Never use arbitrary accents.
+
+## Panels
+Transparent technical displays: thin 1–2px borders, subtle cyan edge light, angular/chamfered corners, thin dividers, small corner brackets, very subtle scan-line/grid. Readable over gameplay.
+
+Avoid: large opaque rectangles, rounded cards, pills, mobile/SaaS styling, excessive decoration.
+
+## Glow
+Subtle, controlled — active borders, selection, progress, important values, warnings. Never panel-wide bloom or heavy blur.
+
+## Typography
+Technical / industrial: uppercase headings, short labels, strong numeric readouts, compact spacing. Values dominate labels. Prefer monospaced feel for data when practical.
+
+## Shape language
+Rectangles, angular cuts, chamfers, thin lines, brackets, segmented bars. Avoid soft circles/curves unless gauges require them.
+
+## Buttons
+Machine controls: transparent dark fill, subtle border, low cyan detail. Hover = brighter border + slight fill. Press = quick brightness/compression. Selected = persistent accent line/marker. Disabled = reduced opacity, almost no glow. Never large glowing rectangles.
+
+## HUD layout
+Keep center clear. Permanent info at corners/edges. Group visually; primary high contrast, secondary quieter, tertiary very low intensity.
+
+## Motion
+Fast, controlled, precise, subtle, mechanical. No bounce/elastic/overshoot.
+
+Timing (approx): hover 80–120ms · press 60–100ms · small state 100–160ms · panel 180–280ms · large screen 250–400ms · ambient slow/subtle.
+
+Panel enter: fade + 8–24px slide + border illuminate + content then secondary details. Exit slightly faster. Data readouts: brief emphasize on change, optional short count — not continuous animation. Scanner: thin scan lines, sweeps, expanding rings — never large opaque animated graphics.
+
+## Unity constraints
+Implement with practical uGUI / UI Toolkit / IMGUI / lightweight sprites/materials. Prefer transparent panels, sliced borders, masks, simple gradients. Avoid expensive realtime blur as core identity.
+
+## Reusable components (when UI creation is explicitly requested)
+Reuse established styles: CyberPanel, CyberButton, CyberIconButton, CyberTab, StatReadout, ProgressBar, SegmentedBar, WarningIndicator, ResourceRow, UpgradeCard, SectionHeader, Tooltip, ModalPanel.
+
+## World overlays (scan / radar)
+Hairline neon strokes; soft vector outline zones for scan estimates; quiet transparency. Same industrial cyber language.
+
+## Priority
+**clarity → hierarchy → consistency → responsiveness → atmosphere**
+
+When uncertain: simpler and more consistent.

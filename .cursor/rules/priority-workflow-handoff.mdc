@@ -1,0 +1,61 @@
+---
+description: FreeMovement Priority System handoff — continue from Sep 2026 thread after machine transfer
+alwaysApply: true
+---
+
+# Priority / FreeMovement workflow handoff
+
+Use this when continuing Deep Core FreeMovement work after copying this Unity project folder to another computer. Local chat history does **not** travel; this rule + `BenchmarkResults/` are the durable context.
+
+## Project
+
+- Unity FreeMovement mining prototype (Deep Core)
+- Latest local commit (if present): priority system V1–V1.2, yield/claim fixes, audit reports
+- UI: follow existing cyberpunk-ui rule — restyle only; do not invent new UI unless asked
+
+## What was built (committed in project)
+
+Priority System V1 → V1.1 → V1.2:
+
+- Universal task ids (`WorkerGenericTaskIds`), prefs (`WorkerPriorityPrefs`), availability probes (`WorkAvailability`)
+- Resolver + director (`WorkPriorityResolver`, `WorkPriorityDirector`, `WorkTaskRegistry`)
+- Host integration in `FreeMovementSocketMapRunner` + person hosts (Engineer / Steward / Prospector / Refiner / etc.)
+- OFF must actually stop work (hosts honor priority / `HostAllows`)
+- Hard bands: Priority 1 must beat Priority 2 (not soft score alone) — e.g. haul vs refine (Elena case)
+- Assignment regression fix: temporary higher-band work uses **TemporaryYield / LeaveHost**, not full Unassign that wipes `JobType` / breaks player orders
+- Soft vacant-station claims only; do not steal occupied stations casually
+- Dual authority awareness: assignment vs host bind vs `ActiveTaskId` / `PersonTaskAuthority`
+
+Rescue / collapse: `WorkerRescue`, `TunnelCollapse` hooks, universal rescue audits
+
+## Key reports (read these, don’t reinvent)
+
+- `BenchmarkResults/priority_system_v1_latest.md`
+- `BenchmarkResults/priority_system_v11_playmode_latest.md`
+- `BenchmarkResults/priority_off_authority_fix_latest.md`
+- `BenchmarkResults/priority_system_v12_full_authority_audit_latest.md`
+- `BenchmarkResults/priority_hard_band_fix_latest.md`
+- `BenchmarkResults/priority_assignment_input_regression_fix_latest.md`
+- `BenchmarkResults/worker_task_architecture_audit_latest.md` — **AUDIT ONLY**; no TaskDefinition implementation unless explicitly requested
+- Related: `universal_rescue_integration_v1_latest.md`, `debris_collapse_injury_rescue_audit_latest.md`
+
+## Explicit stops / do-nots
+
+- Do **not** implement TaskDefinition / full task-instance architecture unless the user asks
+- Architecture audit concluded smallest future seam ≈ adapters over hosts via `ActiveTaskId` — informational only
+- Prefer fixing hosts + yield/claim over ripping AssignmentManager
+
+## Still unverified in live Game view (next useful playtests)
+
+- Priority V1.1 playmode checklist A–K
+- Elena hard-band: P1 haul must preempt P2 refine when haul is valid
+- After band switch: workers must **not** show Unassigned / dead specialization; player orders must still work
+
+## How to continue on the new machine
+
+1. Open this folder in Cursor (File → Open Folder)
+2. Start a **new** chat
+3. Attach `@CURSOR_THREAD_EXPORT_PRIORITY.md` (or full `@CURSOR_THREAD_EXPORT.md`) and say:
+   `Continue from this exported thread. Treat it as prior conversation context.`
+4. Then say what to do next (e.g. “resume Priority playtest A–K”)
+5. Agent should treat reports above + the export as source of truth for prior decisions
